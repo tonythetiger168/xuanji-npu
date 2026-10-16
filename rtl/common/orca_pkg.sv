@@ -433,8 +433,8 @@ package orca_pkg;
     logic        complete;     // Execution finished
     uop_t        uop;
     xword_t      result;       // Execution result
-    logic        branch_taken; // Actual branch direction
-    xword_t      branch_target;
+    logic        branch_taken; // v6.3.5: 分支解析為預測失敗, retire 後須 redirect
+    xword_t      branch_target;// v6.3.5: redirect 目標 (正確的下一個 PC)
     logic        exception;    // Exception pending
     exception_t  exc_code;
     phys_reg_idx_t prd;        // Physical destination (from rename)
