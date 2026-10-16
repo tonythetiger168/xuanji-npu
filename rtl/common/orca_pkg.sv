@@ -286,6 +286,8 @@ package orca_pkg;
     xword_t       pred_target;    // BPU predicted target
     logic [2:0]   funct3;         // RISC-V funct3
     logic [6:0]   funct7;         // RISC-V funct7
+    logic         is_rvc;         // v6.3.5: 16-bit (RVC) 指令, 下一條 PC = pc+2
+    logic         is_word;        // v6.3.5: RV64 *W 運算 (OP-32 / OP-IMM-32), 結果 sext32
     exception_t   exc;            // Decoded exception (illegal inst, etc.)
   } uop_t;
 
