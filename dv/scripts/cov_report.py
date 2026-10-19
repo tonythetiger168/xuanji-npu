@@ -47,6 +47,7 @@ def main():
     ap.add_argument('--require', type=float)
     ap.add_argument('--list', type=int, default=40)
     ap.add_argument('--types', help='只統計這些類型 (逗號分隔)')
+    ap.add_argument('--hier-exclude', help='不統計階層符合此 regex 的點 (例: 子模組的 cover 在其自身 TB 量測)')
     ap.add_argument('--toggle-rtl', help='toggle 只統計符合此 regex 的檔案 (排除 checker / TB 自身訊號)')
     a = ap.parse_args()
     waivers = []
@@ -71,6 +72,8 @@ def main():
         if t == 'toggle' and a.toggle_rtl and not re.search(a.toggle_rtl, f):
             continue
         if a.types and t not in a.types.split(','):
+            continue
+        if a.hier_exclude and re.search(a.hier_exclude, d.get('h', '')):
             continue
         name = '%s:%s %s %s' % (f, d.get('l', '?'), d.get('h', ''), d.get('o', ''))
         tot[t] += 1
