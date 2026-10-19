@@ -226,23 +226,23 @@ module npu_core_tb #(parameter int N = 8, parameter int NCU = 4, parameter int N
     #1 do_reset(); n_rst++;
   endtask
 
-  // round-robin 折返: CU 0..NCU-2 執行長命令, 短命令連續落在最高編號的 CU 並各自完成 —
+  // round-robin 折返 (每個槽 j = 1..NCU-1): CU 0..j-1 執行長命令, 短命令連續落在 CU j 並各自完成 —
   // 完成輸出在「上一次選中者就是同一個 CU」時必須折返選到它
   task automatic directed_rr();
-    int nl = NCU - 1;
-    fork
-      begin
-        rec_t xs [$]; logic [7:0] is [$];
-        for (int c = 0; c < nl; c++) begin rec_t x; logic [7:0] id; prepare(KMAX, x, id); xs.push_back(x); is.push_back(id); end
-        foreach (xs[c]) issue(xs[c], is[c]);    // 先備妥資料再連續送出: CU 0..NCU-2 同時忙碌
-        for (int c = 0; c < 3; c++) begin
-          rec_t x; logic [7:0] id; int got0 = n_ok;
-          prepare(1, x, id); issue(x, id);
-          wait (n_ok > got0);                    // 前一個短命令完成後才送下一個
+    for (int j = 1; j < NCU; j++)
+      fork
+        begin
+          rec_t xs [$]; logic [7:0] is [$];
+          for (int c = 0; c < j; c++) begin rec_t x; logic [7:0] id; prepare(KMAX, x, id); xs.push_back(x); is.push_back(id); end
+          foreach (xs[c]) issue(xs[c], is[c]);  // 先備妥資料再連續送出: CU 0..j-1 同時忙碌
+          for (int c = 0; c < 3; c++) begin
+            rec_t x; logic [7:0] id; int got0 = n_ok;
+            prepare(1, x, id); issue(x, id);
+            wait (n_ok > got0);                  // 前一個短命令完成後才送下一個
+          end
         end
-      end
-      begin cpl_bp = 0; consumer(nl + 3); end
-    join
+        begin cpl_bp = 0; consumer(j + 3); end
+      join
   endtask
 
   task automatic perf_write();
