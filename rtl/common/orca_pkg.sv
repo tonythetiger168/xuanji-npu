@@ -220,6 +220,14 @@ package orca_pkg;
 
 `define EXC_NONE '0   // exception_t is packed; all-zero = no exception
 
+  // uop 攜帶的 decode 例外 (v6.3.7): decode 只產生 illegal instruction (mcause 2),
+  // tval = 32-bit 指令編碼 (SYSTEM / CSR 亦以此欄位傳遞原始編碼給 csr_unit, valid=0)。
+  // 原本攜帶完整 exception_t (code 4 + tval 64 bit), 其中 35 bit 恆定。ROB 轉成 exception_t。
+  typedef struct packed {
+    logic        valid;
+    logic [31:0] tval;
+  } uop_exc_t;
+
   // ---------------------------------------------------------------------------
   // Opcode Type (internal uop opcode, decoded from RISC-V major opcode)
   // ---------------------------------------------------------------------------
@@ -270,25 +278,20 @@ package orca_pkg;
     rob_idx_t     rob_idx;        // Assigned ROB entry
     uop_id_t      uop_id;         // Unique tag for trace/debug
     tid_t         tid;            // SMT thread ID
-    sq_idx_t      sq_idx;         // Store queue index (stores only)
-    lq_idx_t      lq_idx;         // Load queue index (loads only)
     logic         is_branch;      // Branch-type uop
     logic         is_cond;        // Conditional (direct) branch
-    logic         is_indirect;    // Indirect branch (JALR)
     logic         is_return;      // Return (pop RAS)
     logic         is_call;        // Call (push RAS)
     logic         is_load;        // Load-type
     logic         is_store;       // Store-type
     logic         is_fp;          // Uses FP register file
-    logic         is_vec;         // Uses vector register file
-    logic         is_aix;         // AIX tensor instruction
     logic         pred_taken;     // BPU prediction (1 = taken)
     xword_t       pred_target;    // BPU predicted target
     logic [2:0]   funct3;         // RISC-V funct3
     logic [6:0]   funct7;         // RISC-V funct7
     logic         is_rvc;         // v6.3.5: 16-bit (RVC) 指令, 下一條 PC = pc+2
     logic         is_word;        // v6.3.5: RV64 *W 運算 (OP-32 / OP-IMM-32), 結果 sext32
-    exception_t   exc;            // Decoded exception (illegal inst, etc.)
+    uop_exc_t     exc;            // Decoded exception (illegal inst) / SYSTEM 原始編碼
   } uop_t;
 
 `define UOP_NOP '0   // uop_t is packed; opcode 0 = OP_NOP
