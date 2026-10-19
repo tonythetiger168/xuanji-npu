@@ -65,11 +65,11 @@ module npu_core_tb #(parameter int N = 8, parameter int NCU = 4, parameter int N
     if ((h_rd_req || h_wr_req) && dut.rd_req[NCU-1:0] != '0) n_ovl++;
   end
 
-  // watchdog: 長時間沒有任何完成 → 視為卡死 (例如 id 錯誤導致 slot 永不釋放)
+  // watchdog: 長時間沒有任何命令送出或完成 → 視為卡死 (例如 id 錯誤導致 slot 永不釋放, 系統閒置但 TB 永遠等待)
   longint last_prog = 0;
-  int n_ok_q = 0;
+  int n_ok_q = 0, n_iss_q = 0;
   always @(posedge clk) begin
-    if (n_ok != n_ok_q || !busy) begin n_ok_q = n_ok; last_prog = $time; end
+    if (n_ok != n_ok_q || n_issued != n_iss_q) begin n_ok_q = n_ok; n_iss_q = n_issued; last_prog = $time; end
     else if ($time - last_prog > 64'd20_000_000) begin
       $display("ERROR: watchdog - no completion for 2M cycles"); $display("TB FAIL"); $finish;
     end
