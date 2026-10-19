@@ -38,8 +38,9 @@ PY
   nt=$((nt + 1))
   verilator --binary --timing -j "${JOBS:-4}" --assert -Wno-fatal -Wno-lint -Wno-style -GN=$N \
     $([ $top = npu_core_tb ] && echo "-GNCU=$NCU -GNB=$NB -GDEPTH=$DEPTH") --Mdir "$M/$n.obj" -Irtl/common \
-    $src --top-module $top > "$M/$n.build" 2>&1 || { echo "$n: BUILD FAIL"; surv=1; return; }
+    $src --top-module $top > "$M/$n.build" 2>&1 || { echo "$n: BUILD FAIL"; rm -rf "$M/$n.obj"; surv=1; return; }
   "$M/$n.obj/V$top" +seed=7 $args > "$M/$n.log" 2>&1
+  rm -rf "$M/$n.obj"                       # 每個 mutant 的建置目錄數百 MB: 用完即刪
   if grep -q "TB PASS" "$M/$n.log" && ! grep -q "Assertion failed" "$M/$n.log"; then
     echo "$n: SURVIVED"; surv=1
   else
