@@ -1,0 +1,4 @@
+# NPU coverage 豁免 (所有組態共用; dv/scripts/cov_report.py 格式: <類型> <regex> # <理由>)
+# regex 比對「檔案:行 階層 點名稱」(--by-module 時階層只剩 generate 範圍)。
+# 分類: [S] 儲存陣列  [C] 結構常數 (參數決定)  [T] 刻意接死 / 恆定輸出  [U] 以 SVA 證明不可達  [V] 工具限制
+# 目前沒有共用豁免。

@@ -5,7 +5,7 @@
 Verilator 對超過上限的訊號會默默不產生 toggle 點; 本工具從產生的 C++ 標頭
 (<Mdir>/*___024root.h) 依儲存型別推算每個訊號的位元數, 讓被排除的訊號明確列入報告。
 
-用法: wide_signals.py <Mdir> <max_width>
+用法: wide_signals.py <Mdir> <max_width> [signal prefix (預設 lockstep TB 的 dut)]
 """
 import glob
 import re
@@ -31,6 +31,8 @@ def bits(t):
 
 def main():
     mdir, cap = sys.argv[1], int(sys.argv[2])
+    pre = sys.argv[3] if len(sys.argv) > 3 else 'orca_lockstep_tb__DOT__dut__DOT__'
+    top = pre.split('__DOT__')[0] + '__DOT__'
     out = []
     for h in glob.glob(mdir + '/*___024root.h'):
         for ln in open(h, encoding='utf-8', errors='replace'):
@@ -38,11 +40,11 @@ def main():
             if not m:
                 continue
             name = m.group(2)
-            if not name.startswith(('orca_lockstep_tb__DOT__dut__DOT__',)) or '__Vdly' in name or '__Vcov' in name or '__Vtogcov' in name:
+            if not name.startswith(pre) or '__Vdly' in name or '__Vcov' in name or '__Vtogcov' in name:
                 continue
             w = bits(m.group(1))
             if w > cap:
-                out.append((w, name.replace('orca_lockstep_tb__DOT__', '').replace('__DOT__', '.')))
+                out.append((w, name.replace(top, '').replace('__DOT__', '.')))
     print('toggle 未量測 (總寬度 > --coverage-max-width %d): %d 個訊號' % (cap, len(out)))
     try:
         for w, n in sorted(out, reverse=True):

@@ -1,0 +1,4 @@
+# Xuanji-X1-Nano (N=4): 結構常數
+branch npu_gemm_cu\.sv:\d+ \S* else # [C] N=4: C (4x4 INT32 = 64 B) 只佔 1 個 line, 寫回後必定結束 (mma_busy 恆 0)
+expr npu_gemm_cu\.sv:\d+ \S* \(mma_busy==1\) => 0 # [C] 同上
+covergroup npu_gemm_cu_sva\.sv:\d+ .*mid_line # [C] 同上: 沒有「還有下一個 C line」的寫回

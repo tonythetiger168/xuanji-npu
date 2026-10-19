@@ -47,6 +47,9 @@ def main():
     ap.add_argument('--require', type=float)
     ap.add_argument('--list', type=int, default=40)
     ap.add_argument('--types', help='只統計這些類型 (逗號分隔)')
+    ap.add_argument('--by-module', action='store_true',
+                    help='模組層級合併: 同一模組的所有 instance (不同 TB / 不同上層) 的同一點合併計數; '
+                         '模組內的 generate 範圍 (名稱 g_*) 仍分開')
     ap.add_argument('--hier-exclude', help='不統計階層符合此 regex 的點 (例: 子模組的 cover 在其自身 TB 量測)')
     ap.add_argument('--toggle-rtl', help='toggle 只統計符合此 regex 的檔案 (排除 checker / TB 自身訊號)')
     a = ap.parse_args()
@@ -63,7 +66,26 @@ def main():
             waivers.append([typ, re.compile(rx.strip()), why.strip(), 0])
     tot = collections.Counter(); hit = collections.Counter(); wv = collections.Counter()
     miss = collections.defaultdict(list)
-    for key, cnt in load(a.dat).items():
+    pts = load(a.dat)
+    if a.by_module:
+        merged = collections.OrderedDict()
+        for key, cnt in pts.items():
+            d = parse_point(key)
+            if a.hier_exclude and re.search(a.hier_exclude, d.get('h', '')):
+                continue
+            if d.get('t') == 'covergroup':      # covergroup 的 h 是 bin 名稱 (不含 instance 路徑), 原樣保留
+                merged[key] = merged.get(key, 0) + cnt
+                continue
+            segs = d.get('h', '').split('.')
+            tail = []
+            while segs and re.match(r'^g_\w*(\[\d+\])?$', segs[-1]):
+                tail.insert(0, segs.pop())
+            # 以 instance 名以外的欄位為鍵 (instance 名在不同上層可能不同, 例如 dut / u_cu / u_mma)
+            d['h'] = '.'.join(tail)
+            nk = '\x01'.join('%s\x02%s' % (k, v) for k, v in sorted(d.items()))
+            merged[nk] = merged.get(nk, 0) + cnt
+        pts = merged
+    for key, cnt in pts.items():
         d = parse_point(key)
         f = d.get('f', '')
         if not re.search(a.rtl, f):

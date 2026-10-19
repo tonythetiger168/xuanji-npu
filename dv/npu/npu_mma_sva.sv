@@ -19,7 +19,11 @@ module npu_mma_sva #(parameter int N = 8) (
   localparam logic [1:0] S_IDLE = 2'd0, S_RUN = 2'd1, S_DRAIN = 2'd2, S_OUT = 2'd3;
 
   default clocking cb @(posedge clk); endclocking
-  default disable iff (!rst_n);
+  // clk 可能是閘控時脈: 非同步 reset 若落在兩個取樣沿之間, 取樣時 rst_n 已回到 1, 但 $past 跨過了 reset。
+  // rst_seen 在 reset 時非同步設定、下一個取樣沿清除, 讓跨過 reset 的嘗試被停用。
+  logic rst_seen;
+  always_ff @(posedge clk or negedge rst_n) rst_seen <= !rst_n ? 1'b1 : 1'b0;
+  default disable iff (!rst_n || rst_seen);
 
   // ---------------- 協定 / 控制 ----------------
   a_busy:          assert property (busy == (st != S_IDLE));

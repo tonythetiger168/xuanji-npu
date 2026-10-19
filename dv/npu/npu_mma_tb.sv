@@ -7,8 +7,8 @@
 //   每 tile 隨機 test_en (ICG 強制開啟 / 實際閘控) — 兩者結果必須相同; 偶爾在運算中途 reset。
 // plusargs: +seed=N  +tiles=N (預設 400)
 //=============================================================================
-module npu_mma_tb;
-  localparam int N = 8, KMAX = 80;
+module npu_mma_tb #(parameter int N = 8);
+  localparam int KMAX = 80;
   logic clk = 1'b0, rst_n = 1'b0;
   logic test_en = 1'b0, start = 1'b0, a_signed = 1'b0, b_signed = 1'b0;
   logic in_valid = 1'b0, in_last = 1'b0, out_ready = 1'b0;
