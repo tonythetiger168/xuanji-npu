@@ -245,6 +245,21 @@ module npu_core_tb #(parameter int N = 8, parameter int NCU = 4, parameter int N
       join
   endtask
 
+  // 寫入公平性: 系統閒置時送一個命令 (分派到 CU0), host 同時持續寫入與其 C 第一個 line 同 bank 的 scratch line,
+  // 直到該命令完成 — 寫入仲裁若不是 round-robin, CU0 的寫回會被餓死 (a_wr_bounded)
+  task automatic directed_wr_fair();
+    rec_t x; logic [7:0] id; logic [25:0] scr; bit fin = 0;
+    logic [511:0] junk = {16{$urandom()}};
+    wait (!busy);
+    prepare(ur(1, 2 * SPL), x, id, 2);
+    scr = x.c + 26'(NB * ((CL + NB - 1) / NB));   // C 區之後、同 bank 的 line (仍在本命令的 slot 內)
+    fork
+      begin issue(x, id); end
+      begin cpl_bp = 0; consumer(1); fin = 1; end
+      begin #20; while (!fin) host_write(scr, junk); end
+    join
+  endtask
+
   task automatic perf_write();
     // 隨機寫入效能計數器 (含接近 2^48 的值: 驗證進位鏈與環繞)
     perf_wr = 1'b1;
@@ -337,6 +352,7 @@ module npu_core_tb #(parameter int N = 8, parameter int NCU = 4, parameter int N
     else if ($test$plusargs("long")) long_run();
     else begin
       if (NCU > 1) directed_rr();
+      repeat (3) directed_wr_fair();
       for (int done_cmds = 0; done_cmds < ncmds; ) begin
         int n;
         n = ur(1, 3 * NCU + 8);
