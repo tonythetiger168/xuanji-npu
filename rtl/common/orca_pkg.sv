@@ -297,6 +297,91 @@ package orca_pkg;
 `define UOP_NOP '0   // uop_t is packed; opcode 0 = OP_NOP
 
   // ---------------------------------------------------------------------------
+  // 前端 uop (v6.3.7): rename 之前不帶 rename / ROB / 年齡欄位 (prs*/prd*/rob_idx/uop_id),
+  // decoder 輸出另外不帶分支預測欄位 — 原本每一級都搬完整 uop_t, 這些欄位在前端恆 0
+  // ---------------------------------------------------------------------------
+  typedef struct packed {
+    opcode_type_t  opcode;
+    xword_t        pc;
+    xword_t        imm;
+    arch_reg_idx_t rs1, rs2, rd;
+    tid_t          tid;
+    logic          is_branch, is_cond, is_return, is_call, is_load, is_store, is_fp;
+    logic [2:0]    funct3;
+    logic [6:0]    funct7;
+    logic          is_rvc, is_word;
+    uop_exc_t      exc;
+  } dec_uop_t;
+
+  typedef struct packed {          // 欄位名稱與 uop_t 相同 (rename 以同一套程式碼讀取)
+    opcode_type_t  opcode;
+    xword_t        pc;
+    xword_t        imm;
+    arch_reg_idx_t rs1, rs2, rd;
+    tid_t          tid;
+    logic          is_branch, is_cond, is_return, is_call, is_load, is_store, is_fp;
+    logic          pred_taken;
+    xword_t        pred_target;
+    logic [2:0]    funct3;
+    logic [6:0]    funct7;
+    logic          is_rvc, is_word;
+    uop_exc_t      exc;
+  } fe_uop_t;
+
+  function automatic fe_uop_t dec2fe(dec_uop_t d, logic pred_taken, xword_t pred_target);
+    fe_uop_t f;
+    f.opcode = d.opcode;
+    f.pc = d.pc;
+    f.imm = d.imm;
+    f.rs1 = d.rs1;
+    f.rs2 = d.rs2;
+    f.rd = d.rd;
+    f.tid = d.tid;
+    f.is_branch = d.is_branch;
+    f.is_cond = d.is_cond;
+    f.is_return = d.is_return;
+    f.is_call = d.is_call;
+    f.is_load = d.is_load;
+    f.is_store = d.is_store;
+    f.is_fp = d.is_fp;
+    f.funct3 = d.funct3;
+    f.funct7 = d.funct7;
+    f.is_rvc = d.is_rvc;
+    f.is_word = d.is_word;
+    f.exc = d.exc;
+    f.pred_taken = pred_taken;  f.pred_target = pred_target;
+    return f;
+  endfunction
+
+  // rename 前的 uop → 完整 uop_t (rename / ROB / 年齡欄位為 0, 由 rename / dispatch 填入)
+  function automatic uop_t fe2uop(fe_uop_t f);
+    uop_t u;
+    u = '0;
+    u.opcode = f.opcode;
+    u.pc = f.pc;
+    u.imm = f.imm;
+    u.rs1 = f.rs1;
+    u.rs2 = f.rs2;
+    u.rd = f.rd;
+    u.tid = f.tid;
+    u.is_branch = f.is_branch;
+    u.is_cond = f.is_cond;
+    u.is_return = f.is_return;
+    u.is_call = f.is_call;
+    u.is_load = f.is_load;
+    u.is_store = f.is_store;
+    u.is_fp = f.is_fp;
+    u.funct3 = f.funct3;
+    u.funct7 = f.funct7;
+    u.is_rvc = f.is_rvc;
+    u.is_word = f.is_word;
+    u.exc = f.exc;
+    u.pred_taken = f.pred_taken;
+    u.pred_target = f.pred_target;
+    return u;
+  endfunction
+
+  // ---------------------------------------------------------------------------
   // Functional Unit Type (for scheduler port mapping)
   // ---------------------------------------------------------------------------
   typedef enum logic [3:0] {
@@ -431,10 +516,22 @@ package orca_pkg;
 // ---------------------------------------------------------------------------
   // ROB Entry (used by cmt_rob)
   // ---------------------------------------------------------------------------
+  // ROB 只需保存 retire / 例外 / 除錯會用到的 uop 欄位 (v6.3.7; 原本保存完整 uop_t,
+  // 1024 項 × 330 bit, 其中來源 / 立即值 / 預測等欄位在 retire 時都用不到)
+  typedef struct packed {
+    opcode_type_t  opcode;
+    xword_t        pc;
+    arch_reg_idx_t rd;
+    tid_t          tid;
+    logic          is_branch;
+    logic          is_fp;
+    logic          is_rvc;
+  } rob_uop_t;
+
   typedef struct packed {
     logic        valid;
     logic        complete;     // Execution finished
-    uop_t        uop;
+    rob_uop_t    uop;
     xword_t      result;       // Execution result
     logic        branch_taken; // v6.3.5: 分支解析為預測失敗, retire 後須 redirect
     xword_t      branch_target;// v6.3.5: redirect 目標 (正確的下一個 PC)
@@ -444,6 +541,20 @@ package orca_pkg;
     phys_reg_idx_t old_prd;
     tid_t        tid;
   } rob_entry_t;
+
+  // ROB retire 輸出 (v6.3.7): 已 retire 的 entry 必無例外, 例外碼 / redirect 目標在 ROB 內部處理,
+  // 不需隨 retire 輸出 (exception 欄位保留給既有 TB, 恆 0 — 見 SVA a_retire_ok)
+  typedef struct packed {
+    logic          valid;
+    logic          complete;
+    rob_uop_t      uop;
+    xword_t        result;
+    logic          branch_taken;
+    logic          exception;
+    phys_reg_idx_t prd;
+    phys_reg_idx_t old_prd;
+    tid_t          tid;
+  } rob_retire_t;
 
 
   // ---------------------------------------------------------------------------
