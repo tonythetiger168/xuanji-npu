@@ -116,13 +116,20 @@ bash dv/scripts/run_formal_mutation.sh   # 形式 mutation: 植入錯誤的 RTL 
 | 區塊 | 參數 | 性質 | 結果 |
 |---|---|---|---|
 | `npu_ss_dma` | OUT = 4, DW = 8 (計數器為實際 16 bit) | 計數順序 (寫 ≤ 讀 ≤ n)、在途 ≤ OUT、FIFO 佔用 / 指標、done 恰在第 n 個寫入、有額度就發讀、請求等待 grant 時保持、done 為單拍; **資料完整**: 任選一個 line index (anyconst), 從輸入埠記錄的資料必須等於寫出的資料 | k-induction 證明通過 (深度 5); cover 3 / 3 可達; 形式 mutation 7 / 7 無法證明 |
-
 | `orca_npu_ss` (前端) | QD = 4, NCU = 2; npu_core / DMA / ICG 以契約替身取代 (`formal/orca_npu_ss/stubs.sv`) | 命令守恆 (接受 = 佇列中 + 已分派; 已分派 = 未完成 + 已載入; 已載入 = 已輸出 + 輸出暫存中)、未完成數 = core 內 + DMA + NOP 且 ≤ 上限、等待旗標 (oc = 0 才分派)、可分派時必分派、K = 0 不送 core、DMA / NOP 完成槽的 id 不被覆蓋、完成合併選一個有效來源且為**確切 round-robin** (檢查器自己記錄上次選中者)、輸出等待時保持、core 的 id 原樣輸出、busy / irq、DMA 時脈閘控安全 | k-induction 證明通過 (深度 6); cover 4 / 4 可達; 形式 mutation 11 / 11 無法證明 |
+| `npu_l2_xbar` | NM = 3, NB = 2, DEPTH = 2, LDW = 8 (新增參數 LDW, 預設 512) | grant 必有請求、每個 bank 每拍最多一讀一寫 grant、**確切 round-robin** 且 work-conserving (檢查器從 gnt 埠記錄得主)、等待 ≤ NM − 1 拍; **資料**: 任選一個 line (anyconst), 讀到的必是最後寫入的資料 | k-induction 證明通過 (深度 4); cover 4 / 4 可達; 形式 mutation 8 / 8 無法證明 |
+| `npu_core` (控制) | QD = 4, NCU = 3; CU / xbar / ICG 以契約替身取代 (`formal/npu_core/stubs.sv`) | 命令守恆 (接受 − 輸出 = 未完成) 且上限 QD + NCU + 1 為緊; 輸出的 id 必是尚未完成的命令 (不捏造、不重複; host 契約: id 不與未完成者重複); 分派最多一個 CU、只給可用的 CU (閒置、無待回報、不在 done 那拍)、給編號最小者、可分派時必分派; 輸出等待時保持; **完成仲裁公平**: 待回報期間被略過 ≤ NCU − 1 次; busy / cmd_ready | k-induction 證明通過 (深度 4, 約 9 分鐘); cover 4 / 4 可達; 形式 mutation 9 / 9 無法證明 |
 
-替身只遵守介面契約 (npu_core: 容量 CQD + NCU + 1、只在有未回報命令時回報、等待時保持; DMA: idle 才接受、忙碌中某拍 done)。
-npu_core 與 DMA 本身分別由 NPU flow 與上面的 DMA 證明驗證。
+替身只遵守介面契約 (npu_core: 容量 CQD + NCU + 1、只在有未回報命令時回報、等待時保持; DMA: idle 才接受、忙碌中某拍 done;
+CU: idle 才接受、done 與回到 idle 同拍; xbar: 只 grant 有請求者)。被替身取代的區塊本身都另有證明或模擬驗證:
+DMA、xbar、npu_core 見上表; CU (`npu_gemm_cu`) 與 `npu_mma` 的運算由 NPU flow (CRV + coverage 100% + mutation) 驗證。
+時脈閘控在 `npu_core` 證明中以直通替身表示, 其安全性由模擬 SVA (未閘控時脈取樣) 與 `orca_npu_ss` 的 DMA 閘控性質涵蓋。
 
-DW = 8 的資料完整性推廣到 512: DMA 不運算資料, 只依位置搬移, 每個 bit 獨立。
+DW / LDW = 8 的資料完整性推廣到 512: DMA 與 xbar 不運算資料, 只依位置搬移, 每個 bit 獨立。
+
+形式 mutation 合計 35 / 35 無法證明 (DMA 7、前端 11、xbar 8、npu_core 9)。只有證明實際失敗 (FAIL / UNKNOWN) 才算抓到;
+逾時或工具錯誤記為 INCONCLUSIVE 並使流程失敗。xbar 原本的 `gnt_no_req` 是等價 mutant (grant 得主必是請求者, 拿掉 req 條件不改行為),
+已換成 `gnt_all`。
 
 形式驗證過程中發現的檢查器問題 (都已修正, 記錄以免重犯):
 - sv2v 預設刪除所有 assertion: 證明「通過」但沒有檢查任何性質 → `-E Assert`, 且轉出的設計沒有 assert 時流程失敗。
@@ -132,6 +139,12 @@ DW = 8 的資料完整性推廣到 512: DMA 不運算資料, 只依位置搬移,
 - 只看埠的 wrapper 以 PDR 證明不收斂 (frame 5 需 620 s) → 不變式移入 RTL, 改用 k-induction。
 - Ubuntu 的 z3 4.8.12 在歸納步驟當掉 → z3 5.3.1 (pip) 數秒完成。
 - SymbiYosys 的 git main 版與 Yosys 0.33 的 witness 格式不相容 → 使用 `yosys-0.33` tag。
+- 函式內讀取模組訊號: Yosys 不正確處理 (npu_core 第一版的距離函式) → 一律以引數傳入。
+- 索引運算式 `q[QW'(int'(rd) + s)]` 經 sv2v 後是有號窄值, `q[rd + s]` 則被乘法的 32 位元語境放寬而不環繞 → 索引先存入 QW 位元變數。
+- npu_core 第一版的 id 模型假設依序完成 (完成實際上不依序) → 改為 host 契約「id 不與未完成者重複」+ 兩兩相異不變式。
+- 公平性性質的歸納需要輔助不變式 (已略過次數 + 與上次得主的循環距離 ≤ NCU)。
+- 512 bit 資料讓 xbar 證明數分鐘不收斂 → 新增 LDW 參數以 8 bit 證明。
+- 形式 mutation 腳本原本把「不是 PASS」都算抓到 (逾時也算) → 只有 FAIL / UNKNOWN 算。
 
 ## 架構
 

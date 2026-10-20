@@ -8,7 +8,7 @@ export LANG=C.UTF-8 LC_ALL=C.UTF-8
 M=build/formal_mut; rm -rf $M; mkdir -p $M
 nk=0; nt=0; surv=0
 mut() {   # block rtl name old new
-  local b=$1 f=$2 n=$3
+  local b=$1 f=$2 n=$1.$3                 # 名稱加區塊前綴 (不同區塊可用同名 mutant, 工作目錄不互相覆蓋)
   python3 - "$4" "$5" "$M/$n.sv" "$f" <<'PY' || { echo "$n: pattern not found"; surv=1; return; }
 import sys
 o, nw, out, f = sys.argv[1:5]
