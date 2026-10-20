@@ -12,7 +12,7 @@ blocks=${*:-${!SRC[@]}}
 rc=0
 for b in $blocks; do
   d=formal/$b
-  sv2v -Irtl/common rtl/common/orca_pkg.sv ${SRC[$b]} > $d/$b.v || { echo "$b: sv2v FAIL"; rc=1; continue; }
+  sv2v -DFORMAL -Irtl/common rtl/common/orca_pkg.sv ${SRC[$b]} > $d/$b.v || { echo "$b: sv2v FAIL"; rc=1; continue; }
   (cd $d && sby -f $b.sby > sby_run.log 2>&1) || rc=1
   # 每個 task 都必須回報 DONE (PASS); 沒有回報 (例如 sby 當掉) 也算失敗
   for t in $(sed -n '/^\[tasks\]/,/^\[/{/^[a-z]/p}' $d/$b.sby); do

@@ -48,9 +48,9 @@ run npu_core_tb long NPUCORE +seed=1 +long
 # 豁免: 共用 (dv/npu/waivers.txt) + 組態專屬 (dv/npu/waivers_<cfg>.txt: 參數造成的結構常數)
 W=$B/waivers.txt; cat dv/npu/waivers.txt dv/npu/waivers_$CFG.txt > "$W" 2>/dev/null || true
 echo "=== RTL structural coverage (module-level; line / branch / expr / toggle / fsm)"
-python3 dv/scripts/cov_report.py "$B"/cov_*.dat --by-module --rtl '^rtl/(ai/(pe/npu_mma|cluster/npu_gemm_cu|memory/npu_l2_xbar|npu_core)|common/clock_gate)' \
+python3 dv/scripts/cov_report.py "$B"/cov_*.dat --by-module --rtl '^rtl/(npu/(npu_mma|npu_gemm_cu|npu_l2_xbar|npu_core)|common/clock_gate)' --expect rtl/npu/npu_mma.sv --expect rtl/npu/npu_gemm_cu.sv --expect rtl/npu/npu_l2_xbar.sv --expect rtl/npu/npu_core.sv \
   --waivers "$W" --require 100 --list "${LIST:-40}" || fail=1
 echo "=== functional coverage (covergroup) + SVA cover (user)"
-python3 dv/scripts/cov_report.py "$B"/cov_*.dat --by-module --rtl '^dv/npu/' --types covergroup,user \
+python3 dv/scripts/cov_report.py "$B"/cov_*.dat --by-module --rtl '^dv/npu/npu_(mma|gemm_cu|l2_xbar|core)_sva' --types covergroup,user \
   --waivers "$W" --require 100 --list "${LIST:-40}" || fail=1
 [ "$fail" -eq 0 ] && echo "##### $CFG PASS" || { echo "##### $CFG FAIL"; exit 1; }

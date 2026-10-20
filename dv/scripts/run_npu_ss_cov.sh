@@ -39,9 +39,9 @@ for lat in 0 $((TILE_OUT - 3)) $((TILE_OUT * 2)) 100; do   # DMA 吞吐量 (只�
 done
 W=$B/waivers.txt; cat dv/npu/waivers_ss.txt dv/npu/waivers_ss_$CFG.txt > "$W" 2>/dev/null || true
 echo "=== RTL structural coverage (module-level; line / branch / expr / toggle)"
-python3 dv/scripts/cov_report.py "$B"/cov_*.dat --by-module --rtl '^rtl/(ai/(orca_npu_ss|ctrl/npu_ss_dma)|common/clock_gate)' \
+python3 dv/scripts/cov_report.py "$B"/cov_*.dat --by-module --rtl '^rtl/(npu/(orca_npu_ss|npu_ss_dma)|common/clock_gate)' --expect rtl/npu/orca_npu_ss.sv --expect rtl/npu/npu_ss_dma.sv \
   --waivers "$W" --require 100 --list "${LIST:-40}" || fail=1
 echo "=== functional coverage (covergroup) + SVA cover (user)"
-python3 dv/scripts/cov_report.py "$B"/cov_*.dat --by-module --rtl '^dv/npu/' --types covergroup,user \
+python3 dv/scripts/cov_report.py "$B"/cov_*.dat --by-module --rtl '^dv/npu/npu_ss_sva' --types covergroup,user \
   --waivers "$W" --require 100 --list "${LIST:-40}" || fail=1
 [ "$fail" -eq 0 ] && echo "##### $CFG PASS" || { echo "##### $CFG FAIL"; exit 1; }

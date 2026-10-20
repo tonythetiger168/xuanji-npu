@@ -12,7 +12,8 @@
 module npu_ss_dma
   import orca_pkg::*;
 #(
-  parameter int OUT = 8                 // 在途上限 / FIFO 深度 (2 的冪)
+  parameter int OUT = 8,                // 在途上限 / FIFO 深度 (2 的冪)
+  parameter int DW  = 512               // line 資料寬度 (DMA 只搬移資料, 形式驗證以較窄的 DW 證明)
 )(
   input  logic clk, rst_n,
   input  logic        cmd_valid,
@@ -27,20 +28,20 @@ module npu_ss_dma
   output logic         h_rd_req,
   output logic [25:0]  h_rd_line,
   input  logic         h_rd_gnt,
-  input  logic [511:0] h_rd_data,
+  input  logic [DW-1:0] h_rd_data,
   output logic         h_wr_req,
   output logic [25:0]  h_wr_line,
-  output logic [511:0] h_wr_data,
+  output logic [DW-1:0] h_wr_data,
   input  logic         h_wr_gnt,
   // 外部記憶體
   output logic         m_rd_req,
   output logic [31:0]  m_rd_addr,
   input  logic         m_rd_gnt,
   input  logic         m_rd_rvalid,
-  input  logic [511:0] m_rd_rdata,
+  input  logic [DW-1:0] m_rd_rdata,
   output logic         m_wr_req,
   output logic [31:0]  m_wr_addr,
-  output logic [511:0] m_wr_data,
+  output logic [DW-1:0] m_wr_data,
   input  logic         m_wr_gnt
 );
   localparam int OW = $clog2(OUT);
@@ -52,7 +53,7 @@ module npu_ss_dma
   logic [31:0] ext;
   logic [25:0] l2;
   logic [15:0] n, iss, wr;                // iss: 已發出讀取的 line 數; wr: 已寫出的 line 數
-  logic [511:0] fifo [OUT];
+  logic [DW-1:0] fifo [OUT];
   logic [OW-1:0] f_rd, f_wr;
   logic [OW:0]   f_cnt;
 
@@ -82,7 +83,7 @@ module npu_ss_dma
   wire iss_ok = st ? (h_rd_req && h_rd_gnt) : (m_rd_req && m_rd_gnt);
   wire push   = st ? (h_rd_req && h_rd_gnt) : m_rd_rvalid;
   wire pop    = st ? (m_wr_req && m_wr_gnt) : (h_wr_req && h_wr_gnt);
-  wire [511:0] push_d = st ? h_rd_data : m_rd_rdata;
+  wire [DW-1:0] push_d = st ? h_rd_data : m_rd_rdata;
 
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
@@ -104,4 +105,55 @@ module npu_ss_dma
   end
   // FIFO 資料陣列不重置; 只在 push 時寫入
   always_ff @(posedge clk) if (push) fifo[f_wr] <= push_d;
+
+`ifdef FORMAL
+  // ---------------- 形式驗證 (SymbiYosys, formal/npu_ss_dma; 模擬時不編入) ----------------
+  // 環境假設: 外部讀回應只在 LD 進行中、且有已 grant 未回應的讀時出現。
+  // 性質以 k-induction 證明; 以下的不變式同時是歸納的強化條件。
+  logic f_past;
+  initial f_past = 1'b0;
+  always @(posedge clk) f_past <= 1'b1;
+  initial assume (!rst_n);
+  wire [15:0] f_in = st ? iss : 16'(wr + 16'(f_cnt));     // 本命令已進入 FIFO 的 line 數
+  always @(*) if (rst_n) assume (!m_rd_rvalid || (act && !st && f_in != iss));
+  // 資料完整: 任選一個 line index (anyconst), 記錄其進入 FIFO 的資料, 寫出時必須相同
+  (* anyconst *) logic [15:0] f_idx;
+  logic f_have;
+  logic [DW-1:0] f_dat;
+  always @(posedge clk or negedge rst_n)
+    if (!rst_n) f_have <= 1'b0;
+    else if (cmd_valid && cmd_ready) f_have <= 1'b0;
+    else if (push && f_in == f_idx) begin f_have <= 1'b1; f_dat <= push_d; end
+  wire [15:0] f_off = f_idx - wr;
+  always @(*) if (rst_n) begin
+    if (!act) assert (f_cnt == '0 && !h_rd_req && !h_wr_req && !m_rd_req && !m_wr_req);
+    if (act) begin
+      assert (wr <= iss && iss <= n);
+      assert (iss - wr <= 16'(OUT));
+      assert (st ? (16'(f_cnt) == iss - wr) : (16'(f_cnt) <= iss - wr));
+      assert (done == (wr == n));
+      assert (f_have == (f_in > f_idx));
+      // 被追蹤的 line 在 FIFO 中時, 位於 f_rd + (idx - wr)
+      if (f_have && f_idx >= wr) assert (fifo[f_rd + OW'(f_off)] == f_dat);
+      // 寫出第 idx 個 line 時資料正確
+      if (wr == f_idx && (st ? m_wr_req : h_wr_req)) assert (f_have && (st ? m_wr_data : h_wr_data) == f_dat);
+      // 有額度就發讀
+      if (iss != n && iss - wr < 16'(OUT)) assert (st ? h_rd_req : m_rd_req);
+    end
+    assert (OW'(f_wr - f_rd) == OW'(f_cnt) && f_cnt <= (OW+1)'(OUT));
+  end
+  // 請求保持 / done 脈衝
+  always @(posedge clk) if (f_past && rst_n && $past(rst_n)) begin
+    if ($past(m_rd_req && !m_rd_gnt)) assert (m_rd_req && m_rd_addr == $past(m_rd_addr));
+    if ($past(m_wr_req && !m_wr_gnt)) assert (m_wr_req && m_wr_addr == $past(m_wr_addr) && m_wr_data == $past(m_wr_data));
+    if ($past(h_rd_req && !h_rd_gnt)) assert (h_rd_req && h_rd_line == $past(h_rd_line));
+    if ($past(h_wr_req && !h_wr_gnt)) assert (h_wr_req && h_wr_line == $past(h_wr_line) && h_wr_data == $past(h_wr_data));
+    if ($past(done)) assert (!done);
+  end
+  always @(*) if (rst_n) begin
+    cover (act && !st && done && n == 16'd6);
+    cover (act && st && done && n == 16'd6);
+    cover (act && iss - wr == 16'(OUT) && iss != n);
+  end
+`endif
 endmodule : npu_ss_dma

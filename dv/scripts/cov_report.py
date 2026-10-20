@@ -51,6 +51,8 @@ def main():
                     help='模組層級合併: 同一模組的所有 instance (不同 TB / 不同上層) 的同一點合併計數; '
                          '模組內的 generate 範圍 (名稱 g_*) 仍分開')
     ap.add_argument('--hier-exclude', help='不統計階層符合此 regex 的點 (例: 子模組的 cover 在其自身 TB 量測)')
+    ap.add_argument('--expect', action='append', default=[],
+                    help='每個符合此 regex 的檔案都必須有被統計的點 (可重複); 防止 --rtl 寫錯時以 0 個點「通過」')
     ap.add_argument('--toggle-rtl', help='toggle 只統計符合此 regex 的檔案 (排除 checker / TB 自身訊號)')
     a = ap.parse_args()
     waivers = []
@@ -67,6 +69,7 @@ def main():
     tot = collections.Counter(); hit = collections.Counter(); wv = collections.Counter()
     miss = collections.defaultdict(list)
     pts = load(a.dat)
+    seen_files = set()
     if a.by_module:
         merged = collections.OrderedDict()
         for key, cnt in pts.items():
@@ -98,6 +101,7 @@ def main():
         if a.hier_exclude and re.search(a.hier_exclude, d.get('h', '')):
             continue
         name = '%s:%s %s %s' % (f, d.get('l', '?'), d.get('h', ''), d.get('o', ''))
+        seen_files.add(f)
         tot[t] += 1
         if cnt > 0:
             hit[t] += 1
@@ -109,6 +113,13 @@ def main():
         else:
             miss[t].append(name)
     ok = True
+    for rx in a.expect:
+        if not any(re.search(rx, f) for f in seen_files):
+            print('ERROR: no coverage points from files matching %r (wrong --rtl filter?)' % rx)
+            ok = False
+    if not tot:
+        print('ERROR: no coverage points matched --rtl %r' % a.rtl)
+        ok = False
     print('%-11s %8s %8s %8s %9s' % ('type', 'hit', 'waived', 'total', 'coverage'))
     for t in sorted(tot):
         pct = 100.0 * (hit[t] + wv[t]) / tot[t]

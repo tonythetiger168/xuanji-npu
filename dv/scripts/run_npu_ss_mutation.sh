@@ -63,7 +63,7 @@ mut dma_l2line   $DMA "assign h_wr_line = l2 + 26'(wr);" "assign h_wr_line = l2 
 mut dma_done     $DMA "assign done      = act && (wr == n);" "assign done      = act && (iss == n);"                # 讀完就完成 (寫尚未完成)
 mut dma_fifo     $DMA "if (pop)  f_rd <= f_rd + 1'b1;" "if (pop && !push)  f_rd <= f_rd + 1'b1;"                  # FIFO 讀指標錯
 mut dma_ext31    $DMA "assign m_rd_addr = ext + 32'(iss);" "assign m_rd_addr = {1'b0, ext[30:0]} + 32'(iss);"       # 外部位址高位遺失
-mut dma_pushd    $DMA "wire [511:0] push_d = st ? h_rd_data : m_rd_rdata;" "wire [511:0] push_d = st ? h_rd_data : h_rd_data;"
+mut dma_pushd    $DMA "wire [DW-1:0] push_d = st ? h_rd_data : m_rd_rdata;" "wire [DW-1:0] push_d = st ? h_rd_data : h_rd_data;"
 mut dma_n0       $DMA "assign done      = act && (wr == n);" "assign done      = act && (wr == n) && n != '0;"       # n = 0 永不完成
 echo "=== $CFG: $nk / $nt mutants killed"
 [ "$surv" -eq 0 ] || exit 1
