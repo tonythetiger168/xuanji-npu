@@ -463,6 +463,23 @@ package orca_pkg;
   localparam logic [7:0] AIX_OP_DMA_LD  = 8'h10;  // Host->AI DMA load
   localparam logic [7:0] AIX_OP_DMA_ST  = 8'h11;  // AI->Host DMA store
 
+  // AI tile 命令 (v6.3.9, orca_v63_ai_tile; 語意見 docs/npu.md 「AI tile」)
+  typedef enum logic [1:0] {
+    NPU_OP_GEMM   = 2'd0,   // C[c] = A[a] × B[b], K = k (npu_core)
+    NPU_OP_DMA_LD = 2'd1,   // 外部 ext.. → L2 a.., k 個 line
+    NPU_OP_DMA_ST = 2'd2,   // L2 a.. → 外部 ext.., k 個 line
+    NPU_OP_NOP    = 2'd3    // 只回報完成 (wt = 1 時即 fence)
+  } npu_op_e;
+  typedef struct packed {
+    npu_op_e     op;
+    logic        wt;        // 等待: 先前所有命令完成後才分派
+    logic [7:0]  id;
+    logic [31:0] ext;       // 外部 line 位址 (DMA)
+    logic [25:0] a, b, c;   // L2 line 位址 (GEMM: A / B / C; DMA: a)
+    logic [15:0] k;         // GEMM: K; DMA: line 數
+    logic        sa, sb;    // GEMM: A / B 有號
+  } npu_tile_cmd_t;
+
   // ---------------------------------------------------------------------------
   // Cache Coherence States (MESI-F, used by lsu_dcache / l2cache / orca_chi_coh)
   // ---------------------------------------------------------------------------
