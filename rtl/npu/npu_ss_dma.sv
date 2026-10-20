@@ -116,14 +116,17 @@ module npu_ss_dma
   initial assume (!rst_n);
   wire [15:0] f_in = st ? iss : 16'(wr + 16'(f_cnt));     // 本命令已進入 FIFO 的 line 數
   always @(*) if (rst_n) assume (!m_rd_rvalid || (act && !st && f_in != iss));
-  // 資料完整: 任選一個 line index (anyconst), 記錄其進入 FIFO 的資料, 寫出時必須相同
+  // 資料完整: 任選一個 line index (anyconst), 從輸入埠記錄其資料 (不用內部的 push / push_d, 否則檢查會與
+  // 被檢查的邏輯循環), 寫出時必須相同
   (* anyconst *) logic [15:0] f_idx;
   logic f_have;
   logic [DW-1:0] f_dat;
+  wire          f_port_in  = st ? (h_rd_req && h_rd_gnt) : m_rd_rvalid;
+  wire [DW-1:0] f_port_dat = st ? h_rd_data : m_rd_rdata;
   always @(posedge clk or negedge rst_n)
     if (!rst_n) f_have <= 1'b0;
     else if (cmd_valid && cmd_ready) f_have <= 1'b0;
-    else if (push && f_in == f_idx) begin f_have <= 1'b1; f_dat <= push_d; end
+    else if (act && f_port_in && f_in == f_idx) begin f_have <= 1'b1; f_dat <= f_port_dat; end
   wire [15:0] f_off = f_idx - wr;
   always @(*) if (rst_n) begin
     if (!act) assert (f_cnt == '0 && !h_rd_req && !h_wr_req && !m_rd_req && !m_wr_req);

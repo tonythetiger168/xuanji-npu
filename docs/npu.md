@@ -103,6 +103,29 @@ DMA 讀取吞吐量 (LD 2048 line, 外部埠全速; 寫入 ST 在所有情況為
 | DMA 時脈關閉時發生非同步 reset, 以閘控時脈取樣的 SVA 誤報 → DMA SVA 改用 tile 的未閘控時脈 | 檢查器 |
 | TB: 結束時 `wait (!busy)` 不受 watchdog 保護、48 bit 計數器基準值以有號數比較 | TB |
 
+## 形式驗證 (SymbiYosys)
+
+```
+bash dv/scripts/run_formal.sh            # 證明 (k-induction) + cover
+bash dv/scripts/run_formal_mutation.sh   # 形式 mutation: 植入錯誤的 RTL 必須無法證明
+```
+
+流程: sv2v (`-DFORMAL -E Assert`, 保留 assertion) → Yosys 0.33 → SymbiYosys (`smtbmc`, z3 ≥ 4.12)。
+性質與歸納不變式寫在 RTL 的 `` `ifdef FORMAL `` 區塊 (模擬時不編入)。
+
+| 區塊 | 參數 | 性質 | 結果 |
+|---|---|---|---|
+| `npu_ss_dma` | OUT = 4, DW = 8 (計數器為實際 16 bit) | 計數順序 (寫 ≤ 讀 ≤ n)、在途 ≤ OUT、FIFO 佔用 / 指標、done 恰在第 n 個寫入、有額度就發讀、請求等待 grant 時保持、done 為單拍; **資料完整**: 任選一個 line index (anyconst), 從輸入埠記錄的資料必須等於寫出的資料 | k-induction 證明通過 (深度 5); cover 3 / 3 可達; 形式 mutation 7 / 7 無法證明 |
+
+DW = 8 的資料完整性推廣到 512: DMA 不運算資料, 只依位置搬移, 每個 bit 獨立。
+
+形式驗證過程中發現的檢查器問題 (都已修正, 記錄以免重犯):
+- sv2v 預設刪除所有 assertion: 證明「通過」但沒有檢查任何性質 → `-E Assert`, 且轉出的設計沒有 assert 時流程失敗。
+- 資料完整性原本記錄內部的 `push_d`, 與被檢查的邏輯循環 (mutation `pushd_wrong` 存活) → 改為從輸入埠記錄。
+- 只看埠的 wrapper 以 PDR 證明不收斂 (frame 5 需 620 s) → 不變式移入 RTL, 改用 k-induction。
+- Ubuntu 的 z3 4.8.12 在歸納步驟當掉 → z3 5.3.1 (pip) 數秒完成。
+- SymbiYosys 的 git main 版與 Yosys 0.33 的 witness 格式不相容 → 使用 `yosys-0.33` tag。
+
 ## 架構
 
 ```
