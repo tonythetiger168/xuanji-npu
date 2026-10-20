@@ -20,9 +20,12 @@ PY
   local extra=""; [ -f formal/$b/stubs.sv ] && extra=formal/$b/stubs.sv   # 子模組契約替身
   sv2v -DFORMAL -E Assert -Irtl/common rtl/common/orca_pkg.sv $extra $M/$n.sv > $M/$n/$b.v
   cp formal/$b/$b.sby $M/$n/
-  (cd $M/$n && timeout 1200 sby -f $b.sby prove > sby.log 2>&1)
-  if grep -q "DONE (PASS" $M/$n/sby.log; then echo "$n: SURVIVED"; surv=1
-  else nk=$((nk + 1)); echo "$n: killed ($(grep -oE 'DONE \([A-Z]+' $M/$n/sby.log))"; fi
+  (cd $M/$n && timeout 1800 sby -f $b.sby prove > sby.log 2>&1)
+  # 只有證明真的失敗 (FAIL: 反例 / UNKNOWN: 歸納找到反例) 才算抓到; 逾時或工具錯誤不算
+  if grep -qE "DONE \((FAIL|UNKNOWN)" $M/$n/sby.log; then
+    nk=$((nk + 1)); echo "$n: killed ($(grep -oE 'DONE \([A-Z]+' $M/$n/sby.log | tail -1))"
+  elif grep -q "DONE (PASS" $M/$n/sby.log; then echo "$n: SURVIVED"; surv=1
+  else echo "$n: INCONCLUSIVE (timeout / tool error)"; surv=1; fi
 }
 D=rtl/npu/npu_ss_dma.sv
 mut npu_ss_dma $D done_early  "assign done      = act && (wr == n);" "assign done      = act && (iss == n);"
