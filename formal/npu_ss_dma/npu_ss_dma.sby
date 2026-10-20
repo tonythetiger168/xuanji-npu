@@ -5,7 +5,7 @@ cover
 
 [options]
 prove: mode prove
-prove: depth 6
+prove: depth 3
 cover: mode cover
 cover: depth 30
 
