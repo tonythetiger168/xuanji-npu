@@ -15,8 +15,8 @@ fi
 npu_cfg "$CFG"
 B=build/npu_cov_$CFG; rm -rf "$B"; mkdir -p "$B"
 echo "##### NPU config $CFG: N=$N NCU=$NCU NB=$NB DEPTH=$DEPTH (peak $((N * N * NCU)) MAC/cycle)"
-SRC="-Irtl/common rtl/common/orca_pkg.sv rtl/common/clock_gate.sv rtl/ai/pe/npu_mma.sv dv/npu/npu_mma_sva.sv"
-CU="rtl/ai/cluster/npu_gemm_cu.sv dv/npu/npu_gemm_cu_sva.sv"
+SRC="-Irtl/common rtl/common/orca_pkg.sv rtl/common/clock_gate.sv rtl/npu/npu_mma.sv dv/npu/npu_mma_sva.sv"
+CU="rtl/npu/npu_gemm_cu.sv dv/npu/npu_gemm_cu_sva.sv"
 build() {   # top -G... -- sources...
   local top=$1; shift
   verilator --binary --timing -j "${JOBS:-4}" --assert --coverage --coverage-max-width 32768 \
@@ -25,8 +25,8 @@ build() {   # top -G... -- sources...
 }
 build npu_mma_tb -GN=$N dv/npu/npu_mma_tb.sv
 build npu_gemm_cu_tb -GN=$N $CU dv/npu/npu_gemm_cu_tb.sv
-build npu_core_tb -GN=$N -GNCU=$NCU -GNB=$NB -GDEPTH=$DEPTH $CU rtl/ai/memory/npu_l2_xbar.sv dv/npu/npu_l2_xbar_sva.sv \
-  rtl/ai/npu_core.sv dv/npu/npu_core_sva.sv dv/npu/npu_core_tb.sv
+build npu_core_tb -GN=$N -GNCU=$NCU -GNB=$NB -GDEPTH=$DEPTH $CU rtl/npu/npu_l2_xbar.sv dv/npu/npu_l2_xbar_sva.sv \
+  rtl/npu/npu_core.sv dv/npu/npu_core_sva.sv dv/npu/npu_core_tb.sv
 python3 dv/scripts/wide_signals.py "$B/npu_core_tb" 32768 npu_core_tb__DOT__dut__DOT__ | tee "$B/toggle_excluded.txt"
 fail=0
 run() {   # top name tag plusargs...

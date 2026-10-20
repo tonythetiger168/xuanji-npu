@@ -13,7 +13,7 @@ fi
 npu_cfg "$CFG" || exit 1
 M=build/npu_mut_$CFG; rm -rf "$M"; mkdir -p "$M"
 echo "##### NPU mutation $CFG: N=$N NCU=$NCU NB=$NB"
-MMA=rtl/ai/pe/npu_mma.sv CU=rtl/ai/cluster/npu_gemm_cu.sv XB=rtl/ai/memory/npu_l2_xbar.sv CORE=rtl/ai/npu_core.sv
+MMA=rtl/npu/npu_mma.sv CU=rtl/npu/npu_gemm_cu.sv XB=rtl/npu/npu_l2_xbar.sv CORE=rtl/npu/npu_core.sv
 surv=0; nk=0; nt=0
 mut() {   # name file old new
   local n=$1 f=$2

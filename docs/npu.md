@@ -1,6 +1,9 @@
-# Xuanji-X1 NPU: 三款產品組態與驗證
+# Xuanji-X1 NPU Subsystem: 三款產品組態與驗證
 
-同一份 RTL (`rtl/ai/npu_core.sv`) 以參數產生三款產品。每款都有獨立的驗證收斂
+檔案: `rtl/npu/` (RTL)、`dv/npu/` (驗證)。舊 AI tile 的模組 (cluster / systolic / attention / HBM3 / NoC 介面卡 / KV cache / MoE router)
+已移到 `rtl/legacy/ai/`, **未經驗證**, 不屬於 NPU Subsystem。
+
+同一份 RTL (`rtl/npu/npu_core.sv`) 以參數產生三款產品。每款都有獨立的驗證收斂
 (CRV + SVA + coverage 100% + mutation + 效能量測), CI job `npu (nano / x1 / pro)`。
 
 ## 產品組態
@@ -28,15 +31,15 @@ CI 以 95% 作為效能回歸門檻 (`dv/scripts/npu_cfg.sh`)。
 實際模型需要編譯器把 GEMM 切成大 K 的 tile; 改善小 K 的利用率 (例如前一個命令輸出時預取下一個命令) 是下一步。
 
 **尚未具備** (列為下一步, 不對外宣稱): BF16 / FP8、稀疏、卷積 / attention 專用資料流、CPU 命令介面與 NoC / DRAM 連接
-(AI tile 在 SoC 頂層的命令與外部記憶體埠目前接死)、編譯器 / runtime。
+(NPU Subsystem 在 SoC 頂層的命令與外部記憶體埠目前接死)、編譯器 / runtime。
 
-## AI tile (`orca_v63_ai_tile`)
+## NPU Subsystem (`orca_npu_ss`)
 
-npu_core 加上命令前端與 DMA, 成為可以直接下命令的單元 (後續重構為 NPU Subsystem)。
+npu_core 加上命令前端與 DMA, 成為可以直接下命令的子系統 (由舊 AI tile 重建; 原 `orca_v63_ai_tile`)。
 
 ```
 命令 ──► 命令佇列 (QD=8) ──► 依序分派 ──┬─► npu_core (GEMM, 多個 CU 同時執行)
-                                       ├─► npu_tile_dma (外部記憶體 ⇄ L2, 64 B line)
+                                       ├─► npu_ss_dma (外部記憶體 ⇄ L2, 64 B line)
                                        └─► NOP (wt=1 時即 fence)
                     完成合併 (round-robin, 輸出暫存保持) ◄┘──► cpl_valid + id, irq
 ```
@@ -51,24 +54,24 @@ npu_core 加上命令前端與 DMA, 成為可以直接下命令的單元 (後續
   (例如 GEMM 執行時 DMA 載入下一批資料); 軟體須保證並行命令的 L2 / 外部區域不重疊, 否則設 `wt`。
 - 完成順序不保證與命令順序相同。
 - **DMA 吞吐量**: 每拍 1 line (64 B); 外部讀取延遲 L 拍時為 min(1, OUT / (L + 3)) line/拍, OUT = 在途上限
-  (Nano 16 / X1 32 / Pro 64)。量測 (`ai_tile_tb +perf_dma=L`) 見下表。
+  (Nano 16 / X1 32 / Pro 64)。量測 (`npu_ss_tb +perf_dma=L`) 見下表。
 - **低功耗**: DMA 閒置時停止時脈 (ICG); npu_core 內每個 CU、每列另有 ICG。
 
-### AI tile 驗證
+### NPU Subsystem 驗證
 
 ```
-bash dv/scripts/run_ai_tile_cov.sh <nano|x1|pro|all> [seeds] [batches]   # coverage 收斂 + DMA 吞吐量
-bash dv/scripts/run_ai_tile_mutation.sh <nano|x1|pro|all>                # 檢查器 mutation 測試
+bash dv/scripts/run_npu_ss_cov.sh <nano|x1|pro|all> [seeds] [batches]   # coverage 收斂 + DMA 吞吐量
+bash dv/scripts/run_npu_ss_mutation.sh <nano|x1|pro|all>                # 檢查器 mutation 測試
 ```
 
 | 元件 | 內容 |
 |---|---|
-| TB `dv/ai_tile/ai_tile_tb.sv` | 每個 batch 一段隨機命令程式 (含 K = 0、line 數 0、L2 2^26 / 外部 2^32 位址環繞); 產生器追蹤自上一個 `wt` 以來的讀 / 寫範圍, 衝突必設 `wt` → DUT 必須等同依序執行。外部記憶體模型: grant 隨機 (與 req 無關)、讀回應依序且延遲隨機 (含 > OUT)。比對整個 L2 (後門) 與外部記憶體、每個 id 恰好完成一次、`wt` 命令的完成在所有先前命令之後、`perf_steps`。另有: GEMM / NOP / DMA 突發 (填滿 npu_core 佇列)、65535 line 長 DMA、fill_all (完成回壓時填滿所有槽)、中途 reset、隨機 `test_en` |
-| SVA `dv/ai_tile/ai_tile_sva.sv` | 33 個 assertion: 佇列 / 分派 (`a_wt`、`a_no_stall`)、未完成數上限 (`a_oc_bound`, 界限可達)、完成合併 (保持、不遺失、公平 ≤ 2 次搶先)、DMA 帳目 / 吞吐量 (`a_issue`) / 請求保持、閘控安全; 24 個 cover |
+| TB `dv/npu/npu_ss_tb.sv` | 每個 batch 一段隨機命令程式 (含 K = 0、line 數 0、L2 2^26 / 外部 2^32 位址環繞); 產生器追蹤自上一個 `wt` 以來的讀 / 寫範圍, 衝突必設 `wt` → DUT 必須等同依序執行。外部記憶體模型: grant 隨機 (與 req 無關)、讀回應依序且延遲隨機 (含 > OUT)。比對整個 L2 (後門) 與外部記憶體、每個 id 恰好完成一次、`wt` 命令的完成在所有先前命令之後、`perf_steps`。另有: GEMM / NOP / DMA 突發 (填滿 npu_core 佇列)、65535 line 長 DMA、fill_all (完成回壓時填滿所有槽)、中途 reset、隨機 `test_en` |
+| SVA `dv/npu/npu_ss_sva.sv` | 33 個 assertion: 佇列 / 分派 (`a_wt`、`a_no_stall`)、未完成數上限 (`a_oc_bound`, 界限可達)、完成合併 (保持、不遺失、公平 ≤ 2 次搶先)、DMA 帳目 / 吞吐量 (`a_issue`) / 請求保持、閘控安全; 24 個 cover |
 | covergroup | 命令類型 × `wt`、分派時未完成數、每種來源組合下的選擇、佇列深度、DMA 長度、在途數 / FIFO 深度 |
-| 範圍 | 量測 tile 自身 (`orca_v63_ai_tile`、`npu_tile_dma`、`clock_gate`); npu_core 子樹由上面的 NPU flow 收斂 |
+| 範圍 | 量測 tile 自身 (`orca_npu_ss`、`npu_ss_dma`、`clock_gate`); npu_core 子樹由上面的 NPU flow 收斂 |
 
-### AI tile 結果 (每款 6 seed × 30 batch + DMA 吞吐量量測; 豁免 0 項)
+### NPU Subsystem 結果 (每款 6 seed × 30 batch + DMA 吞吐量量測; 豁免 0 項)
 
 | 組態 | DMA OUT | line | branch | expr | toggle | covergroup | SVA cover | mutation |
 |---|---|---|---|---|---|---|---|---|
@@ -87,7 +90,7 @@ DMA 讀取吞吐量 (LD 2048 line, 外部埠全速; 寫入 ST 在所有情況為
 
 量測值符合 min(1, OUT / (L + 3)); DRAM 級延遲 (約 100 拍) 下要接近滿速需要更大的 OUT 或多個 DMA 通道。
 
-### AI tile 驗證中找到的問題
+### NPU Subsystem 驗證中找到的問題
 
 | 問題 | 種類 |
 |---|---|
@@ -110,11 +113,11 @@ host L2 埠 ──────────────────────�
 
 | 模組 | 檔案 | 說明 |
 |---|---|---|
-| npu_mma | `rtl/ai/pe/npu_mma.sv` | N×N output-stationary systolic array, INT8 (A / B 各自可選有號 / 無號) × INT8 → INT32 |
-| npu_gemm_cu | `rtl/ai/cluster/npu_gemm_cu.sv` | 一個命令 = 從 L2 讀 A / B → npu_mma → 寫回 C; 2 項 line buffer 預取 |
-| npu_l2_xbar | `rtl/ai/memory/npu_l2_xbar.sv` | NB bank (line 交錯) 的共用 L2 + crossbar, 讀 / 寫各自 round-robin |
-| npu_core | `rtl/ai/npu_core.sv` | 命令佇列、分派、完成佇列 (輸出暫存)、效能計數器 (可寫入)、CU 時脈閘控 |
-| 產品參數 | `rtl/ai/npu_products.sv`, `dv/scripts/npu_cfg.sh` | 三款組態 |
+| npu_mma | `rtl/npu/npu_mma.sv` | N×N output-stationary systolic array, INT8 (A / B 各自可選有號 / 無號) × INT8 → INT32 |
+| npu_gemm_cu | `rtl/npu/npu_gemm_cu.sv` | 一個命令 = 從 L2 讀 A / B → npu_mma → 寫回 C; 2 項 line buffer 預取 |
+| npu_l2_xbar | `rtl/npu/npu_l2_xbar.sv` | NB bank (line 交錯) 的共用 L2 + crossbar, 讀 / 寫各自 round-robin |
+| npu_core | `rtl/npu/npu_core.sv` | 命令佇列、分派、完成佇列 (輸出暫存)、效能計數器 (可寫入)、CU 時脈閘控 |
+| 產品參數 | `rtl/npu/npu_products.sv`, `dv/scripts/npu_cfg.sh` | 三款組態 |
 
 ### 命令與資料版面 (64 B line, SPL = 64/N 個 k 步 / line)
 

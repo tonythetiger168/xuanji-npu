@@ -463,7 +463,7 @@ package orca_pkg;
   localparam logic [7:0] AIX_OP_DMA_LD  = 8'h10;  // Host->AI DMA load
   localparam logic [7:0] AIX_OP_DMA_ST  = 8'h11;  // AI->Host DMA store
 
-  // AI tile 命令 (v6.3.9, orca_v63_ai_tile; 語意見 docs/npu.md 「AI tile」)
+  // NPU Subsystem 命令 (v6.3.9, orca_npu_ss; 語意見 docs/npu.md 「NPU Subsystem」)
   typedef enum logic [1:0] {
     NPU_OP_GEMM   = 2'd0,   // C[c] = A[a] × B[b], K = k (npu_core)
     NPU_OP_DMA_LD = 2'd1,   // 外部 ext.. → L2 a.., k 個 line

@@ -1,5 +1,5 @@
-# NPU 產品組態 (與 rtl/ai/npu_products.sv 一致): source 後呼叫 npu_cfg <name> 設定 N NCU NB DEPTH MIN_UTIL
-# TILE_OUT: AI tile DMA 在途上限 (外部讀取延遲 L 時吞吐量 = min(1, TILE_OUT / (L + 3)) line/拍)
+# NPU 產品組態 (與 rtl/npu/npu_products.sv 一致): source 後呼叫 npu_cfg <name> 設定 N NCU NB DEPTH MIN_UTIL
+# TILE_OUT: NPU Subsystem DMA 在途上限 (外部讀取延遲 L 時吞吐量 = min(1, TILE_OUT / (L + 3)) line/拍)
 # MIN_UTIL: 效能回歸門檻 (大 K 的 MAC 利用率 %, 低於即失敗); 量測值見 docs/npu.md
 npu_cfg() {
   case "$1" in
