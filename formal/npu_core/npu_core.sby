@@ -1,0 +1,21 @@
+# npu_core 控制 (命令佇列 / 分派 / 完成槽 / 輸出): QD = 4, NCU = 3; CU / xbar / ICG 為 stubs.sv 的契約替身
+[tasks]
+prove
+cover
+
+[options]
+prove: mode prove
+prove: depth 4
+cover: mode cover
+cover: depth 30
+
+[engines]
+smtbmc z3
+
+[script]
+read_verilog -sv -formal npu_core.v
+chparam -set QD 4 -set NCU 3 -set NB 2 -set DEPTH 2 npu_core
+prep -top npu_core
+
+[files]
+npu_core.v

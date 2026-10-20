@@ -44,5 +44,25 @@ mut orca_npu_ss $T dma_id      "if (d_take) dma_id <= head.id;" "if (g_dma) dma_
 mut orca_npu_ss $T q_full      "assign cmd_ready = (q_cnt != (QW+1)'(QD));" "assign cmd_ready = 1'b1;"
 mut orca_npu_ss $T dma_gate    "assign d_en = d_busy || g_dma;" "assign d_en = d_busy;"
 mut orca_npu_ss $T nop_id      "if (g_nop) begin nop_cv <= 1'b1; nop_id <= head.id; end" "if (g_nop) begin nop_cv <= 1'b1; end"
+X=rtl/npu/npu_l2_xbar.sv
+mut npu_l2_xbar $X rr_frozen   "if (rd_bv[b]) rd_rr[b] <= rd_bm[b];" "if (1'b0) rd_rr[b] <= rd_bm[b];"
+mut npu_l2_xbar $X fixed_prio  "rot = {rq, rq} >> ((int'(rr) + 1) % NM);" "rot = {rq, rq} >> 0;"
+mut npu_l2_xbar $X no_bank_chk "for (int i = 0; i < NM; i++) rq[i] = req[i] && bank_of(line[i]) == BW'(b);" "for (int i = 0; i < NM; i++) rq[i] = req[i];"
+# (拿掉 wr_gnt 的 wr_req 條件是等價 mutant: wr_bm 只會是有請求者; 改測 grant 不比對得主)
+mut npu_l2_xbar $X gnt_all     "assign rd_gnt[m]  = rd_req[m] && rd_bv[rb] && rd_bm[rb] == MW'(m);" "assign rd_gnt[m]  = rd_req[m] && rd_bv[rb];"
+mut npu_l2_xbar $X wdata_m0    "if (wr_bv[b]) mem[b][row_of(wr_line[wr_bm[b]])] <= wr_data[wr_bm[b]];" "if (wr_bv[b]) mem[b][row_of(wr_line[wr_bm[b]])] <= wr_data[0];"
+mut npu_l2_xbar $X rdata_bank0 "assign rd_data[m] = mem[rb][row_of(rd_line[m])];" "assign rd_data[m] = mem[0][row_of(rd_line[m])];"
+mut npu_l2_xbar $X row_bits    "function automatic logic [DW-1:0] row_of(logic [25:0] l);  return l[BW +: DW]; endfunction" "function automatic logic [DW-1:0] row_of(logic [25:0] l);  return l[0 +: DW]; endfunction"
+mut npu_l2_xbar $X rr_rot2     "m = MW'((int'(rr) + 1 + f) % NM);" "m = MW'((int'(rr) + f) % NM);"
+C=rtl/npu/npu_core.sv
+mut npu_core $C done_dispatch "assign cu_free    = cu_ready & ~cpl_pend & ~cu_done;" "assign cu_free    = cu_ready & ~cpl_pend;"
+mut npu_core $C pend_dispatch "assign cu_free    = cu_ready & ~cpl_pend & ~cu_done;" "assign cu_free    = cu_ready & ~cu_done;"
+mut npu_core $C multi_disp    "assign first_free = cu_free & (~cu_free + 1'b1);" "assign first_free = cu_free;"
+mut npu_core $C q_full        "assign cmd_ready = (q_cnt != (QW+1)'(QD));" "assign cmd_ready = 1'b1;"
+mut npu_core $C cpl_no_hold   "wire cpl_load = (cpl_pend != '0) && (!cpl_valid || cpl_ready);" "wire cpl_load = (cpl_pend != '0);"
+mut npu_core $C tag_from_port "for (int i = 0; i < NCU; i++) if (cu_v[i]) cu_tag[i] <= head.id;" "for (int i = 0; i < NCU; i++) if (cu_v[i]) cu_tag[i] <= cmd_id;"
+mut npu_core $C pend_noclear  "cpl_pend <= (cpl_pend & ~(cpl_load ? cpl_oh : '0)) | cu_done;" "cpl_pend <= cpl_pend | cu_done;"
+mut npu_core $C rr_frozen     "else if (cpl_load) cpl_last <= cpl_oh;" "else if (1'b0) cpl_last <= cpl_oh;"
+mut npu_core $C busy_no_cpl   "assign busy = !(&cu_ready) || (|cpl_pend) || cpl_valid || q_head_v;" "assign busy = !(&cu_ready) || (|cpl_pend) || q_head_v;"
 echo "=== formal mutation: $nk / $nt mutants killed"
 [ "$surv" -eq 0 ] || exit 1

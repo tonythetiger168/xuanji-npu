@@ -1,0 +1,21 @@
+# npu_l2_xbar: NM = 3 主端, NB = 2 bank, DEPTH = 2, LDW = 8 (資料只被搬移不被運算, 每 bit 獨立, 推廣到 512)
+[tasks]
+prove
+cover
+
+[options]
+prove: mode prove
+prove: depth 4
+cover: mode cover
+cover: depth 20
+
+[engines]
+smtbmc z3
+
+[script]
+read_verilog -sv -formal npu_l2_xbar.v
+chparam -set NM 3 -set NB 2 -set DEPTH 2 -set LDW 8 npu_l2_xbar
+prep -top npu_l2_xbar
+
+[files]
+npu_l2_xbar.v
