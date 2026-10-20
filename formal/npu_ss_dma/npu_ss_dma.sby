@@ -1,0 +1,21 @@
+[tasks]
+prove
+cover
+
+[options]
+prove: mode prove
+cover: mode cover
+cover: depth 30
+
+[engines]
+prove: abc pdr
+cover: smtbmc z3
+
+[script]
+read_verilog -sv -formal npu_ss_dma.v
+read_verilog -sv -formal npu_ss_dma_fv.sv
+prep -top npu_ss_dma_fv
+
+[files]
+npu_ss_dma.v
+npu_ss_dma_fv.sv
