@@ -117,11 +117,18 @@ bash dv/scripts/run_formal_mutation.sh   # 形式 mutation: 植入錯誤的 RTL 
 |---|---|---|---|
 | `npu_ss_dma` | OUT = 4, DW = 8 (計數器為實際 16 bit) | 計數順序 (寫 ≤ 讀 ≤ n)、在途 ≤ OUT、FIFO 佔用 / 指標、done 恰在第 n 個寫入、有額度就發讀、請求等待 grant 時保持、done 為單拍; **資料完整**: 任選一個 line index (anyconst), 從輸入埠記錄的資料必須等於寫出的資料 | k-induction 證明通過 (深度 5); cover 3 / 3 可達; 形式 mutation 7 / 7 無法證明 |
 
+| `orca_npu_ss` (前端) | QD = 4, NCU = 2; npu_core / DMA / ICG 以契約替身取代 (`formal/orca_npu_ss/stubs.sv`) | 命令守恆 (接受 = 佇列中 + 已分派; 已分派 = 未完成 + 已載入; 已載入 = 已輸出 + 輸出暫存中)、未完成數 = core 內 + DMA + NOP 且 ≤ 上限、等待旗標 (oc = 0 才分派)、可分派時必分派、K = 0 不送 core、DMA / NOP 完成槽的 id 不被覆蓋、完成合併選一個有效來源且為**確切 round-robin** (檢查器自己記錄上次選中者)、輸出等待時保持、core 的 id 原樣輸出、busy / irq、DMA 時脈閘控安全 | k-induction 證明通過 (深度 6); cover 4 / 4 可達; 形式 mutation 11 / 11 無法證明 |
+
+替身只遵守介面契約 (npu_core: 容量 CQD + NCU + 1、只在有未回報命令時回報、等待時保持; DMA: idle 才接受、忙碌中某拍 done)。
+npu_core 與 DMA 本身分別由 NPU flow 與上面的 DMA 證明驗證。
+
 DW = 8 的資料完整性推廣到 512: DMA 不運算資料, 只依位置搬移, 每個 bit 獨立。
 
 形式驗證過程中發現的檢查器問題 (都已修正, 記錄以免重犯):
 - sv2v 預設刪除所有 assertion: 證明「通過」但沒有檢查任何性質 → `-E Assert`, 且轉出的設計沒有 assert 時流程失敗。
 - 資料完整性原本記錄內部的 `push_d`, 與被檢查的邏輯循環 (mutation `pushd_wrong` 存活) → 改為從輸入埠記錄。
+- round-robin 性質原本相對於 RTL 自己的 `last` 指標 (固定優先權的 mutant `cpl_fixed` 存活) → 檢查器自己從 `sel` 記錄上次選中者。
+- `if (c) assert (x); else ...` 的 `else` 會被當成 assert 的失敗動作 → 一律加 `begin`/`end`。
 - 只看埠的 wrapper 以 PDR 證明不收斂 (frame 5 需 620 s) → 不變式移入 RTL, 改用 k-induction。
 - Ubuntu 的 z3 4.8.12 在歸納步驟當掉 → z3 5.3.1 (pip) 數秒完成。
 - SymbiYosys 的 git main 版與 Yosys 0.33 的 witness 格式不相容 → 使用 `yosys-0.33` tag。
