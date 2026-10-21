@@ -8,9 +8,11 @@
 // plusargs: +seed=N  +cmds=N (預設 200)
 //=============================================================================
 module npu_gemm_cu_tb #(parameter int N = 8);
-  localparam int KMAX = 65535, LINES = 65536, LW = 16;   // N=16, K=65535 時 A / B 各 16384 line
+  localparam int KMAX = 65535;
+  localparam int AMAX = (KMAX * N + 63) / 64;    // A / B 各最多佔的 line 數 (N=16: 16384, N=32: 32768)
+  localparam int LW = (N == 32) ? 17 : 16, LINES = 1 << LW;   // 模型只解碼低 LW bit
   localparam int CL = (4 * N * N + 63) / 64;     // C 佔的 line 數
-  localparam int RS = 21800;                     // 每塊區域的 line 數 (>= 16384 + 2)
+  localparam int RS = (N == 32) ? 43600 : 21800; // 每塊區域的 line 數 (>= AMAX + 2, 三塊 <= LINES)
   logic clk = 1'b0, rst_n = 1'b0, test_en = 1'b0;
   logic cmd_valid = 1'b0, cmd_ready, done, feeding;
   logic [25:0] cmd_a_line = '0, cmd_b_line = '0, cmd_c_line = '0;
@@ -63,15 +65,15 @@ module npu_gemm_cu_tb #(parameter int N = 8);
   task automatic run_cmd(int rst_at, int k);
     int mode = ur(0, 2);
     bit sa = 1'($urandom()), sb = 1'($urandom());
-    int al = (k * N + 63) / 64;                // A / B 各佔的 line 數 (最多 8192)
-    // line 位址: 低 16 bit 分成三塊互不重疊的區域 (各 RS line),
+    int al = (k * N + 63) / 64;                // A / B 各佔的 line 數 (最多 AMAX)
+    // line 位址: 低 LW bit 分成三塊互不重疊的區域 (各 RS line),
     // A / B / C 隨機分配到其中一塊; 高位元隨機
     int perm = ur(0, 5);
     int ra = (perm < 2) ? 0 : (perm < 4) ? 1 : 2;
     int rb = (ra + 1 + perm % 2) % 3, rc = 3 - ra - rb;
-    logic [25:0] a0 = {10'($urandom()), 16'(ur(RS * ra, RS * ra + RS - 2 - al))};
-    logic [25:0] b0 = {10'($urandom()), 16'(ur(RS * rb, RS * rb + RS - 2 - al))};
-    logic [25:0] c0 = {10'($urandom()), 16'(ur(RS * rc, RS * rc + RS - 2 - CL))};
+    logic [25:0] a0 = {(26-LW)'($urandom()), LW'(ur(RS * ra, RS * ra + RS - 2 - al))};
+    logic [25:0] b0 = {(26-LW)'($urandom()), LW'(ur(RS * rb, RS * rb + RS - 2 - al))};
+    logic [25:0] c0 = {(26-LW)'($urandom()), LW'(ur(RS * rc, RS * rc + RS - 2 - CL))};
     int cyc = 0, timeout = 40 * (k + 3 * N) + 400;
     longint s;
     for (int l = 0; l < al + 1; l++) begin mem[(a0[LW-1:0] + l) % LINES] = {16{$urandom()}}; mem[(b0[LW-1:0] + l) % LINES] = {16{$urandom()}}; end

@@ -4,7 +4,7 @@
 
 // npu_gemm_cu: 一個 GEMM 命令 = 從 L2 讀 A / B, 經 npu_mma 計算, 把 C 寫回 L2。
 //
-// L2 版面 (64 B line, SPL = 64/N 個 k 步 / line, RPL = max(1, 16/N) 列 / C line):
+// L2 版面 (64 B line, SPL = 64/N 個 k 步 / line, RPL = max(1, 16/N) 列 / C line; N = 32 時一列 C 佔 CPR = 2 個 line):
 //   A: a_line*64 + k*N + i     = A[i][k]   (第 k 欄連續 N byte)
 //   B: b_line*64 + k*N + j     = B[k][j]   (第 k 列連續 N byte)
 //   C: c_line*64 + (i*N + j)*4 = C[i][j]   (INT32 列優先; 溢位時模 2^32 環繞, 不飽和)
@@ -42,10 +42,11 @@ module npu_gemm_cu
 );
   localparam int SPL = 64 / N;                   // 每個 line 的 k 步數
   localparam int RPL = (N >= 16) ? 1 : 16 / N;   // 每個 C line 的列數
+  localparam int CPR = (N > 16) ? 2 : 1;         // 每列 C 佔的 line 數 (N = 32: 2)
   localparam int SW  = $clog2(SPL);
   localparam int RW  = $clog2(N);
-  if (N != 4 && N != 8 && N != 16) begin : g_bad_n
-    $error("npu_gemm_cu: N 須為 4 / 8 / 16");
+  if (N != 4 && N != 8 && N != 16 && N != 32) begin : g_bad_n
+    $error("npu_gemm_cu: N 須為 4 / 8 / 16 / 32");
   end
 
   // 編碼: G_OUT / G_WR 兩個位元都不同 (out_nxt 只在兩者間切換)
@@ -61,6 +62,8 @@ module npu_gemm_cu
   logic       wptr, rptr;
   logic [1:0] cnt;                           // 緩衝內完整項數 (0..2)
   logic [511:0] c_line, c_line_n;
+  logic [511:0] wr_d;                        // 本次寫回的 line
+  logic         row_last;                    // 本次寫回是該列的最後一個 line
 
   // ---------------- npu_mma ----------------
   logic mma_start, mma_busy, mma_in_valid, mma_in_ready, mma_in_last, mma_out_valid, mma_out_ready;
@@ -89,7 +92,7 @@ module npu_gemm_cu
   assign rd_line   = f_b ? b_ptr : a_ptr;
   assign wr_req    = (st == G_WR);
   assign wr_line   = c_ptr;
-  assign wr_data   = c_line;
+  assign wr_data   = wr_d;
 
   wire feed = mma_in_valid;                  // npu_mma 在 RUN 恆 in_ready (SVA a_feed_ready)
   assign feeding = feed;
@@ -99,9 +102,24 @@ module npu_gemm_cu
 
   // C line 組裝: 每列寫入 line 中的位置; 湊滿 RPL 列後寫回
   gst_t out_nxt;
-  if (RPL == 1) begin : g_c1
+  if (CPR > 1) begin : g_cw
+    // N = 32: 一列 C = 2 個 line; 前半存在 c_line, 後半存在 c_hi, 依序寫回 (c_hi 只有此組態才有)
+    logic [511:0] c_hi;
+    logic         c_half;                    // 0: 寫前半, 1: 寫後半
+    // mma_out_vec 是 [N-1:0][31:0] 二維 packed: 索引選的是元素 (每個 32 bit), 不是位元
+    assign c_line_n = mma_out_vec[N/2-1:0];
+    assign out_nxt  = G_WR;
+    assign wr_d     = c_half ? c_hi : c_line;
+    assign row_last = c_half;
+    always_ff @(posedge clk or negedge rst_n)
+      if (!rst_n) begin c_hi <= '0; c_half <= 1'b0; end
+      else if (out_fire) begin c_hi <= mma_out_vec[N-1:N/2]; c_half <= 1'b0; end   // 只在輸出拍更新
+      else if (st == G_WR && wr_gnt) c_half <= ~c_half;
+  end else if (RPL == 1) begin : g_c1
     assign c_line_n = mma_out_vec;
     assign out_nxt  = G_WR;
+    assign wr_d     = c_line;
+    assign row_last = 1'b1;
   end else begin : g_cn
     localparam int CW = $clog2(RPL);
     wire [CW-1:0] slot = mma_out_row[CW-1:0];
@@ -110,6 +128,8 @@ module npu_gemm_cu
       c_line_n[slot * N * 32 +: N * 32] = mma_out_vec;
     end
     assign out_nxt = (slot == CW'(RPL - 1)) ? G_WR : G_OUT;
+    assign wr_d     = c_line;
+    assign row_last = 1'b1;
   end
 
   always_ff @(posedge clk or negedge rst_n) begin
@@ -146,8 +166,10 @@ module npu_gemm_cu
         G_OUT: if (out_fire) begin c_line <= c_line_n; st <= out_nxt; end
         G_WR:  if (wr_gnt) begin
           c_ptr <= c_ptr + 1'b1;
-          if (!mma_busy) begin st <= G_IDLE; done <= 1'b1; end   // 最後一列已輸出, npu_mma 回到 idle
-          else st <= G_OUT;
+          if (row_last) begin                                       // N = 32: 前半寫完留在 G_WR 寫後半
+            if (!mma_busy) begin st <= G_IDLE; done <= 1'b1; end    // 最後一列已輸出, npu_mma 回到 idle
+            else st <= G_OUT;
+          end
         end
       endcase
     end

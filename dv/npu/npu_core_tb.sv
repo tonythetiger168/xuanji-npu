@@ -16,7 +16,9 @@
 module npu_core_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB = 4, parameter int DEPTH = 1024);
   localparam int QD = 4;                                  // 與 npu_core 預設一致
   localparam int SPL = 64 / N, CL = (4 * N * N + 63) / 64;
-  localparam int LINES = NB * DEPTH, NSLOT = 16, SLOT = LINES / NSLOT;   // slot 數 > NCU + QD: 全部 CU 同時忙碌且佇列滿
+  // slot 數 > NCU + QD (全部 CU 同時忙碌且佇列滿); 2 的冪, 至少 16 (Max: NCU + QD = 28 → 32)
+  localparam int NSLOT = (NCU + QD + 1 > 16) ? (1 << $clog2(NCU + QD + 1)) : 16;
+  localparam int LINES = NB * DEPTH, SLOT = LINES / NSLOT;
   localparam int KCAP = ((SLOT - CL - 2) / 2) * SPL;     // slot 能容納的最大 K
   localparam int KMAX = (KCAP > 2000) ? 2000 : KCAP;
   localparam int LB = $clog2(LINES);

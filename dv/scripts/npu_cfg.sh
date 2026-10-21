@@ -6,6 +6,7 @@ npu_cfg() {
     nano) N=4;  NCU=1; NB=2;  DEPTH=512;  MIN_UTIL=95; TILE_OUT=16 ;;
     x1)   N=8;  NCU=4; NB=4;  DEPTH=1024; MIN_UTIL=95; TILE_OUT=32 ;;
     pro)  N=16; NCU=8; NB=16; DEPTH=1024; MIN_UTIL=95; TILE_OUT=64 ;;
-    *) echo "unknown NPU config '$1' (nano / x1 / pro)" >&2; return 1 ;;
+    max)  N=32; NCU=24; NB=32; DEPTH=1024; MIN_UTIL=90; TILE_OUT=128 ;;
+    *) echo "unknown NPU config '$1' (nano / x1 / pro / max)" >&2; return 1 ;;
   esac
 }
