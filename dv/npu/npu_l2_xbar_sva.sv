@@ -45,6 +45,47 @@ module npu_l2_xbar_sva
     a_wr_bounded: assert property (wr_req[m] |-> ##[0:NW-1] wr_gnt[m]);
     c_wr_wait:    cover property (wr_req[m] && !wr_gnt[m]);
   end
+  // round-robin 順序: 主端 m 對同一 bank 持續等待期間, 其他主端在該 bank 最多各贏一次。
+  //   有界等待在 NB 大、bank 雜湊分散時很少觸發 (Max 組態固定優先權 48 拍內不會飢餓), 此檢查一拍就抓到被插隊兩次。
+  //   只用埠: 檢查器自己記錄 m 等待期間誰已在 m 的 bank 拿到 grant。
+  for (genvar m = 0; m < NM; m++) begin : g_ov
+    logic [NM-1:0] ov, hit;                        // ov: 本次等待中已贏過的主端
+    logic [BW-1:0] bm_q;                           // 上一拍 m 等待的 bank
+    logic          w_q;                            // 上一拍 m 在等待
+    wire  [BW-1:0] bm = bk(rd_line[m]);
+    wire           cont = w_q && rd_req[m] && bm == bm_q;   // 同一 bank 的等待延續
+    for (genvar j = 0; j < NM; j++) begin : g_j
+      assign hit[j] = (j != m) && rd_gnt[j] && bk(rd_line[j]) == bm;
+    end
+    always_ff @(posedge clk or negedge rst_n)
+      if (!rst_n) begin ov <= '0; w_q <= 1'b0; bm_q <= '0; end
+      else begin
+        w_q  <= rd_req[m] && !rd_gnt[m];
+        bm_q <= bm;
+        ov   <= (rd_req[m] && !rd_gnt[m]) ? ((cont ? ov : '0) | hit) : '0;
+      end
+    a_rd_rr: assert property (cont |-> (hit & ov) == '0);
+    c_rd_ov: cover property (cont && hit != '0);   // 等待中被別人插隊過
+  end
+  for (genvar m = 0; m < NW; m++) begin : g_ovw
+    logic [NW-1:0] ov, hit;
+    logic [BW-1:0] bm_q;
+    logic          w_q;
+    wire  [BW-1:0] bm = bk(wr_line[m]);
+    wire           cont = w_q && wr_req[m] && bm == bm_q;
+    for (genvar j = 0; j < NW; j++) begin : g_j
+      assign hit[j] = (j != m) && wr_gnt[j] && bk(wr_line[j]) == bm;
+    end
+    always_ff @(posedge clk or negedge rst_n)
+      if (!rst_n) begin ov <= '0; w_q <= 1'b0; bm_q <= '0; end
+      else begin
+        w_q  <= wr_req[m] && !wr_gnt[m];
+        bm_q <= bm;
+        ov   <= (wr_req[m] && !wr_gnt[m]) ? ((cont ? ov : '0) | hit) : '0;
+      end
+    a_wr_rr: assert property (cont |-> (hit & ov) == '0);
+    c_wr_ov: cover property (cont && hit != '0);
+  end
   // 平行度: 同拍的讀 / 寫 grant 數 (多數主端同時存取不同 bank)。
   // 註: 「所有 CU 同拍讀」在此設計中不會發生 — 預取下每個 CU 每 SPL 拍只讀 2 次, 且分派一拍一個而錯開。
   localparam int MAXG = (NM < NB) ? NM : NB, MAXW = (NW < NB) ? NW : NB;
