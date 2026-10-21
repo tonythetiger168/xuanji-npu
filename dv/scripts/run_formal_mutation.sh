@@ -41,9 +41,9 @@ mut orca_npu_ss $T wt_ignored  "wire go     = q_hv && (!head.wt || oc == '0);" "
 mut orca_npu_ss $T oc_no_dec   "oc <= oc + OCW'(q_pop) - OCW'(load);" "oc <= oc + OCW'(q_pop);"
 mut orca_npu_ss $T oc_early    "oc <= oc + OCW'(q_pop) - OCW'(load);" "oc <= oc + OCW'(q_pop) - OCW'(load || d_done);"
 mut orca_npu_ss $T dma_slot    "head.op == NPU_OP_DMA_ST) && !dma_cv;" "head.op == NPU_OP_DMA_ST);"
-mut orca_npu_ss $T k0_to_core  "(head.op == NPU_OP_GEMM && head.k == '0)" "1'b0"
+mut orca_npu_ss $T k0_to_core  "((head.op == NPU_OP_GEMM || head.op == NPU_OP_VEC) && head.k == '0)" "1'b0"
 mut orca_npu_ss $T cpl_no_hold "wire load = (src_v != '0) && (!cpl_valid || cpl_ready);" "wire load = (src_v != '0);"
-mut orca_npu_ss $T cpl_fixed   "last      <= sel[0] ? 2'd0 : sel[1] ? 2'd1 : 2'd2;" "last      <= 2'd2;"
+mut orca_npu_ss $T cpl_fixed   "last      <= sel[0] ? 2'd0 : sel[1] ? 2'd1 : sel[2] ? 2'd2 : 2'd3;" "last      <= 2'd3;"
 mut orca_npu_ss $T dma_id      "if (d_take) dma_id <= head.id;" "if (g_dma) dma_id <= head.id;"
 mut orca_npu_ss $T q_full      "assign cmd_ready = (q_cnt != (QW+1)'(QD));" "assign cmd_ready = 1'b1;"
 mut orca_npu_ss $T dma_gate    "assign d_en = d_busy || g_dma;" "assign d_en = d_busy;"
@@ -56,7 +56,7 @@ mut npu_l2_xbar $X no_bank_chk "for (int i = 0; i < NM; i++) rq[i] = req[i] && b
 mut npu_l2_xbar $X gnt_all     "assign rd_gnt[m]  = rd_req[m] && rd_bv[rb] && rd_bm[rb] == MW'(m);" "assign rd_gnt[m]  = rd_req[m] && rd_bv[rb];"
 mut npu_l2_xbar $X wdata_m0    "if (wr_bv[b]) mem[b][row_of(wr_line[wr_bm[b]])] <= wr_data[wr_bm[b]];" "if (wr_bv[b]) mem[b][row_of(wr_line[wr_bm[b]])] <= wr_data[0];"
 mut npu_l2_xbar $X rdata_bank0 "assign rd_data[m] = mem[rb][row_of(rd_line[m])];" "assign rd_data[m] = mem[0][row_of(rd_line[m])];"
-mut npu_l2_xbar $X row_bits    "function automatic logic [DW-1:0] row_of(logic [25:0] l);  return DW'(npu_l2_row(l, BW, DW)); endfunction" "function automatic logic [DW-1:0] row_of(logic [25:0] l);  return l[0 +: DW]; endfunction"
+mut npu_l2_xbar $X row_bits    "function automatic logic [DW-1:0] row_of(logic [25:0] l);  return DW'(npu_l2_row(l, BW, DW)); endfunction" "function automatic logic [DW-1:0] row_of(logic [25:0] l);  return DW'(npu_l2_row(l, BW, DW)) & ~DW'(1); endfunction"   # 列位元 0 卡在 0 (兩個 line 別名; 原本的 l[0 +: DW] 在 (bank, 低位元) 下仍一對一, 是等價 mutant)
 mut npu_l2_xbar $X rr_rot2     "m = MW'((int'(rr) + 1 + f) % NM);" "m = MW'((int'(rr) + f) % NM);"
 C=rtl/npu/npu_core.sv
 mut npu_core $C done_dispatch "assign cu_free    = cu_ready & ~cpl_pend & ~cu_done;" "assign cu_free    = cu_ready & ~cpl_pend;"
@@ -71,7 +71,7 @@ mut npu_core $C busy_no_cpl   "assign busy = !(&cu_ready) || (|cpl_pend) || cpl_
 V=rtl/npu/npu_vec.sv
 mut npu_vec $V rdy_no_gnt   "assign ins_ready = is_ld ? rd_gnt" "assign ins_ready = is_ld ? 1'b1"
 mut npu_vec $V st_writes    " && ins.op != VOP_ST;" ";"
-mut npu_vec $V err_nostick  "else if (fire && illegal)  err <= 1'b1;" "else err <= fire && illegal;"
+mut npu_vec $V err_nostick  "    else if (err_clr)          err <= 1'b0;" "    else                       err <= 1'b0;"   # err 不黏著 (下一拍就清掉)
 mut npu_vec $V ill_st       "(ins.op == VOP_ST && ins.fn > 3'd1)" "(ins.op == VOP_ST && ins.fn > 3'd2)"
 mut npu_vec $V rd_line      "assign rd_line   = ins.line;" "assign rd_line   = ins.line ^ 26'd1;"
 mut npu_vec $V reg_all      "if (we && ins.vd == 3'(r)) q <= wd;" "if (we) q <= wd;"
