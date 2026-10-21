@@ -21,7 +21,8 @@ module npu_vec_tb;
   logic g_rd = 0, g_wr = 0;
   assign rd_gnt  = rd_req && g_rd;
   assign wr_gnt  = wr_req && g_wr;
-  assign rd_data = mem.exists(rd_line) ? mem[rd_line] : '0;
+  // 沒有 grant 時讀資料為垃圾 (未等 grant 就取資料的錯誤會造成不符)
+  assign rd_data = !rd_gnt ? {16{32'hDEAD_BEEF}} : mem.exists(rd_line) ? mem[rd_line] : '0;
   always @(posedge clk) if (wr_gnt) mem[wr_line] = wr_data;
 
   int gnt_p = 70, idle_p = 10, seed = 1, n_err = 0, n_ins = 0, n_cyc = 0;
