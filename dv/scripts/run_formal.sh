@@ -15,6 +15,10 @@ declare -A SRC=(
   [npu_ss_regs]="rtl/npu/npu_ss_regs.sv"
   [npu_l2_arb2]="rtl/npu/npu_l2_arb2.sv"
   [npu_vec_eng]="formal/npu_vec_eng/stubs.sv rtl/npu/npu_vec_eng.sv"
+  [orca_apb_xbar]="rtl/soc/orca_apb_xbar.sv"
+  [orca_sys_regs]="rtl/soc/orca_sys_regs.sv"
+  [orca_pmu_regs]="rtl/soc/orca_pmu_regs.sv"
+  [gs_raster_regs]="rtl/sis/gs_raster_regs.sv"
 )
 blocks=${*:-${!SRC[@]}}
 rc=0

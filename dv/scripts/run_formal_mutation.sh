@@ -98,5 +98,25 @@ mut npu_vec_eng $E rdy_done   "  assign cmd_ready = !act && !done;" "  assign cm
 mut orca_npu_ss $T vec_no_wait "wire g_vec  = go && head.op == NPU_OP_VEC && !h_nop && !vec_cv;" "wire g_vec  = go && head.op == NPU_OP_VEC && !h_nop;"
 mut orca_npu_ss $T vec_rr      "automatic int s = (int'(last) + 1 + i) % 4;" "automatic int s = (int'(last) + 1 + i) % 3;"
 mut orca_npu_ss $T vec_oc      "if (v_take) vec_id <= head.id;" "if (g_vec) vec_id <= head.id;"
+X=rtl/soc/orca_apb_xbar.sv
+mut orca_apb_xbar $X psel_ungated "assign s_psel    = psel ? hit_v : '0;" "assign s_psel    = hit_v;"
+mut orca_apb_xbar $X unmap_ok     "pslverr = psel && penable && !hit;" "pslverr = 1'b0;"
+mut orca_apb_xbar $X resp_err     "        pslverr = s_pslverr[i];" "        pslverr = 1'b0;"
+S=rtl/soc/orca_sys_regs.sv
+mut orca_sys_regs $S be_no_w1c   "berr <= (berr && !clr) || set;" "berr <= berr || set;"
+mut orca_sys_regs $S ea_always   "if (set && !berr) begin" "if (set) begin"
+mut orca_sys_regs $S irq_nomask  "assign irq = (berr && r_mhi) || |(irq_in & r_mlo);" "assign irq = berr || |irq_in;"
+mut orca_sys_regs $S scr_strb    "if (wr && wa == A_SCRATCH) r_scr <= (r_scr & ~bm) | (pwdata & bm);" "if (wr && wa == A_SCRATCH) r_scr <= pwdata;"
+P=rtl/soc/orca_pmu_regs.sv
+mut orca_pmu_regs $P rej_writes  "if (wa == A_DVFS_REQ && pstrb[0] && !rej) r_dvfs <= pwdata[2:0];" "if (wa == A_DVFS_REQ && pstrb[0]) r_dvfs <= pwdata[2:0];"
+mut orca_pmu_regs $P wake_level  "ev_wake[g] = (pd_state[g] == ST_ON) && !was_on[g];" "ev_wake[g] = (pd_state[g] == ST_ON);"
+mut orca_pmu_regs $P off_no_w1c  "of   <= (of & ~NPD'(wclr[15:8])) | ev_off;" "of   <= of | ev_off;"
+mut orca_pmu_regs $P wake_strb   "wire [7:0]  b0 = pstrb[0] ? pwdata[7:0] : 8'd0;" "wire [7:0]  b0 = pwdata[7:0];"
+G=rtl/sis/gs_raster_regs.sv
+mut gs_raster_regs $G start_busy  "assign start       = go && !r_busy;" "assign start       = go;"
+mut gs_raster_regs $G push_full   "wire         push     = push_req && !q_full;" "wire         push     = push_req;"
+mut gs_raster_regs $G head_wrong  "assign hd      = q[q_rd[CW-1:0]];" "assign hd      = q[q_wr[CW-1:0]];"
+mut gs_raster_regs $G last_strb   "last: pstrb[0] && pwdata[0]" "last: pwdata[0]"
+mut gs_raster_regs $G pop_novalid "assign out_ready = wr && wa == A_OUT_POP && out_valid;" "assign out_ready = wr && wa == A_OUT_POP;"
 echo "=== formal mutation: $nk / $nt mutants killed"
 [ "$surv" -eq 0 ] || exit 1
