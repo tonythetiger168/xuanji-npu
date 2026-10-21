@@ -196,7 +196,7 @@ t = k + i + j 同時抵達 PE[i][j]。因為同時抵達, 每個 PE 只需要一
 | L2 | bank 陣列只在寫入 grant 時寫; 實體 SRAM 的 CE 取自該 bank 的讀 / 寫 grant |
 
 功能不依賴 clock gating: TB 隨機設定 `test_en` (強制開啟所有 ICG), 兩種情況的結果都必須與參考模型一致。
-UPF / power domain (電源開關、隔離、retention) 尚未做。
+SoC 的 AI 電源域 (時脈閘控、隔離時 APB 回 PSLVERR) 見 `docs/low_power.md`; UPF、電源開關、retention 尚未做。
 
 ## 驗證
 
