@@ -20,8 +20,23 @@ for ((s = 1; s <= NS; s++)); do
     echo "FAIL s$s"; grep -m5 -E "MISMATCH|ERROR" "$B/s$s.log" || true; fail=1
   fi
 done
+# SFU: 位元一致向量 + 對雙精度參考的精度掃描 (recip / rsqrt 窮舉尾數)
+verilator --binary --timing -j "${JOBS:-4}" --assert --coverage -Wno-fatal -Wno-lint -Wno-style -Irtl/fp --Mdir "$B/sfu_obj" \
+  rtl/fp/sfu.sv dv/fp/sfu_tb.sv --top-module sfu_tb > "$B/sfu_build.log" 2>&1 || { tail -20 "$B/sfu_build.log"; echo "BUILD FAIL sfu"; exit 1; }
+for ((s = 1; s <= NS; s++)); do
+  python3 dv/fp/gen_sfu_vectors.py "$B/sfu_vec_s$s.hex" $s "$NR"
+  sw=$([ $s -eq 1 ] && echo "+exp_n=2000000" || echo "+no_sweep")      # 精度掃描只跑一次
+  if (cd "$B" && ./sfu_obj/Vsfu_tb +vec=sfu_vec_s$s.hex $sw +verilator+coverage+file+cov_sfu_s$s.dat > sfu_s$s.log 2>&1) && grep -q "TB PASS" "$B/sfu_s$s.log"; then
+    echo "PASS sfu_s$s  $(grep -m1 '^SFU:' "$B/sfu_s$s.log")  $(grep -m1 'accuracy' "$B/sfu_s$s.log" || true)"
+  else
+    echo "FAIL sfu_s$s"; grep -m5 -E "MISMATCH|ERROR" "$B/sfu_s$s.log" || true; fail=1
+  fi
+done
 echo "=== RTL structural coverage (line / branch / expr / toggle)"
 python3 dv/scripts/cov_report.py "$B"/cov_*.dat --by-module --rtl '^rtl/fp/' \
-  --expect rtl/fp/fp_add.sv --expect rtl/fp/fp_mul.sv --expect rtl/fp/fp_narrow.sv --expect rtl/fp/fp_widen.sv \
+  --expect rtl/fp/fp_add.sv --expect rtl/fp/fp_mul.sv --expect rtl/fp/fp_narrow.sv --expect rtl/fp/fp_widen.sv --expect rtl/fp/sfu.sv \
   --waivers dv/fp/waivers.txt --require 100 --list "${LIST:-40}" || fail=1
+echo "=== functional coverage (covergroup: SFU 係數表每一項)"
+python3 dv/scripts/cov_report.py "$B"/cov_*.dat --by-module --rtl '^dv/fp/' --types covergroup \
+  --expect dv/fp/sfu_tb.sv --waivers dv/fp/waivers.txt --require 100 --list "${LIST:-40}" || fail=1
 [ "$fail" -eq 0 ] && echo "##### fp PASS" || { echo "##### fp FAIL"; exit 1; }
