@@ -14,7 +14,7 @@ import numpy as np
 
 S = 7                       # 查表索引位元數 (2^7 = 128 段)
 F = 30                      # 多項式結果的小數位元 (y 以 2^-F 為單位)
-C0W, C1W, C2W = 31, 25, 16  # 係數寬度: c0 無號 (恆正, < 2^31), c1 有號, c2 無號 (恆正, < 2^16) — fit() 檢查
+C0W, C1W, C2W = 31, 25, 17  # 係數寬度: c0 無號 (恆正, < 2^31), c1 / c2 有號 — fit() 檢查
 QNAN = 0x7FC00000
 
 
@@ -39,7 +39,7 @@ def fit(func, lo, hi, n=S):
     for c0, c1, c2 in out:
         assert 0 <= c0 < (1 << C0W), c0
         assert -(1 << (C1W - 1)) <= c1 < (1 << (C1W - 1)), c1
-        assert 0 <= c2 < (1 << C2W), c2
+        assert -(1 << (C2W - 1)) <= c2 < (1 << (C2W - 1)), c2
     return out
 
 
@@ -48,6 +48,8 @@ TABLES = {
     'rsqrt_e': (lambda m: 1.0 / math.sqrt(m), 1.0, 2.0),          # 指數為偶數: m ∈ [1, 2)
     'rsqrt_o': (lambda m: 1.0 / math.sqrt(m), 2.0, 4.0),          # 指數為奇數: 2m ∈ [2, 4)
     'exp2':    (lambda f: 2.0 ** f, 0.0, 1.0),
+    # sinπ / cosπ: g(r) = sin(πr) / (4r), r ∈ [0, 0.5) (g ∈ (0.5, 0.786]; 除以 4 讓 y 落在 [2^29, 2^31))
+    'sinpi':   (lambda r: (math.sin(math.pi * r) / (4 * r)) if r > 0 else math.pi / 4, 0.0, 0.5),
 }
 _cache = {}
 
@@ -168,8 +170,70 @@ def sfu_exp(x):
     return exp2_fixed(w)
 
 
+RF = 48                                            # sinπ / cosπ 範圍縮減的定點小數位元
+
+
+def sfu_trig(x, cos):
+    """sinπ(x) (cos = 0) / cosπ(x) (cos = 1)。範圍縮減在 48 位元小數的定點上精確進行 (|x| < 2^23, 指數 >= -25):
+    u = |x| mod 2 (cos 先加 0.5), u >= 1 → 變號且 u -= 1, u > 0.5 → u = 1 - u, 得 r ∈ [0, 0.5];
+    結果 = 4 · g(r) · r (g = sin(πr) / (4r) 查表), r 保持全精度 → 結果的相對精度不受 r 很小影響。"""
+    s, ex, fr = x >> 31, (x >> 23) & 0xFF, x & 0x7FFFFF
+    if ex == 0xFF:
+        return QNAN
+    if ex == 0:
+        return 0x3F800000 if cos else (s << 31)        # cosπ(0) = 1, sinπ(±0) = ±0
+    e, m = ex - 127, (1 << 23) | fr
+    if e >= 23:                                        # 整數: sinπ = ±0 (x 的符號), cosπ = (-1)^x
+        if not cos:
+            return s << 31
+        odd = (e == 23) and (m & 1)
+        return 0xBF800000 if odd else 0x3F800000
+    if e < -25:                                        # |x| < 2^-25
+        if cos:
+            return 0x3F800000                          # 1 - (πx)²/2 捨入為 1
+        rr, er, neg = m, 23 - e, s                     # r = m · 2^-(23 - e) (不需縮減)
+    else:
+        v = (m << (e + 25)) & ((1 << (RF + 1)) - 1)    # |x| · 2^48 mod 2^49 (= |x| mod 2)
+        neg = 0 if cos else s                          # cosπ 為偶函數
+        if cos:
+            v = (v + (1 << (RF - 1))) & ((1 << (RF + 1)) - 1)
+        if v >= (1 << RF):
+            neg ^= 1
+            v -= 1 << RF
+        if v > (1 << (RF - 1)):
+            v = (1 << RF) - v
+        if v == 0:
+            return 0 if cos else (s << 31)             # sinπ(整數) = ±0 (x 的符號); cosπ(n + 1/2) = +0
+        if v == (1 << (RF - 1)):
+            return (neg << 31) | 0x3F800000            # r = 1/2: ±1
+        rr, er = v, RF
+    # g 查表: r · 256 的整數部分為索引, 小數部分取 25 位元為 t
+    rs = rr << (RF - er) if er <= RF else rr >> (er - RF)   # r · 2^48 (極小的 r 只用來查表)
+    idx, t = rs >> 40, (rs >> 15) & ((1 << 25) - 1)
+    g = eval_poly('sinpi', idx, t, 25)                 # g · 2^30
+    return (neg << 31) | round_fp32(g * rr, 2 - er)    # 4 · g · r
+
+
+def sfu_sinpi(x):
+    return sfu_trig(x, 0)
+
+
+def sfu_cospi(x):
+    return sfu_trig(x, 1)
+
+
 FUNCS = {'recip': (sfu_recip, lambda v: 1.0 / v), 'rsqrt': (sfu_rsqrt, lambda v: 1.0 / math.sqrt(v)),
-         'exp2': (sfu_exp2, lambda v: 2.0 ** v), 'exp': (sfu_exp, math.exp)}
+         'exp2': (sfu_exp2, lambda v: 2.0 ** v), 'exp': (sfu_exp, math.exp),
+         'sinpi': (sfu_sinpi, lambda v: _sinpi(v)), 'cospi': (sfu_cospi, lambda v: _sinpi(v + 0.5) if abs(v) < 2 ** 52 else 1.0)}
+
+
+def _sinpi(v):
+    """雙精度參考 (先精確縮減到 [-1, 1] 再乘 π, 避免 sin(π·v) 的大引數誤差)。"""
+    from fractions import Fraction
+    q = Fraction(v) % 2
+    if q > 1:
+        q -= 2
+    return math.sin(math.pi * float(q)) if abs(q) not in (Fraction(1), Fraction(0)) else 0.0
 
 
 def ulp_err(got, x, ref):

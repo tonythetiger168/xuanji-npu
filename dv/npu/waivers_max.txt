@@ -1,0 +1,5 @@
+# Xuanji-X1-Max (N=32) 組態專屬豁免: 參數造成的結構常數 / 空的 bin
+toggle npu_gemm_cu\.sv:\d+ \S* out_nxt\[[01]\]: # [C] N=32: 一列 C 佔 2 個 line, 每列輸出後必寫回 (out_nxt 恆為 G_WR)
+covergroup npu_gemm_cu_sva\.sv:\d+ cg_cmd\.cp_k\.part_line # [C] N=32: SPL = 2, part_line = K ∈ [2, SPL-1] 是空範圍
+covergroup npu_mma_sva\.sv:\d+ cg_tile\.cp_k\.mid # [C] N=32: mid = K ∈ [2N+1, 63] = [65, 63] 是空範圍
+covergroup npu_mma_sva\.sv:\d+ cg_tile\.x_k_sgn\.mid_x # [C] 同上 (mid 與符號的交叉)

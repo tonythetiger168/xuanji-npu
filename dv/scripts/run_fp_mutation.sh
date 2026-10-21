@@ -75,5 +75,15 @@ mut sfu_rsq_neg  $U "if (x_nan || (s && !x_zero)) y = QNAN;" "if (x_nan) y = QNA
 mut sfu_exp_big  $U "else if (x_inf || ex >= 8'd134) y = s ? '0 : PINF;" "else if (x_inf || ex >= 8'd200) y = s ? '0 : PINF;"  # 大 |x| 時定點溢位
 mut sfu_carry    $U "e = 11'(k) - 11'(F) + (hi ? 11'sd7 : 11'sd6) + 11'sd23 + (qs[23] ? 11'sd1 : 11'sd0);" "e = 11'(k) - 11'(F) + (hi ? 11'sd7 : 11'sd6) + 11'sd23;"  # 捨入進位不加指數
 # (exp 的 ±0 / 次正規輸入: m >> 118 自然為 0, RTL 已移除多餘的分支)
+mut trig_flip    $U "tneg = (tcos ? 1'b0 : s) ^ tflip;" "tneg = (tcos ? 1'b0 : s);"                    # 第二、三象限不變號
+mut trig_mirror  $U "v3 = (v2 > 48'(1 << 47)) ? 48'(1 << 48) - v2 : v2;" "v3 = v2;"                    # 不做 1 - u 的對稱折疊
+mut trig_cosoff  $U "v1 = tcos ? v0 + 49'(1 << 47) : v0;" "v1 = tcos ? v0 + 49'(1 << 46) : v0;"         # cosπ 位移錯 (1/4)
+mut trig_cossign $U "tneg = (tcos ? 1'b0 : s) ^ tflip;" "tneg = s ^ tflip;"                            # cosπ 當成奇函數
+mut trig_tiny    $U "wire          t_fix = (ex >= 8'd102);" "wire          t_fix = (ex >= 8'd90);"     # 定點範圍外仍走定點 (精度不足)
+mut trig_int     $U "else if (ex >= 8'd150)       y = !tcos ? {s, 31'b0}" "else if (ex >= 8'd151)       y = !tcos ? {s, 31'b0}"  # 2^23 視為非整數
+mut trig_parity  $U "(ex == 8'd150 && fr[0]) ? 32'hBF80_0000" "(ex == 8'd150 && fr[1]) ? 32'hBF80_0000"  # cosπ(大整數) 奇偶錯
+mut trig_half    $U "else if (t_fix && v3 == 48'(1 << 47)) y = {tneg, 31'h3F80_0000};" "else if (1'b0) y = {tneg, 31'h3F80_0000};"  # r = 1/2 不特別處理 (索引溢出)
+mut trig_round   $U "tinc = tp[tsh - 7'd1] && (" "tinc = 1'b0 && ("                                       # sinπ / cosπ 不捨入 (截斷)
+mut trig_exp     $U "te  = 11'sd2 - 11'(er)" "te  = 11'sd1 - 11'(er)"                                       # 少乘 4
 echo "=== fp mutation: $nk / $nt mutants killed"
 [ "$surv" -eq 0 ] || exit 1

@@ -7,7 +7,7 @@
 // plusargs: +vec=<檔案>  +exp_n=N (預設 2000000)  +max_ulp=R  +no_sweep
 //=============================================================================
 module sfu_tb;
-  logic [1:0]  op;
+  logic [2:0]  op;
   logic [31:0] x, y;
   sfu dut (.op(op), .x(x), .y(y));
   // 每個係數表的每一項都被用到 (表的內容由精度掃描驗證)
@@ -15,15 +15,16 @@ module sfu_tb;
     cp_recip:  coverpoint i iff (o == 0)          { bins e[] = {[0:127]}; }
     cp_rsq_e:  coverpoint i iff (o == 1 && !odd)  { bins e[] = {[0:127]}; }
     cp_rsq_o:  coverpoint i iff (o == 1 && odd)   { bins e[] = {[0:127]}; }
-    cp_exp2:   coverpoint i iff (o >= 2)          { bins e[] = {[0:127]}; }
+    cp_exp2:   coverpoint i iff (o == 2 || o == 3) { bins e[] = {[0:127]}; }
+    cp_sinpi:  coverpoint i iff (o >= 4)          { bins e[] = {[0:127]}; }
   endgroup
   cg_tab u_cg = new;
-  always @(op, x) #0 if (op != 2'd1 || !x[31]) u_cg.sample(int'(op), dut.eu[0], dut.idx);
+  always @(op, x) #0 if (op != 3'd1 || !x[31]) u_cg.sample(int'(op), dut.eu[0], dut.idx);
 
   int n_err = 0, n_vec = 0;
   string vec;
   real max_ulp = 1.0;
-  real worst [4];
+  real worst [6];
 
   // FP32 位元 ↔ real (Verilator 5.052 的 $bitstoshortreal / $shortrealtobits 回傳 0, 不可用)
   function automatic real b2r(logic [31:0] b);
@@ -52,7 +53,14 @@ module sfu_tb;
       0: r = 1.0 / xr;
       1: r = 1.0 / $sqrt(xr);
       2: r = $pow(2.0, xr);
-      default: r = $exp(xr);
+      3: r = $exp(xr);
+      default: begin                           // sinπ / cosπ: 先在雙精度精確縮減到 [-1, 1] (|x| < 2^24 時精確)
+        real q = xr + ((o == 5) ? 0.5 : 0.0);
+        q = q - 2.0 * $floor(q / 2.0);          // [0, 2)
+        if (q > 1.0) q = q - 2.0;
+        r = (q == 0.0 || q == 1.0 || q == -1.0) ? 0.0 : $sin(3.14159265358979323846 * q);
+        if (r == 0.0) return (g == 0.0) ? 0.0 : 1e9;
+      end
     endcase
     a = (r < 0) ? -r : r;
     if (a < 1.1754943508222875e-38) return (g == 0.0) ? 0.0 : 1e9;      // 參考值在 FTZ 範圍
@@ -65,7 +73,7 @@ module sfu_tb;
 
   task automatic sweep_check(int o, logic [31:0] xi);
     real u;
-    op = 2'(o); x = xi; #1;
+    op = 3'(o); x = xi; #1;
     u = ulp_err(o, xi, y);
     if (u > worst[o]) worst[o] = u;
   endtask
@@ -82,7 +90,7 @@ module sfu_tb;
       while (!$feof(fd)) begin
         r = $fscanf(fd, "%h %h %h\n", ov, xv, ev);
         if (r != 3) break;
-        op = ov[1:0]; x = xv; #1; n_vec++;
+        op = ov[2:0]; x = xv; #1; n_vec++;
         if (y !== ev) begin
           if (n_err < 20) $display("MISMATCH op=%0d x=%h dut=%h ref=%h", ov, xv, y, ev);
           n_err++;
@@ -91,7 +99,7 @@ module sfu_tb;
       $fclose(fd);
     end
     if (!$test$plusargs("no_sweep")) begin
-      for (int o = 0; o < 4; o++) worst[o] = 0.0;
+      for (int o = 0; o < 6; o++) worst[o] = 0.0;
       for (int f = 0; f < (1 << 23); f++) begin
         sweep_check(0, {1'b0, 8'd127, 23'(f)});
         sweep_check(1, {1'b0, 8'd127, 23'(f)});
@@ -106,10 +114,16 @@ module sfu_tb;
           sweep_check(2, r2b(v2 / 128.0));
           sweep_check(3, r2b(ve / 87.0));
         end
+        begin                                    // sinπ / cosπ: [-4, 4] 與零點附近
+          real vt = real'($urandom()) / 4294967295.0 * 8.0 - 4.0;
+          real vz = real'($urandom_range(16, 0)) * 0.5 + (real'($urandom()) / 4294967295.0 - 0.5) * 1e-4;
+          sweep_check(4, r2b(vt)); sweep_check(5, r2b(vt));
+          sweep_check(4, r2b(vz)); sweep_check(5, r2b(vz));
+        end
       end
-      $display("SFU accuracy (max ulp): recip=%0.3f rsqrt=%0.3f exp2=%0.3f exp=%0.3f (limit %0.2f)",
-               worst[0], worst[1], worst[2], worst[3], max_ulp);
-      for (int o = 0; o < 4; o++) if (worst[o] > max_ulp) begin $display("ERROR: op %0d error %0.3f ulp > %0.2f", o, worst[o], max_ulp); n_err++; end
+      $display("SFU accuracy (max ulp): recip=%0.3f rsqrt=%0.3f exp2=%0.3f exp=%0.3f sinpi=%0.3f cospi=%0.3f (limit %0.2f)",
+               worst[0], worst[1], worst[2], worst[3], worst[4], worst[5], max_ulp);
+      for (int o = 0; o < 6; o++) if (worst[o] > max_ulp) begin $display("ERROR: op %0d error %0.3f ulp > %0.2f", o, worst[o], max_ulp); n_err++; end
     end
     $display("SFU: vectors=%0d errors=%0d", n_vec, n_err);
     if (n_err == 0 && n_vec > 0) $display("TB PASS"); else $display("TB FAIL");
