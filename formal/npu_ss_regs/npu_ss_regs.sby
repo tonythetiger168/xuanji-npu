@@ -1,0 +1,20 @@
+# npu_ss_regs (APB4 暫存器): APB 回應 / PSLVERR / 中斷 / 黏著位元 / 命令 FIFO 的數量、順序與資料; CQ = 4
+[tasks]
+prove
+cover
+
+[options]
+prove: mode prove
+prove: depth 4
+cover: mode cover
+cover: depth 20
+
+[engines]
+smtbmc z3
+
+[script]
+read_verilog -sv -formal npu_ss_regs.v
+prep -top npu_ss_regs
+
+[files]
+npu_ss_regs.v

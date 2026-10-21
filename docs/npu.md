@@ -30,8 +30,9 @@ CI 以 95% 作為效能回歸門檻 (`dv/scripts/npu_cfg.sh`)。
 
 實際模型需要編譯器把 GEMM 切成大 K 的 tile; 改善小 K 的利用率 (例如前一個命令輸出時預取下一個命令) 是下一步。
 
-**尚未具備** (列為下一步, 不對外宣稱): BF16 / FP8、稀疏、卷積 / attention 專用資料流、CPU 命令介面與 NoC / DRAM 連接
+**尚未具備** (列為下一步, 不對外宣稱): BF16 / FP8、稀疏、卷積 / attention 專用資料流、SoC 的 APB 互連與 NoC / DRAM 連接
 (NPU Subsystem 在 SoC 頂層的命令與外部記憶體埠目前接死)、編譯器 / runtime。
+CPU 的設定 / 命令介面已有: APB4 暫存器 `npu_ss_regs` + 包裝 `orca_npu_ss_apb` (暫存器表與驗證見 `docs/apb.md`)。
 
 ## NPU Subsystem (`orca_npu_ss`)
 

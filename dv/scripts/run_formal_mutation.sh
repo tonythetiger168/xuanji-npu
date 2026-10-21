@@ -75,5 +75,13 @@ mut npu_vec $V ill_st       "(ins.op == VOP_ST && ins.fn > 3'd1)" "(ins.op == VO
 mut npu_vec $V rd_line      "assign rd_line   = ins.line;" "assign rd_line   = ins.line ^ 26'd1;"
 mut npu_vec $V reg_all      "if (we && ins.vd == 3'(r)) q <= wd;" "if (we) q <= wd;"
 mut npu_vec $V st_illegal   "wire is_st = ins_valid && !illegal && ins.op == VOP_ST;" "wire is_st = ins_valid && ins.op == VOP_ST;"
+R=rtl/npu/npu_ss_regs.sv
+mut npu_ss_regs $R push_full  "wire           push   = push_req && !q_full;" "wire           push   = push_req;"
+mut npu_ss_regs $R head_wrong "assign cmd       = q[q_rd[CW-1:0]];" "assign cmd       = q[q_wr[CW-1:0]];"
+mut npu_ss_regs $R ovf_no_w1c "ovf  <= (ovf  && !(w1c && pwdata[1]))" "ovf  <= (ovf)"
+mut npu_ss_regs $R irq_nomask "assign irq = |(ist & r_ien);" "assign irq = |ist;"
+mut npu_ss_regs $R slverr_none "assign pslverr = acc && !hit;" "assign pslverr = 1'b0;"
+mut npu_ss_regs $R cpl_on_wr  "assign cpl_ready = rd && wa == A_CPL_POP;" "assign cpl_ready = acc && wa == A_CPL_POP;"
+mut npu_ss_regs $R strobe     "return (old & ~m) | (nw & m);" "return nw;"
 echo "=== formal mutation: $nk / $nt mutants killed"
 [ "$surv" -eq 0 ] || exit 1

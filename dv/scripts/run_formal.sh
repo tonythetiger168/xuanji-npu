@@ -11,6 +11,7 @@ declare -A SRC=(
   [npu_l2_xbar]="rtl/npu/npu_l2_xbar.sv"
   [npu_core]="formal/npu_core/stubs.sv rtl/npu/npu_core.sv"
   [npu_vec]="formal/npu_vec/stubs.sv rtl/npu/npu_vec.sv"
+  [npu_ss_regs]="rtl/npu/npu_ss_regs.sv"
 )
 blocks=${*:-${!SRC[@]}}
 rc=0
