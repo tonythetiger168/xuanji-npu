@@ -15,6 +15,9 @@ smtbmc z3
 [script]
 read_verilog -sv -formal npu_vec.v
 chparam -set NV 2 npu_vec
+hierarchy -top npu_vec
+flatten
+opt_clean
 prep -top npu_vec
 
 [files]

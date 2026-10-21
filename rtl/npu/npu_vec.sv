@@ -153,4 +153,50 @@ module npu_vec
     fp_narrow #(.E(8), .MI(23), .MO(7)) u_nb (.a(b[i]), .y(st_bf[VL+i]));
   end
   assign wr_data = (ins.fn == 3'd0) ? 512'(a) : 512'(st_bf);
+`ifdef FORMAL
+  // ---------------- 形式驗證 (SymbiYosys, formal/npu_vec; 模擬時不編入) ----------------
+  // 浮點元件以任意值替身取代 (formal/npu_vec/stubs.sv): 只證明控制。檢查器自己從埠解碼指令,
+  // 不引用 RTL 的 illegal / is_ld / fire / we (否則與被檢查的邏輯循環)。
+  logic f_past;
+  initial f_past = 1'b0;
+  always @(posedge clk) f_past <= 1'b1;
+  initial assume (!rst_n);
+  // 環境: 指令在 ready 之前保持 (reset 期間不約束)
+  always @(posedge clk)
+    if (f_past && rst_n && $past(rst_n) && $past(ins_valid && !ins_ready)) begin
+      assume (ins_valid && ins == $past(ins));
+    end
+  wire [3:0] f_op = ins[76:73];
+  wire [2:0] f_fn = ins[72:70];
+  wire       f_ill = f_op > 4'd10 || (f_op == 4'd1 && f_fn == 3'd7) || (f_op == 4'd2 && f_fn > 3'd1) ||
+                     (f_op == 4'd7 && f_fn > 3'd5);
+  wire f_ld   = ins_valid && !f_ill && f_op == 4'd1;
+  wire f_st   = ins_valid && !f_ill && f_op == 4'd2;
+  wire f_fire = ins_valid && ins_ready;
+  wire f_wr   = f_fire && !f_ill && f_op != 4'd0 && f_op != 4'd2;
+  always @(*) begin
+    // L2 請求只來自合法的 LD / ST, 位址為指令的 line; ready 跟隨對應的 grant, 其他指令一拍完成
+    assert (rd_req == f_ld);
+    assert (wr_req == f_st);
+    if (f_ld) begin assert (rd_line == ins.line); end
+    if (f_st) begin assert (wr_line == ins.line); end
+    assert (ins_ready == (f_ld ? rd_gnt : f_st ? wr_gnt : 1'b1));
+  end
+  // err: reset 清除; 之後 = 前一拍 err 或「前一拍接受了非法指令」
+  always @(posedge clk)
+    if (f_past) begin
+      if (!$past(rst_n) || !rst_n) begin assert (!err); end
+      else begin assert (err == ($past(err) || $past(f_fire && f_ill))); end
+    end
+  // 暫存器檔: 第 r 個暫存器只在前一拍接受了寫入它的指令時改變 (含 reset 期間; 暫存器檔無 reset)
+  for (genvar r = 0; r < NV; r++) begin : g_f
+    always @(posedge clk)
+      if (f_past && vr[r] != $past(vr[r])) begin assert ($past(f_wr && ins.vd == 3'(r))); end
+    always @(posedge clk) cover (f_past && $past(f_wr && ins.vd == 3'(r)));
+  end
+  always @(posedge clk) begin
+    cover (f_past && rst_n && rd_req && !rd_gnt);
+    cover (f_past && rst_n && err);
+  end
+`endif
 endmodule : npu_vec

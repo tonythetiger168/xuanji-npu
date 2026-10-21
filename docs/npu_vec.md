@@ -55,3 +55,51 @@ OCP MX 一個區塊 32 個元素, 一個 FP8 line 是兩個區塊, 軟體以 par
 - **BF16 載入** 同 `fp_widen` (DAZ); **BF16 儲存** 同 `fp_narrow` (RNE)。
 - **MAX**: 任一 NaN → 標準 qNaN; 次正規數當 ±0; max(+0, −0) = +0。
 - **歸約順序固定** (樹), 所以結果與參考模型位元一致, 也與執行時序無關。
+
+## 驗證 (`dv/scripts/run_vec.sh`, `run_vec_mutation.sh`, `run_formal.sh npu_vec`)
+
+- **參考模型** `dv/vec/vec_ref.py`: 指令編碼、格式轉換、逐 lane 運算 (沿用 `dv/fp/fp_ref.py` / `sfu_ref.py`) 與歸約;
+  TB 逐指令比對寫入暫存器的值、寫入 L2 的資料與 err。
+- **受約束隨機** `dv/vec/gen_vec_vectors.py`: 各格式的特殊值 / 邊界 / 隨機位元的 L2 內容, 隨機指令 (含 2% 非法編碼、
+  中途 reset), L2 grant 隨機 (70%)、指令間隨機空拍、test_en 隨機切換; 沒有 grant 時 L2 讀資料為垃圾。
+  seed 1 另含**窮舉**: 256 個 FP8 碼 × 256 個比例 (E4M3 / E5M2)、FP4 碼 × 256 個比例、全部 65536 個 16 bit 碼 (BF16 / FP16)。
+- **SVA** `dv/vec/npu_vec_sva.sv`: L2 交握、ready、err、每個暫存器只在被寫入的拍改變 (clock gating 安全); covergroup:
+  每個 op / LD 格式 / ST 格式 / SFU 函式 / 每種寬度的每個 part / MX 比例類別 / 每個目的暫存器 / 每類非法編碼。
+- **形式證明** (`formal/npu_vec`, k-induction, 浮點元件換成任意值替身, NV = 2): 檢查器自己從指令埠解碼 —
+  L2 請求只來自合法 LD / ST 且位址正確、ready 跟隨 grant、err 的下一拍值、暫存器只在接受了寫入它的指令後改變。
+  形式 mutation 7 / 7 (不等 grant、ST 寫暫存器、err 不黏著、非法 ST 當合法、位址錯、寫入所有暫存器、非法 ST 發出寫入)。
+
+### 結果
+
+| 項目 | 結果 |
+|---|---|
+| 位元一致 | 4 seed (22,624 + 3 × 約 5,980 個指令) + 9 個 kernel, 0 錯誤 |
+| coverage | line / branch / expr / toggle 100% (唯一豁免: BF16 擴展補上的 16 個低位恆為 0 [C]); covergroup 57 / 57、SVA cover 5 / 5 |
+| mutation | 39 / 39 (解碼 / 非法編碼、ready、ST 寫回、err、part 選擇、SUB、格式選擇、歸約節點、clock gate、BF16 儲存、MX / FP16 解碼、比例、INT32 捨入、max) |
+| 形式證明 | prove PASS、cover PASS; 形式 mutation 7 / 7 |
+
+### Kernel (`dv/vec/vec_kernels.py`, D = 1024 個 FP32, 參考: float64 numpy 的數學定義, 輸入為同一組 FP32 值)
+
+RTL 與參考模型位元一致; 拍數為 `+perf` (grant 全給、無空拍) 的實測。PyTorch 不在環境中, 以 numpy float64 作數學參考。
+
+| kernel | 程式 | 誤差 (門檻) | 指令 = 拍數 | 元素 / 拍 |
+|---|---|---|---|---|
+| softmax (logits σ = 8) | 3 趟: max → exp 與總和 → × 1/總和 | 最大相對誤差 2.0e-6 (1e-5) | 645 | 1.59 |
+| LayerNorm (μ = 5, σ = 2) | 2 趟平均 / 置中變異數, rsqrt | 最大誤差 / max\|y\| 1.3e-7 (1e-5) | 906 | 1.13 |
+| RMSNorm | 平方和, rsqrt | 1.1e-7 (1e-5) | 520 | 1.97 |
+| GELU (tanh 近似) | x · sigmoid(2c(x + 0.044715x³)) (代數恆等) | 最大相對誤差 6.6e-7 (1e-5) | 643 | 1.59 |
+| SiLU | x · 1/(1 + e^-x) | 1.4e-7 (1e-5) | 450 | 2.28 |
+| INT32 × 比例 → BF16 | 反量化 GEMM 輸出 | 3.8e-3 (BF16 半 ulp 2^-8) | 161 | 6.4 |
+| MXFP8 E4M3 / E5M2、MXFP4 E2M1 解碼 | 對 OCP 元素值表 × 2^(X−127) | 0 (精確) | 32 | 8 / 8 / 16 |
+
+softmax 的誤差主要來自 x − max 的 FP32 捨入 (|x − max| 達 60 時 ulp ≈ 4e-6, 經 exp 放大為相對誤差), 是 FP32 本身的限制。
+
+吞吐量受單發射限制 (每拍一個指令, LD / ALU / ST 輪流): 雙發射 (LD / ST 與運算並行) 或把常見組合 (x − m 後 exp、
+乘加) 合併成一個指令, 是提升元素 / 拍的方向 (尚未實作)。
+
+### 驗證中的發現
+
+- 第一版解碼器把 MX 比例乘在每個格式的解碼器內: FP16 (比例固定 1) 的比例輸入是常數、各格式的 SP 參數產生恆為真 / 假的
+  運算式, coverage 出現大量結構性缺口 → 改為「精確元素解碼 (窄輸出, 不輸出恆為 0 的低位) + 共用的 MX 比例級」,
+  各格式的特殊值規則以 generate 分支實作, 結構性豁免從數百項降到 1 項。
+- INT32 → FP32 正規化後的最低位恆為 0 (只有 −2^31 會不移位, 其最低位為 0) → 從資料路徑移除。

@@ -67,5 +67,13 @@ mut npu_core $C tag_from_port "for (int i = 0; i < NCU; i++) if (cu_v[i]) cu_tag
 mut npu_core $C pend_noclear  "cpl_pend <= (cpl_pend & ~(cpl_load ? cpl_oh : '0)) | cu_done;" "cpl_pend <= cpl_pend | cu_done;"
 mut npu_core $C rr_frozen     "else if (cpl_load) cpl_last <= cpl_oh;" "else if (1'b0) cpl_last <= cpl_oh;"
 mut npu_core $C busy_no_cpl   "assign busy = !(&cu_ready) || (|cpl_pend) || cpl_valid || q_head_v;" "assign busy = !(&cu_ready) || (|cpl_pend) || q_head_v;"
+V=rtl/npu/npu_vec.sv
+mut npu_vec $V rdy_no_gnt   "assign ins_ready = is_ld ? rd_gnt" "assign ins_ready = is_ld ? 1'b1"
+mut npu_vec $V st_writes    " && ins.op != VOP_ST;" ";"
+mut npu_vec $V err_nostick  "else if (fire && illegal)  err <= 1'b1;" "else err <= fire && illegal;"
+mut npu_vec $V ill_st       "(ins.op == VOP_ST && ins.fn > 3'd1)" "(ins.op == VOP_ST && ins.fn > 3'd2)"
+mut npu_vec $V rd_line      "assign rd_line   = ins.line;" "assign rd_line   = ins.line ^ 26'd1;"
+mut npu_vec $V reg_all      "if (we && ins.vd == 3'(r)) q <= wd;" "if (we) q <= wd;"
+mut npu_vec $V st_illegal   "wire is_st = ins_valid && !illegal && ins.op == VOP_ST;" "wire is_st = ins_valid && ins.op == VOP_ST;"
 echo "=== formal mutation: $nk / $nt mutants killed"
 [ "$surv" -eq 0 ] || exit 1

@@ -10,6 +10,7 @@ declare -A SRC=(
   [orca_npu_ss]="formal/orca_npu_ss/stubs.sv rtl/npu/orca_npu_ss.sv"
   [npu_l2_xbar]="rtl/npu/npu_l2_xbar.sv"
   [npu_core]="formal/npu_core/stubs.sv rtl/npu/npu_core.sv"
+  [npu_vec]="formal/npu_vec/stubs.sv rtl/npu/npu_vec.sv"
 )
 blocks=${*:-${!SRC[@]}}
 rc=0
