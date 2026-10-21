@@ -2,4 +2,3 @@
 branch npu_gemm_cu\.sv:\d+ \S* else # [C] N=4: C (4x4 INT32 = 64 B) 只佔 1 個 line, 寫回後必定結束 (mma_busy 恆 0)
 expr npu_gemm_cu\.sv:\d+ \S* \(mma_busy==1\) => 0 # [C] 同上
 covergroup npu_gemm_cu_sva\.sv:\d+ .*mid_line # [C] 同上: 沒有「還有下一個 C line」的寫回
-toggle npu_gemm_cu\.sv:\d+ \S* row_last: # [C] N <= 16: 一列 C 只佔一個 line, 每次寫回都是該列最後一個 line (row_last 恆為 1); N = 32 時才切換

@@ -70,7 +70,7 @@ module npu_gemm_cu
   logic [511:0]  a_dat, b_dat;               // 各取線軌讀到的 line
   logic [511:0] c_line, c_line_n;
   logic [511:0] wr_d;                        // 本次寫回的 line
-  logic         row_last;                    // 本次寫回是該列的最後一個 line
+  logic         wr_end;                      // 本拍的寫回 grant 完成一整列 (N <= 16: 每次寫回; N = 32: 寫後半)
 
   // ---------------- npu_mma ----------------
   logic mma_start, mma_busy, mma_in_valid, mma_in_ready, mma_in_last, mma_out_valid, mma_out_ready;
@@ -139,7 +139,7 @@ module npu_gemm_cu
     assign c_line_n = mma_out_vec[N/2-1:0];
     assign out_nxt  = G_WR;
     assign wr_d     = c_half ? c_hi : c_line;
-    assign row_last = c_half;
+    assign wr_end   = wr_gnt && c_half;
     always_ff @(posedge clk or negedge rst_n)
       if (!rst_n) begin c_hi <= '0; c_half <= 1'b0; end
       else if (out_fire) begin c_hi <= mma_out_vec[N-1:N/2]; c_half <= 1'b0; end   // 只在輸出拍更新
@@ -148,7 +148,7 @@ module npu_gemm_cu
     assign c_line_n = mma_out_vec;
     assign out_nxt  = G_WR;
     assign wr_d     = c_line;
-    assign row_last = 1'b1;
+    assign wr_end   = wr_gnt;
   end else begin : g_cn
     localparam int CW = $clog2(RPL);
     wire [CW-1:0] slot = mma_out_row[CW-1:0];
@@ -158,7 +158,7 @@ module npu_gemm_cu
     end
     assign out_nxt = (slot == CW'(RPL - 1)) ? G_WR : G_OUT;
     assign wr_d     = c_line;
-    assign row_last = 1'b1;
+    assign wr_end   = wr_gnt;
   end
 
   always_ff @(posedge clk or negedge rst_n) begin
@@ -188,9 +188,9 @@ module npu_gemm_cu
         end
         G_RUN: if (feed && mma_in_last) st <= G_OUT;
         G_OUT: if (out_fire) begin c_line <= c_line_n; st <= out_nxt; end
-        G_WR:  if (wr_gnt) begin
-          c_ptr <= c_ptr + 1'b1;
-          if (row_last) begin                                       // N = 32: 前半寫完留在 G_WR 寫後半
+        G_WR: begin
+          if (wr_gnt) c_ptr <= c_ptr + 1'b1;
+          if (wr_end) begin                                         // N = 32: 前半寫完留在 G_WR 寫後半
             if (!mma_busy) begin st <= G_IDLE; done <= 1'b1; end    // 最後一列已輸出, npu_mma 回到 idle
             else st <= G_OUT;
           end
