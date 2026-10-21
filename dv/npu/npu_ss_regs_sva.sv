@@ -17,7 +17,7 @@ module npu_ss_regs_sva
   default clocking cb @(posedge clk); endclocking
   default disable iff (!rst_n);
   // 主端協定 (TB 遵守)
-  m_setup:  assume property (penable |-> psel);
+  // (penable 是共用訊號: 沒被選中的從端也會看到 penable = 1, 不假設 penable → psel)
   m_access: assume property (psel && !penable |=> psel && penable && $stable(paddr) && $stable(pwrite));
   m_rdstrb: assume property (psel && !pwrite |-> pstrb == '0);
   m_cmd:    assume property (1'b1);                                  // (命令接收端為 TB 模型, 無額外假設)

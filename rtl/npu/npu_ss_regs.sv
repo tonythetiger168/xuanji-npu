@@ -187,7 +187,6 @@ module npu_ss_regs
     if ($past(cpl_valid && !cpl_ready)) begin assume (cpl_valid && cpl_id == $past(cpl_id)); end
   end
   always @(*) begin
-    assume (!penable || psel);
     if (psel && !pwrite) begin assume (pstrb == '0); end
   end
   wire       f_acc = psel && penable, f_wr = f_acc && pwrite, f_rd = f_acc && !pwrite;

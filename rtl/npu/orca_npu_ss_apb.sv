@@ -26,6 +26,7 @@ module orca_npu_ss_apb
   output logic [31:0] prdata,
   output logic        pslverr,
   output logic        irq,
+  output logic        busy,              // 子系統忙碌或 APB 命令 FIFO 非空 (= STATUS.BUSY; PMU 用)
   output logic         m_rd_req,
   output logic [31:0]  m_rd_addr,
   input  logic         m_rd_gnt,
@@ -44,6 +45,7 @@ module orca_npu_ss_apb
     .clk, .rst_n, .psel, .penable, .pwrite, .paddr, .pwdata, .pstrb, .pready, .prdata, .pslverr, .irq,
     .cmd_valid, .cmd_ready, .cmd, .cpl_valid, .cpl_ready, .cpl_id, .ss_busy, .vec_err,
     .perf_wr, .perf_busy, .perf_steps);
+  assign busy = ss_busy || cmd_valid;
   orca_npu_ss #(.TILE_ID(TILE_ID), .N(N), .NCU(NCU), .NB(NB), .DEPTH(DEPTH), .QD(QD), .OUT(OUT)) u_ss (
     .clk, .rst_n, .test_en, .cmd_valid, .cmd_ready, .cmd, .cpl_valid, .cpl_ready, .cpl_id,
     .irq(), .busy(ss_busy), .vec_err,
