@@ -54,7 +54,9 @@ module sfu (
   logic [7:0]   er;                              // 48 (定點) 或 150 - ex (|x| < 2^-25 的 sinπ, 不需縮減)
   logic [46:15] rs;                              // r · 2^48 的查表用位元 (r < 1/2; r = 1/2 另外處理, 低 15 位元不用)
   always_comb begin
-    v0 = 49'(73'({1'b1, fr}) << (ex - 8'd102));  // |x| · 2^48 mod 2^49 (= |x| mod 2)
+    // |x| · 2^48 mod 2^49 (= |x| mod 2)。|x| >= 2^23 (整數) 時同樣精確: 2^23 <= |x| < 2^24 只剩最低位 (奇偶),
+    // 更大時為 0 — 一般路徑即給出 sinπ = ±0、cosπ = (-1)^x, 不需另外處理 (mutation 驗證)
+    v0 = 49'(73'({1'b1, fr}) << (ex - 8'd102));
     v1 = tcos ? v0 + 49'(1 << 47) : v0;          // cosπ(x) = sinπ(x + 1/2) (偶函數, 不看符號)
     tflip = v1[48];                              // u >= 1: 變號, u -= 1
     v2 = v1[47:0];
@@ -174,7 +176,6 @@ module sfu (
       default: begin                             // sinπ / cosπ
         if (ex == 8'hFF)             y = QNAN;
         else if (x_zero)             y = tcos ? 32'h3F80_0000 : {s, 31'b0};
-        else if (ex >= 8'd150)       y = !tcos ? {s, 31'b0} : (ex == 8'd150 && fr[0]) ? 32'hBF80_0000 : 32'h3F80_0000;
         else if (tcos && !t_fix)     y = 32'h3F80_0000;                 // |x| < 2^-25: cosπ 捨入為 1
         else if (t_fix && v3 == '0)  y = tcos ? '0 : {s, 31'b0};       // sinπ(整數) / cosπ(n + 1/2)
         else if (t_fix && v3 == 48'(1 << 47)) y = {tneg, 31'h3F80_0000};  // r = 1/2: ±1

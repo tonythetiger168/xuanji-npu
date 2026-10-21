@@ -59,11 +59,11 @@ U=rtl/fp/sfu.sv
 mut sfu_tie      $U "wire          inc  = rb && (st || q[0]);" "wire          inc  = rb;"                   # 平手不偶數化
 mut sfu_norm     $U "wire          hi   = yu[30];" "wire          hi   = yu[29];"                          # 正規化選錯
 mut sfu_rsq_par  $U "c = eu[0] ? SFU_TAB_RSQRT_O[idx] : SFU_TAB_RSQRT_E[idx];" "c = eu[0] ? SFU_TAB_RSQRT_E[idx] : SFU_TAB_RSQRT_O[idx];"  # 指數奇偶選錯表
-mut sfu_rsq_k    $U "2'd1:    k = -10'(eu >>> 1);" "2'd1:    k = -10'(eu >>> 1) + 10'sd1;"               # rsqrt 指數錯
-mut sfu_p2       $U "p2 = 16'((41'(c2) * 41'(t2)) >> 25);" "p2 = 16'((41'(c2) * 41'(t2)) >> 26);"          # exp2 二次項比例錯
+mut sfu_rsq_k    $U "3'd1:    k = -10'(eu >>> 1);" "3'd1:    k = -10'(eu >>> 1) + 10'sd1;"               # rsqrt 指數錯
+mut sfu_p2       $U "p2 = 17'((43'(c2) * signed'({18'b0, t2})) >>> 25);" "p2 = 17'((43'(c2) * signed'({18'b0, t2})) >>> 26);"          # exp2 二次項比例錯
 # (p1 / floor 的 >>> 改 >> 是等價 mutant: 位移後立即截斷到低位, 移入的位元不影響結果)
 mut sfu_p1scale  $U "p1 = 26'((52'(c1) * signed'({27'b0, t})) >>> 16);" "p1 = 26'((52'(c1) * signed'({27'b0, t})) >>> 15);"  # recip / rsqrt 一次項比例錯
-mut sfu_log2e    $U "if (op == 2'd3) w = 42'((91'(v) * signed'({1'b0, SFU_LOG2E})) >>> SFU_LOG2E_SH);" "if (op == 2'd3) w = 42'((91'(v) * signed'({1'b0, SFU_LOG2E})) >>> (SFU_LOG2E_SH + 1));"  # exp 換底錯
+mut sfu_log2e    $U "if (op == 3'd3) w = 42'((91'(v) * signed'({1'b0, SFU_LOG2E})) >>> SFU_LOG2E_SH);" "if (op == 3'd3) w = 42'((91'(v) * signed'({1'b0, SFU_LOG2E})) >>> (SFU_LOG2E_SH + 1));"  # exp 換底錯
 mut sfu_floor    $U "default: k = 10'(w >>> 32);" "default: k = 10'(w >>> 31);"                           # exp2 的整數部分錯
 mut sfu_ftz      $U "else if (e < -11'sd126)  y_fin = '0;" "else if (e < -11'sd127)  y_fin = '0;"           # FTZ 邊界錯一個
 mut sfu_ovf      $U "if (e > 11'sd127)        y_fin = PINF[30:0];" "if (e > 11'sd128)        y_fin = PINF[30:0];"  # 溢位邊界錯一個
@@ -80,8 +80,8 @@ mut trig_mirror  $U "v3 = (v2 > 48'(1 << 47)) ? 48'(1 << 48) - v2 : v2;" "v3 = v
 mut trig_cosoff  $U "v1 = tcos ? v0 + 49'(1 << 47) : v0;" "v1 = tcos ? v0 + 49'(1 << 46) : v0;"         # cosπ 位移錯 (1/4)
 mut trig_cossign $U "tneg = (tcos ? 1'b0 : s) ^ tflip;" "tneg = s ^ tflip;"                            # cosπ 當成奇函數
 mut trig_tiny    $U "wire          t_fix = (ex >= 8'd102);" "wire          t_fix = (ex >= 8'd90);"     # 定點範圍外仍走定點 (精度不足)
-mut trig_int     $U "else if (ex >= 8'd150)       y = !tcos ? {s, 31'b0}" "else if (ex >= 8'd151)       y = !tcos ? {s, 31'b0}"  # 2^23 視為非整數
-mut trig_parity  $U "(ex == 8'd150 && fr[0]) ? 32'hBF80_0000" "(ex == 8'd150 && fr[1]) ? 32'hBF80_0000"  # cosπ(大整數) 奇偶錯
+# (|x| >= 2^23 的整數特例是等價 mutant: 一般路徑的定點縮減在該範圍同樣精確, RTL 已移除該分支)
+mut trig_scale   $U "v0 = 49'(73'({1'b1, fr}) << (ex - 8'd102));" "v0 = 49'(73'({1'b1, fr}) << (ex - 8'd101));"     # 縮減的定點比例錯
 mut trig_half    $U "else if (t_fix && v3 == 48'(1 << 47)) y = {tneg, 31'h3F80_0000};" "else if (1'b0) y = {tneg, 31'h3F80_0000};"  # r = 1/2 不特別處理 (索引溢出)
 mut trig_round   $U "tinc = tp[tsh - 7'd1] && (" "tinc = 1'b0 && ("                                       # sinπ / cosπ 不捨入 (截斷)
 mut trig_exp     $U "te  = 11'sd2 - 11'(er)" "te  = 11'sd1 - 11'(er)"                                       # 少乘 4
