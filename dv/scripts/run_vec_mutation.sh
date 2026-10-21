@@ -79,5 +79,43 @@ mut max_zero     $X "(ad[31] != bd[31]) ? !ad[31]" "(ad[31] != bd[31]) ? ad[31]"
 mut max_neg      $X "(ad[31] ? (ad[30:0] < bd[30:0])" "(ad[31] ? (ad[30:0] > bd[30:0])"                          # 負數比較方向錯
 mut max_daz      $X "wire [31:0] ad = (a[30:23] == '0) ? {a[31], 31'd0} : a;" "wire [31:0] ad = a;"              # 次正規數未 DAZ
 mut max_nan      $X "(nan_a || nan_b)" "(nan_a)"                                                                 # b 為 NaN 未處理
+# ---- npu_vec_eng (以引擎 TB 執行: 多命令程式, 隨機 grant) ----
+python3 dv/vec/gen_eng_vectors.py $M/e1 1 60 > /dev/null
+python3 dv/vec/gen_eng_vectors.py $M/e2 2 60 > /dev/null
+mut_e() {   # name old new
+  local n=$1
+  python3 - "$2" "$3" "$M/$n.sv" rtl/npu/npu_vec_eng.sv <<'PY' || { echo "$n: pattern not found"; surv=1; return; }
+import sys
+o, nw, out, f = sys.argv[1:5]
+s = open(f).read()
+if s.count(o) != 1: sys.exit(1)
+open(out, 'w').write(s.replace(o, nw, 1))
+PY
+  nt=$((nt + 1))
+  verilator --binary --timing -j "${JOBS:-4}" --assert -Wno-fatal -Wno-lint -Wno-style -Irtl/common -Irtl/fp --Mdir "$M/$n.obj" \
+    $FILES dv/vec/npu_vec_sva.sv "$M/$n.sv" dv/vec/npu_vec_eng_sva.sv dv/vec/npu_vec_eng_tb.sv --top-module npu_vec_eng_tb \
+    > "$M/$n.build" 2>&1 || { echo "$n: BUILD FAIL"; rm -rf "${M:?}/${n:?}.obj"; surv=1; return; }
+  local why=""
+  for v in e1 e2; do
+    (cd "$M" && "./$n.obj/Vnpu_vec_eng_tb" +vec=$v +seed=3 +gnt_p=60 > "$n.$v.log" 2>&1)
+    if ! grep -q "TB PASS" "$M/$n.$v.log" || grep -q "Assertion failed" "$M/$n.$v.log"; then
+      why="$v: $(grep -m1 -oE 'MISMATCH [a-z]+|ERROR: [a-z ]+|u_sva\.[A-Za-z_.0-9\[\]]*' "$M/$n.$v.log")"; break
+    fi
+  done
+  rm -rf "${M:?}/${n:?}.obj"
+  if [ -z "$why" ]; then echo "$n: SURVIVED"; surv=1; else nk=$((nk + 1)); echo "$n: killed ($why)"; fi
+}
+mut_e eng_hold    "wire  f_sel  = f_pend || (f_want && !v_rd_req);" "wire  f_sel  = f_want && !v_rd_req;"            # 預取請求不保持 (曾犯的錯)
+mut_e eng_vprio   "wire  f_sel  = f_pend || (f_want && !v_rd_req);" "wire  f_sel  = f_pend || f_want;"                # 取指搶走 npu_vec 等待中的讀取
+mut_e eng_slot    "  assign ins = npu_vec_ins_t'(fb[fr][128 * slot +: 77]);" "  assign ins = npu_vec_ins_t'(fb[fr][128 * slot +: 76]);"  # 指令少一位
+mut_e eng_lnend   "wire  ln_end = fire && (slot == 2'd3 || last);" "wire  ln_end = fire && slot == 2'd3;"         # 最後一個 line 不釋放
+mut_e eng_nf      "nf <= (nf > 16'd4) ? nf - 16'd4 : '0;" "nf <= (nf > 16'd3) ? nf - 16'd4 : '0;"                 # 剩餘取指數錯
+mut_e eng_pc      "fv[fw] <= 1'b1; fw <= !fw; pc <= pc + 26'd1;" "fv[fw] <= 1'b1; fw <= !fw; pc <= pc + 26'd2;"   # 取指位址跳過
+mut_e eng_fw      "fv[fw] <= 1'b1; fw <= !fw; pc <= pc + 26'd1;" "fv[fw] <= 1'b1; pc <= pc + 26'd1;"              # 寫入緩衝不輪換
+mut_e eng_done    "  wire  last = fire && ni == 16'd1;" "  wire  last = fire && ni == 16'd2;"                       # 少執行一個指令
+mut_e eng_errclr  ".err(v_err), .err_clr(start)," ".err(v_err), .err_clr(1'b0),"                                  # 命令開始不清 err
+mut_e eng_ready   "  assign cmd_ready = !act && !done;" "  assign cmd_ready = !act;"                                # done 拍又接受命令
+mut_e eng_gate    "  wire  en = act || cmd_valid || done;" "  wire  en = act || cmd_valid;"                       # done 拍時脈關閉
+mut_e eng_vgnt    "  assign v_rd_gnt = !f_sel && v_rd_req && rd_gnt;" "  assign v_rd_gnt = v_rd_req && rd_gnt;"     # 取指的 grant 也給 npu_vec
 echo "=== vec mutation: $nk / $nt mutants killed"
 [ $surv -eq 0 ] && [ $nk -eq $nt ]

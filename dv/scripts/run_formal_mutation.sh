@@ -18,6 +18,7 @@ open(out, 'w').write(s.replace(o, nw, 1))
 PY
   nt=$((nt + 1)); mkdir -p $M/$n
   local extra=""; [ -f formal/$b/stubs.sv ] && extra=formal/$b/stubs.sv   # 子模組契約替身
+  [ "$b" = orca_npu_ss ] && extra="$extra rtl/npu/npu_l2_arb2.sv"           # 真的仲裁器 (不是替身)
   sv2v -DFORMAL -DFORMAL_TOP_$b -E Assert -Irtl/common rtl/common/orca_pkg.sv $extra $M/$n.sv > $M/$n/$b.v
   cp formal/$b/$b.sby $M/$n/
   (cd $M/$n && timeout 1800 sby -f $b.sby prove > sby.log 2>&1)
@@ -83,5 +84,19 @@ mut npu_ss_regs $R irq_nomask "assign irq = |(ist & r_ien);" "assign irq = |ist;
 mut npu_ss_regs $R slverr_none "assign pslverr = acc && !hit;" "assign pslverr = 1'b0;"
 mut npu_ss_regs $R cpl_on_wr  "assign cpl_ready = rd && wa == A_CPL_POP;" "assign cpl_ready = acc && wa == A_CPL_POP;"
 mut npu_ss_regs $R strobe     "return (old & ~m) | (nw & m);" "return nw;"
+A2=rtl/npu/npu_l2_arb2.sv
+mut npu_l2_arb2 $A2 nolock    "wire  r_sel  = r_lock ? r_own : r_pick;" "wire  r_sel  = r_pick;"
+mut npu_l2_arb2 $A2 gnt_both  "assign rd_gnt    = {m_rd_gnt && r_sel, m_rd_gnt && !r_sel} & rd_req;" "assign rd_gnt    = {m_rd_gnt, m_rd_gnt} & rd_req;"
+mut npu_l2_arb2 $A2 wdata     "assign m_wr_data = wr_data[w_sel];" "assign m_wr_data = wr_data[0];"
+mut npu_l2_arb2 $A2 fixed     "wire  w_pick = (wr_req == 2'b11) ? !w_last : wr_req[1];" "wire  w_pick = wr_req[1];"
+E=rtl/npu/npu_vec_eng.sv
+mut npu_vec_eng $E hold       "wire  f_sel  = f_pend || (f_want && !v_rd_req);" "wire  f_sel  = f_want && !v_rd_req;"
+mut npu_vec_eng $E slot_off   "  assign ins = npu_vec_ins_t'(fb[fr][128 * slot +: 77]);" "  assign ins = npu_vec_ins_t'(fb[!fr][128 * slot +: 77]);"
+mut npu_vec_eng $E pc_skip    "fv[fw] <= 1'b1; fw <= !fw; pc <= pc + 26'd1;" "fv[fw] <= 1'b1; fw <= !fw; pc <= pc + 26'd2;"
+mut npu_vec_eng $E done_early "  wire  last = fire && ni == 16'd1;" "  wire  last = fire && ni == 16'd2;"
+mut npu_vec_eng $E rdy_done   "  assign cmd_ready = !act && !done;" "  assign cmd_ready = !act;"
+mut orca_npu_ss $T vec_no_wait "wire g_vec  = go && head.op == NPU_OP_VEC && !h_nop && !vec_cv;" "wire g_vec  = go && head.op == NPU_OP_VEC && !h_nop;"
+mut orca_npu_ss $T vec_rr      "automatic int s = (int'(last) + 1 + i) % 4;" "automatic int s = (int'(last) + 1 + i) % 3;"
+mut orca_npu_ss $T vec_oc      "if (v_take) vec_id <= head.id;" "if (g_vec) vec_id <= head.id;"
 echo "=== formal mutation: $nk / $nt mutants killed"
 [ "$surv" -eq 0 ] || exit 1

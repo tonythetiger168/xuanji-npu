@@ -12,7 +12,9 @@ fi
 npu_cfg "$CFG" || exit 1
 M=build/npu_ss_mut_$CFG; rm -rf "$M"; mkdir -p "$M"
 echo "##### NPU subsystem mutation $CFG: N=$N NCU=$NCU NB=$NB"
-TILE=rtl/npu/orca_npu_ss.sv DMA=rtl/npu/npu_ss_dma.sv
+TILE=rtl/npu/orca_npu_ss.sv DMA=rtl/npu/npu_ss_dma.sv ARB=rtl/npu/npu_l2_arb2.sv
+FP="rtl/fp/fp_add.sv rtl/fp/fp_mul.sv rtl/fp/fp_narrow.sv rtl/fp/fp_widen.sv rtl/fp/sfu.sv rtl/fp/fp_max.sv rtl/fp/fp_small_dec.sv
+    rtl/fp/fp_mx_scale.sv rtl/fp/fp_from_int.sv rtl/npu/npu_vec.sv dv/vec/npu_vec_sva.sv rtl/npu/npu_vec_eng.sv dv/vec/npu_vec_eng_sva.sv"
 surv=0; nk=0; nt=0
 mut() {   # name file old new
   local n=$1 f=$2
@@ -23,12 +25,12 @@ s = open(f).read()
 if o not in s: sys.exit(1)
 open(out, 'w').write(s.replace(o, nw, 1))
 PY
-  local tile=$TILE dma=$DMA
-  case $f in $TILE) tile=$M/$n.sv ;; $DMA) dma=$M/$n.sv ;; esac
+  local tile=$TILE dma=$DMA arb=$ARB
+  case $f in $TILE) tile=$M/$n.sv ;; $DMA) dma=$M/$n.sv ;; $ARB) arb=$M/$n.sv ;; esac
   nt=$((nt + 1))
   verilator --binary --timing -j "${JOBS:-4}" --assert -Wno-fatal -Wno-lint -Wno-style \
-    -GN=$N -GNCU=$NCU -GNB=$NB -GDEPTH=$DEPTH -GOUT=$TILE_OUT --Mdir "$M/$n.obj" -Irtl/common \
-    rtl/common/orca_pkg.sv rtl/common/clock_gate.sv rtl/npu/npu_mma.sv dv/npu/npu_mma_sva.sv \
+    -GN=$N -GNCU=$NCU -GNB=$NB -GDEPTH=$DEPTH -GOUT=$TILE_OUT --Mdir "$M/$n.obj" -Irtl/common -Irtl/fp \
+    rtl/common/orca_pkg.sv rtl/common/clock_gate.sv rtl/npu/npu_mma.sv dv/npu/npu_mma_sva.sv $FP $arb \
     rtl/npu/npu_gemm_cu.sv dv/npu/npu_gemm_cu_sva.sv rtl/npu/npu_l2_xbar.sv dv/npu/npu_l2_xbar_sva.sv \
     rtl/npu/npu_core.sv dv/npu/npu_core_sva.sv $dma $tile dv/npu/npu_ss_sva.sv dv/npu/npu_ss_tb.sv \
     --top-module npu_ss_tb > "$M/$n.build" 2>&1 || { echo "$n: BUILD FAIL"; rm -rf "$M/$n.obj"; surv=1; return; }
@@ -65,5 +67,18 @@ mut dma_fifo     $DMA "if (pop)  f_rd <= f_rd + 1'b1;" "if (pop && !push)  f_rd 
 mut dma_ext31    $DMA "assign m_rd_addr = ext + 32'(iss);" "assign m_rd_addr = {1'b0, ext[30:0]} + 32'(iss);"       # 外部位址高位遺失
 mut dma_pushd    $DMA "wire [DW-1:0] push_d = st ? h_rd_data : m_rd_rdata;" "wire [DW-1:0] push_d = st ? h_rd_data : h_rd_data;"
 mut dma_n0       $DMA "assign done      = act && (wr == n);" "assign done      = act && (wr == n) && n != '0;"       # n = 0 永不完成
+# ---- VEC 分派 / 完成槽 / host 埠共用 (v6.3.10) ----
+mut vec_no_wait  $TILE "wire g_vec  = go && head.op == NPU_OP_VEC && !h_nop && !vec_cv;" "wire g_vec  = go && head.op == NPU_OP_VEC && !h_nop;"   # 完成槽被佔用仍分派 (覆蓋 vec_id)
+mut vec_k0       $TILE "((head.op == NPU_OP_GEMM || head.op == NPU_OP_VEC) && head.k == '0);" "(head.op == NPU_OP_GEMM && head.k == '0);"   # K = 0 的 VEC 送引擎
+mut rsvd_op      $TILE "wire h_nop  = head.op == NPU_OP_NOP || head.op > NPU_OP_VEC ||" "wire h_nop  = head.op == NPU_OP_NOP ||"   # 保留 op 卡住
+mut vec_id       $TILE "      if (v_take) vec_id <= head.id;" "      if (g_vec) vec_id <= head.id;"                                    # 引擎忙碌時也覆寫 id
+mut vec_err_gate $TILE "assign vec_err = v_done && v_derr;" "assign vec_err = v_derr;"                                                  # vec_err 不只在完成拍
+mut vec_sel      $TILE "cpl_id    <= sel[0] ? c_cpl_id : sel[1] ? dma_id : sel[2] ? nop_id : vec_id;" "cpl_id    <= sel[0] ? c_cpl_id : sel[1] ? dma_id : nop_id;"   # VEC 完成回報錯的 id
+mut rr4          $TILE "automatic int s = (int'(last) + 1 + i) % 4;" "automatic int s = (int'(last) + 1 + i) % 3;"                          # round-robin 漏掉 VEC
+mut busy_vec     $TILE "assign busy = q_hv || (oc != '0) || cpl_valid || c_busy || d_busy || v_busy;" "assign busy = q_hv || (oc != '0) || cpl_valid || c_busy || d_busy;"
+mut arb_nolock   $ARB "wire  r_sel  = r_lock ? r_own : r_pick;" "wire  r_sel  = r_pick;"                                               # 等待中換主端 (違反保持)
+mut arb_gnt_both $ARB "assign rd_gnt    = {m_rd_gnt && r_sel, m_rd_gnt && !r_sel} & rd_req;" "assign rd_gnt    = {m_rd_gnt, m_rd_gnt} & rd_req;"   # grant 給兩個
+mut arb_wdata    $ARB "assign m_wr_data = wr_data[w_sel];" "assign m_wr_data = wr_data[0];"                                          # 寫資料取錯主端
+mut arb_fixed    $ARB "wire  w_pick = (wr_req == 2'b11) ? !w_last : wr_req[1];" "wire  w_pick = wr_req[1];"                            # 固定優先權
 echo "=== $CFG: $nk / $nt mutants killed"
 [ "$surv" -eq 0 ] || exit 1
