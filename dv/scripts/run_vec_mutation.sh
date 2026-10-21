@@ -43,7 +43,7 @@ mut vec_ill_sfu  $V "(ins.op == VOP_SFU && ins.fn > 3'd5)" "(ins.op == VOP_SFU &
 mut vec_rdy_ld   $V "assign ins_ready = is_ld ? rd_gnt" "assign ins_ready = is_ld ? 1'b1"                       # 不等讀取 grant
 mut vec_rdy_st   $V "is_st ? wr_gnt : 1'b1;" "is_st ? 1'b1 : 1'b1;"                                             # 不等寫入 grant
 mut vec_we_st    $V " && ins.op != VOP_ST;" ";"                                                                  # ST 也寫暫存器
-mut vec_err      $V "else if (fire && illegal)  err <= 1'b1;" "else err <= fire && illegal;"                     # err 不黏著
+mut vec_err      $V "    else if (err_clr)          err <= 1'b0;" "    else                       err <= 1'b0;"   # err 不黏著 (每拍清除)
 mut vec_part16   $V "rd_data[256 * ins.part[0] +: 256]" "rd_data[256 * ins.part[1] +: 256]"                      # 16 bit 格式 part 選錯
 mut vec_part4    $V "rd_data[64 * ins.part +: 64]" "rd_data[64 * ins.part[1:0] +: 64]"                           # FP4 part 少一位
 mut vec_sub      $V "b[i][31] ^ (ins.op == VOP_SUB)" "b[i][31]"                                                  # SUB 不取負
@@ -106,10 +106,9 @@ PY
   if [ -z "$why" ]; then echo "$n: SURVIVED"; surv=1; else nk=$((nk + 1)); echo "$n: killed ($why)"; fi
 }
 mut_e eng_hold    "wire  f_sel  = f_pend || (f_want && !v_rd_req);" "wire  f_sel  = f_want && !v_rd_req;"            # 預取請求不保持 (曾犯的錯)
-mut_e eng_vprio   "wire  f_sel  = f_pend || (f_want && !v_rd_req);" "wire  f_sel  = f_pend || f_want;"                # 取指搶走 npu_vec 等待中的讀取
+# (取指優先於 npu_vec 的讀取 = 等價 mutant: npu_vec 的 LD 等待中時取指條件不會改變, 不會換主端, 只改先後)
 mut_e eng_slot    "  assign ins = npu_vec_ins_t'(fb[fr][128 * slot +: 77]);" "  assign ins = npu_vec_ins_t'(fb[fr][128 * slot +: 76]);"  # 指令少一位
-mut_e eng_lnend   "wire  ln_end = fire && (slot == 2'd3 || last);" "wire  ln_end = fire && slot == 2'd3;"         # 最後一個 line 不釋放
-mut_e eng_nf      "nf <= (nf > 16'd4) ? nf - 16'd4 : '0;" "nf <= (nf > 16'd3) ? nf - 16'd4 : '0;"                 # 剩餘取指數錯
+mut_e eng_nf      "nf <= (nf > 16'd4) ? nf - 16'd4 : '0;" "nf <= (nf > 16'd4) ? nf - 16'd3 : '0;"                 # 剩餘取指數錯
 mut_e eng_pc      "fv[fw] <= 1'b1; fw <= !fw; pc <= pc + 26'd1;" "fv[fw] <= 1'b1; fw <= !fw; pc <= pc + 26'd2;"   # 取指位址跳過
 mut_e eng_fw      "fv[fw] <= 1'b1; fw <= !fw; pc <= pc + 26'd1;" "fv[fw] <= 1'b1; pc <= pc + 26'd1;"              # 寫入緩衝不輪換
 mut_e eng_done    "  wire  last = fire && ni == 16'd1;" "  wire  last = fire && ni == 16'd2;"                       # 少執行一個指令

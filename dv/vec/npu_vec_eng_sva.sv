@@ -16,7 +16,7 @@ module npu_vec_eng_sva (
   default disable iff (!rst_n);
   m_cmd_n:    assume property (cmd_valid |-> cmd_n != '0);
 
-  a_idle:     assert property (cmd_valid && cmd_ready |-> !act);
+  a_idle:     assert property (cmd_valid && cmd_ready |-> !busy);         // 閒置 = 不在執行、也不在 done 拍
   a_done:     assert property (done |-> $past(act) && !act);
   a_one_done: assert property (done |=> !done);
   a_rd_hold:  assert property (rd_req && !rd_gnt |=> rd_req && $stable(rd_line));

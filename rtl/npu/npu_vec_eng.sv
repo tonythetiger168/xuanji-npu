@@ -64,7 +64,7 @@ module npu_vec_eng
   assign ins = npu_vec_ins_t'(fb[fr][128 * slot +: 77]);
   wire  fire = iv && v_ins_ready;
   wire  last = fire && ni == 16'd1;
-  wire  ln_end = fire && (slot == 2'd3 || last);  // 這個緩衝用完
+  wire  ln_end = fire && slot == 2'd3;            // 這個緩衝用完 (最後一個不滿的 line 不需釋放: 下一個命令開始時清除)
   wire  start = cmd_valid && cmd_ready;
   assign cmd_ready = !act && !done;
   assign busy = act || done;
