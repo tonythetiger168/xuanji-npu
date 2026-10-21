@@ -65,7 +65,7 @@ module npu_l2_xbar_sva
         ov   <= (rd_req[m] && !rd_gnt[m]) ? ((cont ? ov : '0) | hit) : '0;
       end
     a_rd_rr: assert property (cont |-> (hit & ov) == '0);
-    c_rd_ov: cover property (cont && hit != '0);   // 等待中被別人插隊過
+    c_rd_ov: cover property (rd_gnt[m] && ov != '0);   // 等待中被插隊過, 之後拿到 grant
   end
   for (genvar m = 0; m < NW; m++) begin : g_ovw
     logic [NW-1:0] ov, hit;
@@ -84,7 +84,7 @@ module npu_l2_xbar_sva
         ov   <= (wr_req[m] && !wr_gnt[m]) ? ((cont ? ov : '0) | hit) : '0;
       end
     a_wr_rr: assert property (cont |-> (hit & ov) == '0);
-    c_wr_ov: cover property (cont && hit != '0);
+    c_wr_ov: cover property (wr_gnt[m] && ov != '0);
   end
   // 平行度: 同拍的讀 / 寫 grant 數 (多數主端同時存取不同 bank)。
   // 註: 「所有 CU 同拍讀」在此設計中不會發生 — 預取下每個 CU 每 SPL 拍只讀 2 次, 且分派一拍一個而錯開。
