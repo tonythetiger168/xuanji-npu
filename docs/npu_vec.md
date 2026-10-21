@@ -76,7 +76,7 @@ OCP MX 一個區塊 32 個元素, 一個 FP8 line 是兩個區塊, 軟體以 par
 |---|---|
 | 位元一致 | 4 seed (22,624 + 3 × 約 5,980 個指令) + 9 個 kernel, 0 錯誤 |
 | coverage | line / branch / expr / toggle 100% (唯一豁免: BF16 擴展補上的 16 個低位恆為 0 [C]); covergroup 57 / 57、SVA cover 5 / 5 |
-| mutation | 39 / 39 (解碼 / 非法編碼、ready、ST 寫回、err、part 選擇、SUB、格式選擇、歸約節點、clock gate、BF16 儲存、MX / FP16 解碼、比例、INT32 捨入、max) |
+| mutation | 49 / 49: 單元 39 (解碼 / 非法編碼、ready、ST 寫回、err、part 選擇、SUB、格式選擇、歸約節點、clock gate、BF16 儲存、MX / FP16 解碼、比例、INT32 捨入、max) + 向量引擎 `npu_vec_eng` 10 (命令保持、slot、取指、PC、韌體寫入、完成、err 清除、ready、clock gate、L2 grant) |
 | 形式證明 | prove PASS、cover PASS; 形式 mutation 7 / 7 |
 
 ### Kernel (`dv/vec/vec_kernels.py`, D = 1024 個 FP32, 參考: float64 numpy 的數學定義, 輸入為同一組 FP32 值)
