@@ -145,6 +145,7 @@ module npu_vec_eng
     assert (act == (f_act && f_iss != f_n) && done == (f_act && f_iss == f_n));
     if (act) begin assert (ni == f_n - f_iss); end
     if (f_pend) begin assert (f_want); end                     // 等待 grant 的取指: 條件不會消失
+    if (f_act) begin assert (nf == '0 || f_n[1:0] == nf[1:0]); end   // 只有最後一個 line 可能不滿 (已取數為 4 的倍數或全部取完)
     if (act || done) begin assert (pc - f_l0 == 26'((17'(f_n) - 17'(nf) + 17'd3) >> 2) && nf <= ni); end
     // 取指 / 緩衝的帳: F = 已取的指令數, I = 已發出; 緩衝中的 line 數 = ceil(F/4) - I/4; 讀出位置 slot = I mod 4
     if (act) begin
