@@ -6,7 +6,7 @@ module npu_vec_sva
   import npu_vec_pkg::*;
 #(parameter int NV = 8) (
   input logic clk, rst_n, test_en,
-  input logic ins_valid, ins_ready, err,
+  input logic ins_valid, ins_ready, err, err_clr,
   input npu_vec_ins_t ins,
   input logic rd_req, rd_gnt, wr_req, wr_gnt,
   input logic illegal, fire, we,
@@ -25,8 +25,10 @@ module npu_vec_sva
   a_rdy_wr:  assert property (wr_req |-> ins_ready == wr_gnt);
   a_rdy_alu: assert property (ins_valid && !rd_req && !wr_req |-> ins_ready);
   a_err_set: assert property (fire && illegal |=> err);
-  a_err_stk: assert property (err |=> err);
+  a_err_stk: assert property (err && !err_clr |=> err);
+  a_err_clr: assert property (err_clr && !(fire && illegal) |=> !err);
   a_err_why: assert property (!err ##1 err |-> $past(fire && illegal));
+  c_err_clr: cover property (err && err_clr);
   a_we:      assert property (we |-> fire && !illegal && ins.op != VOP_NOP && ins.op != VOP_ST);
   for (genvar r = 0; r < NV; r++) begin : g_r
     a_reg_stable: assert property (!(we && ins.vd == 3'(r)) |=> $stable(vr[r]));

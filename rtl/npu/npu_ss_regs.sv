@@ -9,7 +9,8 @@
 //   - 命令: CPU 先寫 CMD_CTL / CMD_EXT / CMD_A / CMD_B / CMD_C (暫存區, 寫後保留), 再寫 CMD_PUSH, 暫存區內容進入
 //     CQ 項的命令 FIFO, 由 FIFO 頭依 valid / ready 送往 orca_npu_ss。FIFO 滿時 CMD_PUSH 丟棄並設定 CMD_OVF。
 //   - 完成: 讀 CPL_POP 時若有完成 (cpl_valid), 回傳 {VALID=1, id} 並在同一拍取走 (cpl_ready = 1); CPL_PEEK 不取走。
-//   - 中斷: irq = |(IRQ_STATUS & IRQ_ENABLE); IRQ_STATUS.CPL 是 cpl_valid 的位準, 其餘為黏著位元 (寫 1 清除)。
+//   - 中斷: irq = |(IRQ_STATUS & IRQ_ENABLE); IRQ_STATUS.CPL 是 cpl_valid 的位準, 其餘 (CMD_OVF / BUS_ERR / VEC_ERR)
+//     為黏著位元 (寫 1 清除)。
 //   - 效能計數: 讀 *_LO 時把同一計數器的 [47:32] 存入影子暫存器, 之後讀 *_HI 得到同一時刻的值 (48 bit 一致讀取)。
 //   APB 與 NPU Subsystem 在同一時脈域 (跨時脈域橋接不在本模組)。
 module npu_ss_regs
@@ -42,6 +43,7 @@ module npu_ss_regs
   output logic          cpl_ready,
   input  logic [7:0]    cpl_id,
   input  logic          ss_busy,
+  input  logic          vec_err,               // 一拍: VEC 命令遇到非法指令 (orca_npu_ss)
   output logic          perf_wr,               // 清除效能計數 (orca_npu_ss 的 perf_wdata_* 由上層接 0)
   input  logic [47:0]   perf_busy, perf_steps
 );
@@ -75,21 +77,21 @@ module npu_ss_regs
   // ---------------- 命令暫存區 ----------------
   logic [31:0] r_ctl, r_ext;
   logic [25:0] r_a, r_b, r_c;
-  logic [2:0]  r_ien;
+  logic [3:0]  r_ien;
   always_ff @(posedge clk or negedge rst_n)
     if (!rst_n) begin
       r_ctl <= '0; r_ext <= '0; r_a <= '0; r_b <= '0; r_c <= '0; r_ien <= '0;
     end else if (wr) begin
-      if (wa == A_CMD_CTL) r_ctl <= merge(r_ctl, pwdata, bm) & 32'hFFFF_FF1F;   // 保留位元 [7:5] 為 0
+      if (wa == A_CMD_CTL) r_ctl <= merge(r_ctl, pwdata, bm) & 32'hFFFF_FF3F;   // 保留位元 [7:6] 為 0
       if (wa == A_CMD_EXT) r_ext <= merge(r_ext, pwdata, bm);
       if (wa == A_CMD_A)   r_a   <= 26'(merge({6'd0, r_a}, pwdata, bm));
       if (wa == A_CMD_B)   r_b   <= 26'(merge({6'd0, r_b}, pwdata, bm));
       if (wa == A_CMD_C)   r_c   <= 26'(merge({6'd0, r_c}, pwdata, bm));
-      if (wa == A_IRQ_EN)  r_ien <= 3'(merge({29'd0, r_ien}, pwdata, bm));
+      if (wa == A_IRQ_EN)  r_ien <= 4'(merge({28'd0, r_ien}, pwdata, bm));
     end
   npu_tile_cmd_t stg;
   always_comb begin
-    stg.op  = npu_op_e'(r_ctl[1:0]);
+    stg.op  = npu_op_e'({r_ctl[5], r_ctl[1:0]});   // OP[2] 在 bit 5 (舊的 2 bit OP 版面不變)
     stg.wt  = r_ctl[2];
     stg.sa  = r_ctl[3];
     stg.sb  = r_ctl[4];
@@ -122,15 +124,16 @@ module npu_ss_regs
 
   // ---------------- 完成 / 中斷 ----------------
   assign cpl_ready = rd && wa == A_CPL_POP;                 // 沒有完成時讀 CPL_POP 不影響 (cpl_valid = 0)
-  logic ovf, berr;                                          // 黏著: 命令 FIFO 溢位、未定義位址
+  logic ovf, berr, verr;                                    // 黏著: 命令 FIFO 溢位、未定義位址、VEC 非法指令
   wire  w1c = wr && wa == A_IRQ_ST && pstrb[0];
   always_ff @(posedge clk or negedge rst_n)
-    if (!rst_n) begin ovf <= 1'b0; berr <= 1'b0; end
+    if (!rst_n) begin ovf <= 1'b0; berr <= 1'b0; verr <= 1'b0; end
     else begin
       ovf  <= (ovf  && !(w1c && pwdata[1])) || (push_req && q_full);
       berr <= (berr && !(w1c && pwdata[2])) || pslverr;
+      verr <= (verr && !(w1c && pwdata[3])) || vec_err;
     end
-  wire [2:0] ist = {berr, ovf, cpl_valid};
+  wire [3:0] ist = {verr, berr, ovf, cpl_valid};
   assign irq = |(ist & r_ien);
 
   // ---------------- 效能計數 ----------------
@@ -152,8 +155,8 @@ module npu_ss_regs
         A_CFG0:     prdata = {8'($clog2(DEPTH)), 8'(NB), 8'(NCU), 8'(N)};
         A_CFG1:     prdata = {8'(CQ), 8'(TILE_ID), 8'(OUT), 8'(QD)};
         A_STATUS:   prdata = {20'd0, 4'(CQ - int'(q_n)), 4'd0, !cmd_valid, q_full, cpl_valid, ss_busy || cmd_valid};
-        A_IRQ_ST:   prdata = {29'd0, ist};
-        A_IRQ_EN:   prdata = {29'd0, r_ien};
+        A_IRQ_ST:   prdata = {28'd0, ist};
+        A_IRQ_EN:   prdata = {28'd0, r_ien};
         A_CMD_CTL:  prdata = r_ctl;
         A_CMD_EXT:  prdata = r_ext;
         A_CMD_A:    prdata = {6'd0, r_a};
@@ -193,8 +196,8 @@ module npu_ss_regs
                                    10'h00B, 10'h00C, 10'h00D, 10'h010, 10'h011, 10'h014, 10'h015, 10'h016, 10'h017, 10'h018};
   wire [31:0] f_bm = {{8{pstrb[3]}}, {8{pstrb[2]}}, {8{pstrb[1]}}, {8{pstrb[0]}}};
   logic [31:0] f_ctl, f_ext, f_a, f_b, f_c;
-  logic [2:0]  f_ien;
-  logic        f_ovf, f_berr;
+  logic [3:0]  f_ien;
+  logic        f_ovf, f_berr, f_verr;
   logic [CW:0] f_cnt;                                       // 已接受、尚未送出的命令數
   logic [7:0]  f_acc_n, f_out_n;                            // 已接受 / 已送出的命令序號
   (* anyconst *) logic [7:0] f_idx;
@@ -206,23 +209,24 @@ module npu_ss_regs
   wire  f_push    = f_pushreq && !f_full;
   npu_tile_cmd_t f_stg;
   always @(*) begin
-    f_stg.op = npu_op_e'(f_ctl[1:0]); f_stg.wt = f_ctl[2]; f_stg.sa = f_ctl[3]; f_stg.sb = f_ctl[4];
+    f_stg.op = npu_op_e'({f_ctl[5], f_ctl[1:0]}); f_stg.wt = f_ctl[2]; f_stg.sa = f_ctl[3]; f_stg.sb = f_ctl[4];
     f_stg.id = f_ctl[15:8]; f_stg.k = f_ctl[31:16]; f_stg.ext = f_ext;
     f_stg.a = f_a[25:0]; f_stg.b = f_b[25:0]; f_stg.c = f_c[25:0];
   end
   always @(posedge clk or negedge rst_n)
     if (!rst_n) begin
-      f_ctl <= '0; f_ext <= '0; f_a <= '0; f_b <= '0; f_c <= '0; f_ien <= '0; f_ovf <= 1'b0; f_berr <= 1'b0;
+      f_ctl <= '0; f_ext <= '0; f_a <= '0; f_b <= '0; f_c <= '0; f_ien <= '0; f_ovf <= 1'b0; f_berr <= 1'b0; f_verr <= 1'b0;
       f_cnt <= '0; f_acc_n <= '0; f_out_n <= '0; f_have <= 1'b0;
     end else begin
-      if (f_wr && f_wa == 10'h008) f_ctl <= ((f_ctl & ~f_bm) | (pwdata & f_bm)) & 32'hFFFF_FF1F;
+      if (f_wr && f_wa == 10'h008) f_ctl <= ((f_ctl & ~f_bm) | (pwdata & f_bm)) & 32'hFFFF_FF3F;
       if (f_wr && f_wa == 10'h009) f_ext <= (f_ext & ~f_bm) | (pwdata & f_bm);
       if (f_wr && f_wa == 10'h00A) f_a <= ((f_a & ~f_bm) | (pwdata & f_bm)) & 32'h03FF_FFFF;
       if (f_wr && f_wa == 10'h00B) f_b <= ((f_b & ~f_bm) | (pwdata & f_bm)) & 32'h03FF_FFFF;
       if (f_wr && f_wa == 10'h00C) f_c <= ((f_c & ~f_bm) | (pwdata & f_bm)) & 32'h03FF_FFFF;
-      if (f_wr && f_wa == 10'h007) f_ien <= 3'(({29'd0, f_ien} & ~f_bm) | (pwdata & f_bm));
+      if (f_wr && f_wa == 10'h007) f_ien <= 4'(({28'd0, f_ien} & ~f_bm) | (pwdata & f_bm));
       f_ovf  <= (f_ovf && !(f_wr && f_wa == 10'h006 && pstrb[0] && pwdata[1])) || (f_pushreq && f_full);
       f_berr <= (f_berr && !(f_wr && f_wa == 10'h006 && pstrb[0] && pwdata[2])) || (f_acc && !f_def);
+      f_verr <= (f_verr && !(f_wr && f_wa == 10'h006 && pstrb[0] && pwdata[3])) || vec_err;
       f_cnt  <= f_cnt + (CW+1)'(f_push) - (CW+1)'(f_pop);
       if (f_push) begin
         f_acc_n <= f_acc_n + 1'b1;
@@ -237,11 +241,11 @@ module npu_ss_regs
     assert (pslverr == (f_acc && !f_def));
     assert (cpl_ready == (f_rd && f_wa == 10'h010));
     assert (cmd_valid == (f_cnt != '0));
-    assert (irq == |({f_berr, f_ovf, cpl_valid} & f_ien));
+    assert (irq == |({f_verr, f_berr, f_ovf, cpl_valid} & f_ien));
     assert (perf_wr == (f_wr && f_wa == 10'h014 && pstrb[0] && pwdata[0]));
     if (f_rd && f_wa == 10'h008) begin assert (prdata == f_ctl); end
-    if (f_rd && f_wa == 10'h007) begin assert (prdata == {29'd0, f_ien}); end
-    if (f_rd && f_wa == 10'h006) begin assert (prdata == {29'd0, f_berr, f_ovf, cpl_valid}); end
+    if (f_rd && f_wa == 10'h007) begin assert (prdata == {28'd0, f_ien}); end
+    if (f_rd && f_wa == 10'h006) begin assert (prdata == {28'd0, f_verr, f_berr, f_ovf, cpl_valid}); end
     if (!f_rd || !f_def) begin assert (prdata == '0); end
     // FIFO 資料: 被追蹤的命令送出時內容正確; 送出順序 = 接受順序
     if (f_pop && f_out_n == f_idx) begin assert (f_have && cmd == f_cmd); end
@@ -252,7 +256,7 @@ module npu_ss_regs
     assert (q_n == f_cnt);
     assert (q_rd == (CW+1)'(f_out_n));
     assert (r_ctl == f_ctl && r_ext == f_ext && {6'd0, r_a} == f_a && {6'd0, r_b} == f_b && {6'd0, r_c} == f_c);
-    assert (r_ien == f_ien && ovf == f_ovf && berr == f_berr);
+    assert (r_ien == f_ien && ovf == f_ovf && berr == f_berr && verr == f_verr);
     assert (f_have == (f_acc_n > f_idx));
     if (f_have && f_out_n <= f_idx) begin assert (q[(CW)'(q_rd + (CW+1)'(f_idx - f_out_n))] == f_cmd); end
   end

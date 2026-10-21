@@ -2,7 +2,8 @@
 //=============================================================================
 // npu_vec TB: 讀入 gen_vec_vectors.py / vec_kernels.py 產生的 L2 內容與指令串 (期望值來自 vec_ref.py),
 // 逐指令比對: 寫入暫存器的值、寫入 L2 的資料、err。L2 模型的讀 / 寫 grant 以 +gnt_p 機率隨機給 (預設 70%),
-// 指令之間隨機插入空拍 (+idle_p), test_en 隨機切換 (功能必須相同)。reset 記錄: 中途 reset (暫存器檔保持)。
+// 指令之間隨機插入空拍 (+idle_p), test_en 隨機切換 (功能必須相同)。reset 記錄: 中途 reset (暫存器檔保持);
+// err_clr 記錄: 一拍 err_clr。
 // plusargs: +vec=<base> (讀 <base>.mem / <base>.ins)  +gnt_p=N  +idle_p=N  +seed=N  +perf (grant 全給、無空拍、
 //           test_en = 0, 回報拍數)
 //=============================================================================
@@ -10,7 +11,7 @@ module npu_vec_tb;
   import npu_vec_pkg::*;
   logic clk = 0, rst_n = 0, test_en = 0;
   always #5 clk = ~clk;
-  logic ins_valid = 0, ins_ready, err;
+  logic ins_valid = 0, ins_ready, err, err_clr = 0;
   npu_vec_ins_t ins = '0;
   logic rd_req, rd_gnt, wr_req, wr_gnt;
   logic [25:0] rd_line, wr_line;
@@ -66,6 +67,11 @@ module npu_vec_tb;
     while ($fscanf(fi, "%h %d %d %h\n", iv, kind, e_err, exp) == 4) begin
       if (kind == 4) begin                         // reset (暫存器檔保持)
         ins_valid = 0; rst_n = 0; @(negedge clk); rst_n = 1; @(negedge clk);
+        continue;
+      end
+      if (kind == 5) begin                         // err_clr 一拍 (沒有指令)
+        ins_valid = 0; err_clr = 1; @(negedge clk); err_clr = 0;
+        if (err !== 1'b0) begin n_err++; $display("MISMATCH err after err_clr"); end
         continue;
       end
       while (!perf && $urandom_range(99) < idle_p) begin

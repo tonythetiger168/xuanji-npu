@@ -26,7 +26,7 @@ PY
 mut slverr_none "assign pslverr = acc && !hit;" "assign pslverr = 1'b0;"                                     # 未定義位址不報錯
 mut hit_hole    "A_PB_HI, A_PS_LO, A_PS_HI};" "A_PB_HI, A_PS_LO};"                     # 漏一個已定義位址
 mut strobe      "return (old & ~m) | (nw & m);" "return nw;"                                                 # 忽略 PSTRB
-mut ctl_rsvd    "r_ctl <= merge(r_ctl, pwdata, bm) & 32'hFFFF_FF1F;" "r_ctl <= merge(r_ctl, pwdata, bm);"                                                        # 保留位元可寫
+mut ctl_rsvd    "r_ctl <= merge(r_ctl, pwdata, bm) & 32'hFFFF_FF3F;" "r_ctl <= merge(r_ctl, pwdata, bm);"                                                        # 保留位元可寫
 mut push_full   "wire           push   = push_req && !q_full;" "wire           push   = push_req;"           # 滿時仍寫入
 mut full_off    "wire           q_full = (q_n == (CW+1)'(CQ));" "wire           q_full = (q_n == (CW+1)'(CQ - 1));"  # 少一項就算滿
 mut head_wrong  "assign cmd       = q[q_rd[CW-1:0]];" "assign cmd       = q[q_wr[CW-1:0]];"                # 送出錯的 FIFO 項
@@ -44,5 +44,8 @@ mut cpl_data    "cpl_valid ? cpl_id : 8'd0" "cpl_id"                            
 mut cfg_depth   "8'(\$clog2(DEPTH))" "8'(DEPTH)"                                                            # CFG0 欄位錯
 mut busy_q      "ss_busy || cmd_valid" "ss_busy"                                                            # FIFO 有命令時 BUSY 為 0
 mut rst_ctl     "r_ctl <= '0; r_ext <= '0;" "r_ext <= '0;"                                                  # CMD_CTL 不 reset
+mut op_hi       "stg.op  = npu_op_e'({r_ctl[5], r_ctl[1:0]});" "stg.op  = npu_op_e'({1'b0, r_ctl[1:0]});"   # OP[2] 遺失 (VEC 變 GEMM)
+mut verr_no_w1c "verr <= (verr && !(w1c && pwdata[3])) || vec_err;" "verr <= verr || vec_err;"            # VEC_ERR 清不掉
+mut verr_none   "verr <= (verr && !(w1c && pwdata[3])) || vec_err;" "verr <= (verr && !(w1c && pwdata[3]));"  # 沒記錄 VEC 錯誤
 echo "=== npu_ss_regs mutation: $nk / $nt mutants killed"
 [ $surv -eq 0 ] && [ $nk -eq $nt ]

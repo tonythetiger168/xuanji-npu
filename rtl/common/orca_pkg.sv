@@ -464,11 +464,12 @@ package orca_pkg;
   localparam logic [7:0] AIX_OP_DMA_ST  = 8'h11;  // AI->Host DMA store
 
   // NPU Subsystem 命令 (v6.3.9, orca_npu_ss; 語意見 docs/npu.md 「NPU Subsystem」)
-  typedef enum logic [1:0] {
-    NPU_OP_GEMM   = 2'd0,   // C[c] = A[a] × B[b], K = k (npu_core)
-    NPU_OP_DMA_LD = 2'd1,   // 外部 ext.. → L2 a.., k 個 line
-    NPU_OP_DMA_ST = 2'd2,   // L2 a.. → 外部 ext.., k 個 line
-    NPU_OP_NOP    = 2'd3    // 只回報完成 (wt = 1 時即 fence)
+  typedef enum logic [2:0] {
+    NPU_OP_GEMM   = 3'd0,   // C[c] = A[a] × B[b], K = k (npu_core)
+    NPU_OP_DMA_LD = 3'd1,   // 外部 ext.. → L2 a.., k 個 line
+    NPU_OP_DMA_ST = 3'd2,   // L2 a.. → 外部 ext.., k 個 line
+    NPU_OP_NOP    = 3'd3,   // 只回報完成 (wt = 1 時即 fence)
+    NPU_OP_VEC    = 3'd4    // 向量程式: 從 L2 line a 起的 k 個指令 (npu_vec_eng); 5..7 保留 (當 NOP)
   } npu_op_e;
   typedef struct packed {
     npu_op_e     op;

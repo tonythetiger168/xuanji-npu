@@ -36,17 +36,17 @@ module orca_npu_ss_apb
   output logic [511:0] m_wr_data,
   input  logic         m_wr_gnt
 );
-  logic          cmd_valid, cmd_ready, cpl_valid, cpl_ready, ss_busy, perf_wr;
+  logic          cmd_valid, cmd_ready, cpl_valid, cpl_ready, ss_busy, perf_wr, vec_err;
   npu_tile_cmd_t cmd;
   logic [7:0]    cpl_id;
   logic [47:0]   perf_busy, perf_steps;
   npu_ss_regs #(.TILE_ID(TILE_ID), .N(N), .NCU(NCU), .NB(NB), .DEPTH(DEPTH), .QD(QD), .OUT(OUT), .CQ(CQ)) u_regs (
     .clk, .rst_n, .psel, .penable, .pwrite, .paddr, .pwdata, .pstrb, .pready, .prdata, .pslverr, .irq,
-    .cmd_valid, .cmd_ready, .cmd, .cpl_valid, .cpl_ready, .cpl_id, .ss_busy,
+    .cmd_valid, .cmd_ready, .cmd, .cpl_valid, .cpl_ready, .cpl_id, .ss_busy, .vec_err,
     .perf_wr, .perf_busy, .perf_steps);
   orca_npu_ss #(.TILE_ID(TILE_ID), .N(N), .NCU(NCU), .NB(NB), .DEPTH(DEPTH), .QD(QD), .OUT(OUT)) u_ss (
     .clk, .rst_n, .test_en, .cmd_valid, .cmd_ready, .cmd, .cpl_valid, .cpl_ready, .cpl_id,
-    .irq(), .busy(ss_busy),
+    .irq(), .busy(ss_busy), .vec_err,
     .m_rd_req, .m_rd_addr, .m_rd_gnt, .m_rd_rvalid, .m_rd_rdata, .m_wr_req, .m_wr_addr, .m_wr_data, .m_wr_gnt,
     .perf_wr, .perf_wdata_busy('0), .perf_wdata_steps('0), .perf_busy, .perf_steps);   // perf_wr = 清除
 endmodule : orca_npu_ss_apb

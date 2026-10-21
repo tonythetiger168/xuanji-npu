@@ -10,8 +10,11 @@ B=build/npu_ss_regs; rm -rf "$B"; mkdir -p "$B"
 verilator --binary --timing -j "${JOBS:-4}" --assert --coverage -Wno-fatal -Wno-lint -Wno-style -Irtl/common --Mdir "$B/u" \
   rtl/common/orca_pkg.sv rtl/npu/npu_ss_regs.sv dv/npu/npu_ss_regs_sva.sv dv/npu/npu_ss_regs_tb.sv --top-module npu_ss_regs_tb \
   > "$B/build_u.log" 2>&1 || { tail -20 "$B/build_u.log"; echo "BUILD FAIL"; exit 1; }
-verilator --binary --timing -j "${JOBS:-4}" --assert --coverage -Wno-fatal -Wno-lint -Wno-style -Irtl/common --Mdir "$B/i" \
+verilator --binary --timing -j "${JOBS:-4}" --assert --coverage -Wno-fatal -Wno-lint -Wno-style -Irtl/common -Irtl/fp --Mdir "$B/i" \
   rtl/common/orca_pkg.sv rtl/common/clock_gate.sv rtl/npu/npu_mma.sv dv/npu/npu_mma_sva.sv rtl/npu/npu_gemm_cu.sv \
+  rtl/fp/fp_add.sv rtl/fp/fp_mul.sv rtl/fp/fp_narrow.sv rtl/fp/fp_widen.sv rtl/fp/sfu.sv rtl/fp/fp_max.sv rtl/fp/fp_small_dec.sv \
+  rtl/fp/fp_mx_scale.sv rtl/fp/fp_from_int.sv rtl/npu/npu_vec.sv dv/vec/npu_vec_sva.sv rtl/npu/npu_vec_eng.sv \
+  dv/vec/npu_vec_eng_sva.sv rtl/npu/npu_l2_arb2.sv \
   dv/npu/npu_gemm_cu_sva.sv rtl/npu/npu_l2_xbar.sv dv/npu/npu_l2_xbar_sva.sv rtl/npu/npu_core.sv dv/npu/npu_core_sva.sv \
   rtl/npu/npu_ss_dma.sv rtl/npu/orca_npu_ss.sv dv/npu/npu_ss_sva.sv rtl/npu/npu_ss_regs.sv dv/npu/npu_ss_regs_sva.sv \
   rtl/npu/orca_npu_ss_apb.sv dv/npu/orca_npu_ss_apb_tb.sv --top-module orca_npu_ss_apb_tb > "$B/build_i.log" 2>&1 || { tail -20 "$B/build_i.log"; echo "BUILD FAIL"; exit 1; }

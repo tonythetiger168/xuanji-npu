@@ -181,16 +181,18 @@ class Vec:
 
 # ---------------- 執行與 TB 向量檔 ----------------
 RESET = 'RESET'                                  # 程式中的 reset 記錄 (err 清除; 暫存器檔無 reset, 保持)
+ERRCLR = 'ERRCLR'                                # err_clr 脈衝 (沒有指令的一拍)
 
 
 def run(prog, mem):
     """執行程式 (指令整數或 RESET); 回傳 TB 記錄 [(ins, kind, err, exp)]:
-    kind 0 = 不寫入 (NOP), 1 = 寫暫存器 (exp = 寫入值 512 bit), 2 = 寫 L2 (exp = wr_data), 3 = 非法, 4 = reset。"""
+    kind 0 = 不寫入 (NOP), 1 = 寫暫存器 (exp = 寫入值 512 bit), 2 = 寫 L2 (exp = wr_data), 3 = 非法, 4 = reset,
+    5 = err_clr。"""
     v, recs = Vec(), []
     for ins in prog:
-        if ins == RESET:
+        if ins in (RESET, ERRCLR):
             v.err = 0
-            recs.append((0, 4, 0, 0))
+            recs.append((0, 4 if ins == RESET else 5, 0, 0))
             continue
         f = dec(ins)
         st = {}

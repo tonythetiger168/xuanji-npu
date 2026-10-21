@@ -1,0 +1,22 @@
+# npu_l2_arb2 (DMA / 向量引擎共用 host 埠): grant 互斥、只給請求者、位址 / 資料屬於拿到 grant 者、
+# 下游請求保持、輪流公平; DW = 8 (資料只是直通)
+[tasks]
+prove
+cover
+
+[options]
+prove: mode prove
+prove: depth 4
+cover: mode cover
+cover: depth 10
+
+[engines]
+smtbmc z3
+
+[script]
+read_verilog -sv -formal npu_l2_arb2.v
+chparam -set DW 8 npu_l2_arb2
+prep -top npu_l2_arb2
+
+[files]
+npu_l2_arb2.v

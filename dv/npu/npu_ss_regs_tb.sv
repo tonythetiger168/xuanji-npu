@@ -14,7 +14,7 @@ module npu_ss_regs_tb;
   logic [11:0] paddr = '0;
   logic [31:0] pwdata = '0, prdata;
   logic [3:0]  pstrb = '0;
-  logic cmd_valid, cmd_ready = 0, cpl_valid = 0, cpl_ready, ss_busy = 0, perf_wr;
+  logic cmd_valid, cmd_ready = 0, cpl_valid = 0, cpl_ready, ss_busy = 0, perf_wr, vec_err = 0;
   npu_tile_cmd_t cmd;
   logic [7:0]  cpl_id = '0;
   logic [47:0] perf_busy = '0, perf_steps = '0;
@@ -29,8 +29,8 @@ module npu_ss_regs_tb;
                        A_CMD_C, A_CMD_PUSH, A_CPL_POP, A_CPL_PEEK, A_PERF_CTRL, A_PB_LO, A_PB_HI, A_PS_LO, A_PS_HI};
   logic [31:0] m_ctl, m_ext;
   logic [25:0] m_a, m_b, m_c;
-  logic [2:0]  m_ien;
-  logic        m_ovf, m_berr;
+  logic [3:0]  m_ien;
+  logic        m_ovf, m_berr, m_verr;
   logic [15:0] m_shb, m_shs;
   npu_tile_cmd_t m_q [$];
 
@@ -44,7 +44,7 @@ module npu_ss_regs_tb;
   endfunction
   function automatic npu_tile_cmd_t m_stg();
     npu_tile_cmd_t c;
-    c.op = npu_op_e'(m_ctl[1:0]); c.wt = m_ctl[2]; c.sa = m_ctl[3]; c.sb = m_ctl[4]; c.id = m_ctl[15:8];
+    c.op = npu_op_e'({m_ctl[5], m_ctl[1:0]}); c.wt = m_ctl[2]; c.sa = m_ctl[3]; c.sb = m_ctl[4]; c.id = m_ctl[15:8];
     c.k = m_ctl[31:16]; c.ext = m_ext; c.a = m_a; c.b = m_b; c.c = m_c;
     return c;
   endfunction
@@ -55,8 +55,8 @@ module npu_ss_regs_tb;
       A_CFG1:     return {8'(CQ), 8'd3, 8'd32, 8'd8};
       A_STATUS:   return {20'd0, 4'(CQ - m_q.size()), 4'd0, m_q.size() == 0, m_q.size() == CQ, cpl_valid,
                           ss_busy || m_q.size() != 0};
-      A_IRQ_ST:   return {29'd0, m_berr, m_ovf, cpl_valid};
-      A_IRQ_EN:   return {29'd0, m_ien};
+      A_IRQ_ST:   return {28'd0, m_verr, m_berr, m_ovf, cpl_valid};
+      A_IRQ_EN:   return {28'd0, m_ien};
       A_CMD_CTL:  return m_ctl;
       A_CMD_EXT:  return m_ext;
       A_CMD_A:    return {6'd0, m_a};
@@ -72,7 +72,7 @@ module npu_ss_regs_tb;
     endcase
   endfunction
   task automatic m_reset();
-    m_ctl = '0; m_ext = '0; m_a = '0; m_b = '0; m_c = '0; m_ien = '0; m_ovf = 0; m_berr = 0; m_shb = '0; m_shs = '0;
+    m_ctl = '0; m_ext = '0; m_a = '0; m_b = '0; m_c = '0; m_ien = '0; m_ovf = 0; m_berr = 0; m_verr = 0; m_shb = '0; m_shs = '0;
     m_q.delete();
   endtask
 
@@ -95,7 +95,7 @@ module npu_ss_regs_tb;
     if (cmd_valid !== e_cv) err("cmd_valid");
     if (e_cv && cmd !== m_q[0]) err($sformatf("cmd got %h exp %h", cmd, m_q[0]));
     if (cpl_ready !== (rd && a == A_CPL_POP)) err("cpl_ready");
-    if (irq !== |({m_berr, m_ovf, cpl_valid} & m_ien)) err("irq");
+    if (irq !== |({m_verr, m_berr, m_ovf, cpl_valid} & m_ien)) err("irq");
     if (perf_wr !== e_pwr) err("perf_wr");
     if (!rst_n) return;
     // 模型轉移
@@ -112,15 +112,17 @@ module npu_ss_regs_tb;
     if (wr && a == A_IRQ_ST && pstrb[0]) begin
       if (pwdata[1]) m_ovf = 0;
       if (pwdata[2]) m_berr = 0;
+      if (pwdata[3]) m_verr = 0;
     end
+    if (vec_err) m_verr = 1;
     if (acc && !hit) m_berr = 1;
     if (wr) case (a)
-      A_CMD_CTL: m_ctl = mrg(m_ctl, pwdata, pstrb) & 32'hFFFF_FF1F;
+      A_CMD_CTL: m_ctl = mrg(m_ctl, pwdata, pstrb) & 32'hFFFF_FF3F;
       A_CMD_EXT: m_ext = mrg(m_ext, pwdata, pstrb);
       A_CMD_A:   m_a = 26'(mrg({6'd0, m_a}, pwdata, pstrb));
       A_CMD_B:   m_b = 26'(mrg({6'd0, m_b}, pwdata, pstrb));
       A_CMD_C:   m_c = 26'(mrg({6'd0, m_c}, pwdata, pstrb));
-      A_IRQ_EN:  m_ien = 3'(mrg({29'd0, m_ien}, pwdata, pstrb));
+      A_IRQ_EN:  m_ien = 4'(mrg({28'd0, m_ien}, pwdata, pstrb));
       default: ;
     endcase
   endtask
@@ -140,7 +142,7 @@ module npu_ss_regs_tb;
   function automatic logic [31:0] rnd_data(logic [11:0] a);
     int k = $urandom_range(99);
     if ({a[11:2], 2'b00} == A_IRQ_ST || {a[11:2], 2'b00} == A_PERF_CTRL || {a[11:2], 2'b00} == A_IRQ_EN)
-      return (k < 50) ? 32'($urandom_range(7)) : $urandom;
+      return (k < 50) ? 32'($urandom_range(15)) : $urandom;
     return (k < 10) ? '0 : (k < 20) ? '1 : $urandom;
   endfunction
   task automatic drive();
@@ -150,6 +152,7 @@ module npu_ss_regs_tb;
     if (cpl_valid && cpl_ready) cpl_valid = 0;
     if (!cpl_valid && $urandom_range(99) < 20) begin cpl_valid = 1; cpl_id = 8'($urandom); n_cpl++; end
     ss_busy = ($urandom_range(99) < 50);
+    vec_err = ($urandom_range(99) < 2);
     if (perf_wr) begin perf_busy = '0; perf_steps = '0; end
     else if ($urandom_range(99) < 30) begin perf_busy = {16'($urandom), 32'($urandom)}; perf_steps = {16'($urandom), 32'($urandom)}; end
     // APB: IDLE → SETUP → ACCESS (PREADY 恆 1: 一拍) → 連續交易直接 SETUP 或回 IDLE

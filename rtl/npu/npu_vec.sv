@@ -3,29 +3,12 @@
 // (softmax、LayerNorm / RMSNorm、GELU / SiLU、INT32 GEMM 結果的反量化)。語意見 docs/npu_vec.md。
 `include "orca_pkg.sv"
 
-package npu_vec_pkg;
-  localparam int VL = 16;                          // lane 數: 一個 64 B L2 line = 16 × FP32
-  typedef enum logic [3:0] {
-    VOP_NOP = 4'd0, VOP_LD = 4'd1, VOP_ST = 4'd2, VOP_ADD = 4'd3, VOP_SUB = 4'd4, VOP_MUL = 4'd5,
-    VOP_MAX = 4'd6, VOP_SFU = 4'd7, VOP_SPLAT = 4'd8, VOP_RSUM = 4'd9, VOP_RMAX = 4'd10
-  } vop_e;
-  // LD 的 fn: 0 FP32, 1 BF16, 2 FP16, 3 INT32, 4 E4M3, 5 E5M2, 6 E2M1 (MX 比例 = imm[7:0], E8M0)
-  // ST 的 fn: 0 FP32 (va), 1 BF16 (va → 元素 0..15, vb → 16..31, RNE)
-  // SFU 的 fn: 0 recip, 1 rsqrt, 2 exp2, 3 exp, 4 sinπ, 5 cosπ (rtl/fp/sfu.sv)
-  typedef struct packed {
-    vop_e        op;
-    logic [2:0]  fn;
-    logic [2:0]  vd, va, vb;
-    logic [2:0]  part;                             // LD: 取 line 中第 part 組 16 個元素 (16 / 8 / 4 bit 格式)
-    logic [31:0] imm;                              // SPLAT 的值; LD 的 MX 比例
-    logic [25:0] line;                             // LD / ST 的 L2 line 位址
-  } npu_vec_ins_t;                                 // 77 bit
-endpackage : npu_vec_pkg
+`include "npu_vec_pkg.sv"
 
 // npu_vec: 單發射、依序; 每拍執行一個指令 (LD / ST 等到 L2 grant)。
 //   指令以 valid / ready 交握, 等待期間指令須保持不變 (SVA 假設)。
 //   L2 介面同 npu_gemm_cu: 讀為組合式 (rd_data 與 rd_gnt 同拍), 寫在 wr_gnt 拍完成; 等待時請求保持。
-//   非法編碼 (op > 10、LD fn = 7、ST fn > 1、SFU fn > 5) 當成 NOP 接受並設定黏著的 err (只有 reset 清除)。
+//   非法編碼 (op > 10、LD fn = 7、ST fn > 1、SFU fn > 5) 當成 NOP 接受並設定黏著的 err (reset 或 err_clr 清除)。
 //   暫存器檔無 reset (資料暫存器); TB 開始時以 SPLAT 初始化。
 // 歸約 (RSUM / RMAX) 以固定順序的樹: 每層 x[i] = f(x[2i], x[2i+1]), 結果廣播到 vd 每個 lane。
 // 低功耗: 每個向量暫存器一個 clock gate, 只在寫入該暫存器的拍開啟 (test_en 強制開啟, 功能相同)。
@@ -39,6 +22,7 @@ module npu_vec
   output logic         ins_ready,
   input  npu_vec_ins_t ins,
   output logic         err,
+  input  logic         err_clr,                 // 清除 err (同拍又遇到非法指令時 err 仍為 1)
   // L2 主介面 (一個讀取埠 + 一個寫入埠)
   output logic         rd_req,
   output logic [25:0]  rd_line,
@@ -69,6 +53,7 @@ module npu_vec
   always_ff @(posedge clk or negedge rst_n)
     if (!rst_n)                err <= 1'b0;
     else if (fire && illegal)  err <= 1'b1;
+    else if (err_clr)          err <= 1'b0;
 
   // ---------------- 載入: 格式轉換 ----------------
   wire [255:0] s16 = rd_data[256 * ins.part[0] +: 256];
@@ -186,7 +171,7 @@ module npu_vec
   always @(posedge clk)
     if (f_past) begin
       if (!$past(rst_n) || !rst_n) begin assert (!err); end
-      else begin assert (err == ($past(err) || $past(f_fire && f_ill))); end
+      else begin assert (err == (($past(err) && !$past(err_clr)) || $past(f_fire && f_ill))); end
     end
   // 暫存器檔: 第 r 個暫存器只在前一拍接受了寫入它的指令時改變 (含 reset 期間; 暫存器檔無 reset)
   for (genvar r = 0; r < NV; r++) begin : g_f

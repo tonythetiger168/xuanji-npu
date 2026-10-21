@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //=============================================================================
 // orca_npu_ss — CRV TB (每個產品組態各跑一次, 參數由 -G 指定)
-//   每個 batch 產生一段隨機命令程式 (GEMM / DMA_LD / DMA_ST / NOP, 含 K = 0、line 數 0、位址環繞),
+//   每個 batch 產生一段隨機命令程式 (GEMM / DMA_LD / DMA_ST / NOP / VEC, 含 K = 0、line 數 0、位址環繞),
+//   VEC: 先以 DMA_LD 從外部記憶體載入向量程式, 緊接著 VEC 執行 (程式為 line 複製 / 填值 / 偶爾非法指令,
+//   參考模型逐指令執行; 完整 ISA 在 npu_vec / npu_vec_eng 的單元驗證);
 //   以「依序執行」的參考模型 (L2 + 外部記憶體) 求得預期結果。產生器追蹤自上一個等待旗標 (wt) 以來
 //   所有命令的讀 / 寫範圍: 新命令與其衝突時必設 wt (另有隨機 wt) — 因此 DUT 的並行執行必須等同依序執行。
 //   外部記憶體模型: 讀 / 寫 grant 隨機 (與 req 無關)、讀回應依序且延遲隨機 (0..L 拍後、可間斷)。
@@ -22,7 +24,7 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
   logic clk = 1'b0, rst_n = 1'b0, test_en = 1'b0;
   logic cmd_valid = 1'b0, cmd_ready;
   npu_tile_cmd_t cmd = '0;
-  logic cpl_valid, cpl_ready = 1'b0, irq, busy;
+  logic cpl_valid, cpl_ready = 1'b0, irq, busy, vec_err;
   logic [7:0] cpl_id;
   logic m_rd_req, m_rd_gnt = 1'b0, m_rd_rvalid = 1'b0, m_wr_req, m_wr_gnt = 1'b0;
   logic [31:0] m_rd_addr, m_wr_addr;
@@ -49,8 +51,32 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
   function automatic logic [511:0] erd(int unsigned a); return emem.exists(a) ? emem[a] : einit(a); endfunction
   function automatic logic [511:0] rerd(int unsigned a); return rext.exists(a) ? rext[a] : einit(a); endfunction
   function automatic int l2i(logic [25:0] l); return int'(l) % LINES; endfunction
+  task automatic l2_bd_wr(int i, logic [511:0] d);
+    dut.u_core.u_l2.mem[npu_l2_bank(26'(i), $clog2(NB), $clog2(DEPTH))][npu_l2_row(26'(i), $clog2(NB), $clog2(DEPTH))] = d;
+  endtask
   function automatic logic [511:0] l2_bd(int i);
     return dut.u_core.u_l2.mem[npu_l2_bank(26'(i), $clog2(NB), $clog2(DEPTH))][npu_l2_row(26'(i), $clog2(NB), $clog2(DEPTH))];
+  endfunction
+
+  // 向量程式 (VEC): 一個 line 4 個指令, 第 j 個在 bit [128j +: 77]; 參考模型只解讀 TB 產生的子集
+  int vec_err_exp = 0, vec_err_got = 0;
+  function automatic npu_vec_pkg::npu_vec_ins_t vins(logic [25:0] pl, int i);
+    return npu_vec_pkg::npu_vec_ins_t'(rl2[l2i(pl + 26'(i / 4))][128 * (i % 4) +: 77]);
+  endfunction
+  logic [511:0] vreg [8];
+  function automatic void vec_exec(npu_tile_cmd_t c);
+    bit e = 0;
+    for (int i = 0; i < int'(c.k); i++) begin
+      npu_vec_pkg::npu_vec_ins_t x;
+      x = vins(c.a, i);
+      case (x.op)
+        npu_vec_pkg::VOP_LD:    vreg[x.vd] = rl2[l2i(x.line)];                   // fn 0 (FP32): 原樣
+        npu_vec_pkg::VOP_ST:    rl2[l2i(x.line)] = vreg[x.va];
+        npu_vec_pkg::VOP_SPLAT: vreg[x.vd] = {16{x.imm}};
+        default:                e = 1;                                           // 非法 op (TB 只產生 11..15)
+      endcase
+    end
+    if (e) vec_err_exp++;
   endfunction
 
   // 參考模型: 依序執行一個命令
@@ -72,6 +98,7 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
         end
         for (int l = 0; l < CL; l++) for (int e = 0; e < 16; e++) rl2[l2i(c.c + 26'(l))][e * 32 +: 32] = C[l * 16 + e];
       end
+      NPU_OP_VEC: vec_exec(c);
       default: ;
     endcase
   endfunction
@@ -95,6 +122,13 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
       NPU_OP_GEMM: if (c.k != 0) begin
         for (int l = 0; l < (int'(c.k) + SPL - 1) / SPL; l++) begin f.l2r.push_back(l2i(c.a + 26'(l))); f.l2r.push_back(l2i(c.b + 26'(l))); end
         for (int l = 0; l < CL; l++) f.l2w.push_back(l2i(c.c + 26'(l)));
+      end
+      NPU_OP_VEC: for (int i = 0; i < int'(c.k); i++) begin                  // 程式 line + 指令的 LD / ST
+        npu_vec_pkg::npu_vec_ins_t x;
+        x = vins(c.a, i);
+        if (i % 4 == 0) f.l2r.push_back(l2i(c.a + 26'(i / 4)));
+        if (x.op == npu_vec_pkg::VOP_LD) f.l2r.push_back(l2i(x.line));
+        if (x.op == npu_vec_pkg::VOP_ST) f.l2w.push_back(l2i(x.line));
       end
       default: ;
     endcase
@@ -122,11 +156,14 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
     return l;
   endfunction
   function automatic int unsigned pick_ext();
+    int unsigned a;
     case (ur(0, 9))
-      0:       return 32'hFFFF_FFFF - 32'(ur(0, 20));   // 外部位址環繞
-      1, 2, 3: return $urandom();
-      default: return hot_ext[ur(0, 5)] + 32'(ur(0, 4));
+      0:       a = 32'hFFFF_FFFF - 32'(ur(0, 20));   // 外部位址環繞
+      1, 2, 3: a = $urandom();
+      default: a = hot_ext[ur(0, 5)] + 32'(ur(0, 4));
     endcase
+    if (a[31:28] == 4'hE) a[31:28] = 4'hD;               // 0xE000_0000.. 留給向量程式
+    return a;
   endfunction
   function automatic logic [15:0] pick_n();
     case (ur(0, 9))
@@ -167,7 +204,7 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
       end
       7, 8, 9, 10, 11, 12: begin c.op = NPU_OP_DMA_LD; c.k = (mode == 1) ? 16'(ur(0, 3)) : pick_n(); c.a = pick_l2(int'(c.k)); c.ext = pick_ext(); end
       13, 14, 15, 16, 17:  begin c.op = NPU_OP_DMA_ST; c.k = pick_n(); c.a = pick_l2(int'(c.k)); c.ext = pick_ext(); end
-      default: c.op = NPU_OP_NOP;
+      default: c.op = rnd(80) ? NPU_OP_NOP : npu_op_e'(ur(5, 7));     // 5..7 保留: 當 NOP
     endcase
     f = footprint(c);
     c.wt = rnd(p_wt);
@@ -184,6 +221,51 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
     c.k = st ? 16'(ur(40000, 65534)) : 16'hFFFF; c.a = 26'($urandom()); c.ext = $urandom();
     acc_clear(); acc_add(footprint(c));
     return c;
+  endfunction
+
+  // VEC: 回傳 {DMA_LD 程式, VEC}; 程式放外部記憶體 0xE000_0000 起 (pick_ext 不會產生這個區域)
+  int unsigned vec_ext = 32'hE000_0000;
+  function automatic npu_tile_cmd_t mk_cmd(npu_tile_cmd_t c, int p_wt);   // wt 與衝突追蹤 (同 gen_cmd)
+    fp_t f;
+    f = footprint(c);
+    c.wt = rnd(p_wt);
+    if (conflicts(f)) c.wt = 1'b1;
+    if (c.wt) acc_clear();
+    acc_add(f);
+    return c;
+  endfunction
+  function automatic void gen_vec(logic [7:0] id0, logic [7:0] id1, int p_wt, output npu_tile_cmd_t c0, output npu_tile_cmd_t c1);
+    npu_vec_pkg::npu_vec_ins_t p [$];
+    int m, np;
+    logic [25:0] src, dst, pl;
+    bit fill;
+    m = ur(1, 8); src = pick_l2(m); fill = rnd(30);
+    do dst = pick_l2(m); while (!disjoint(l2i(dst), m, l2i(src), m) && rnd(70));   // 多半不重疊 (重疊也合法)
+    for (int i = 0; i < m; i++) begin
+      npu_vec_pkg::npu_vec_ins_t x;
+      x = '0;
+      if (fill) begin x.op = npu_vec_pkg::VOP_SPLAT; x.vd = 3'(i); x.imm = $urandom(); end
+      else begin x.op = npu_vec_pkg::VOP_LD; x.vd = 3'(i); x.line = src + 26'(i); end
+      p.push_back(x);
+      if (rnd(4)) begin x = '0; x.op = npu_vec_pkg::vop_e'(ur(11, 15)); p.push_back(x); end   // 非法指令
+      x = '0; x.op = npu_vec_pkg::VOP_ST; x.va = 3'(i); x.line = dst + 26'(i);
+      p.push_back(x);
+    end
+    np = (p.size() + 3) / 4;
+    do pl = pick_l2(np); while (!disjoint(l2i(pl), np, l2i(dst), m));   // 程式不可被自己改寫
+    for (int l = 0; l < np; l++) begin
+      logic [511:0] d;
+      d = '0;
+      for (int j = 0; j < 4 && 4 * l + j < p.size(); j++) d[128 * j +: 77] = p[4 * l + j];
+      rext[vec_ext + 32'(l)] = d; emem[vec_ext + 32'(l)] = d;
+    end
+    c0 = '0; c0.id = id0; c0.op = NPU_OP_DMA_LD; c0.k = 16'(np); c0.a = pl; c0.ext = vec_ext;
+    vec_ext += 32'(np);
+    c0 = mk_cmd(c0, p_wt);
+    ref_exec(c0);                                         // 程式進入參考 L2, VEC 的 footprint 才能解讀
+    c1 = '0; c1.id = id1; c1.op = NPU_OP_VEC; c1.a = pl; c1.k = rnd(5) ? 16'd0 : 16'(p.size());
+    c1.ext = $urandom(); c1.b = 26'($urandom()); c1.c = 26'($urandom());
+    c1 = mk_cmd(c1, p_wt);
   endfunction
 
   // ---------------- 驅動 / 監看 (posedge 取樣, 非阻塞驅動) ----------------
@@ -237,6 +319,7 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
       end
       cpl_ready <= rnd(p_cpl);
       if (irq !== cpl_valid) begin $display("ERROR: irq != cpl_valid"); n_err++; end
+      if (vec_err) vec_err_got++;
     end
   end
 
@@ -312,12 +395,24 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
     ids.shuffle();
     prog.delete(); prog_pos.delete(); cpl_pos.delete(); pidx = 0; ncpl = 0;
     acc_clear();
+    vec_err_exp = 0; vec_err_got = 0;
     for (int i = 0; i < ncmd; i++) begin
-      automatic npu_tile_cmd_t c = (big && i == 1) ? big_dma(ids[i], 0) : (big && i == 2) ? big_dma(ids[i], 1) :
-                                  gen_cmd(ids[i], p_wt, mode);
-      prog.push_back(c); prog_pos[int'(c.id)] = i;
-      ref_exec(c);
-      if (c.op == NPU_OP_GEMM) ksum += longint'(c.k);
+      if (!big && mode == 0 && i + 1 < ncmd && rnd(12)) begin             // DMA_LD 程式 + VEC
+        npu_tile_cmd_t c0, c1;
+        gen_vec(ids[i], ids[i + 1], p_wt, c0, c1);
+        prog.push_back(c0); prog_pos[int'(c0.id)] = i;
+        prog.push_back(c1); prog_pos[int'(c1.id)] = i + 1;
+        ref_exec(c1);
+        i++;
+        continue;
+      end
+      begin
+        automatic npu_tile_cmd_t c = (big && i == 1) ? big_dma(ids[i], 0) : (big && i == 2) ? big_dma(ids[i], 1) :
+                                    gen_cmd(ids[i], p_wt, mode);
+        prog.push_back(c); prog_pos[int'(c.id)] = i;
+        ref_exec(c);
+        if (c.op == NPU_OP_GEMM) ksum += longint'(c.k);
+      end
     end
     rst_at = (ur(0, 9) == 0 && !big) ? ur(10, 3000) : -1;
     in_batch = 1;
@@ -343,6 +438,9 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
           if (n_err < 20) $display("ERROR: wt command #%0d (id %0d) completed before earlier command #%0d", i, prog[i].id, j);
           n_err++;
         end
+    if (vec_err_got != vec_err_exp) begin
+      $display("ERROR: vec_err pulses %0d != expected %0d (batch %0d)", vec_err_got, vec_err_exp, n_batch); n_err++;
+    end
     if (longint'(perf_steps) != longint'(48'(ps0 + longint'(ksum)))) begin
       $display("ERROR: perf_steps %0d != %0d + %0d", perf_steps, ps0, ksum); n_err++;
     end
@@ -370,7 +468,8 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
   endtask
 
   // directed: 完成輸出回壓期間填滿所有槽 (npu_core 佇列 + 每個 CU + 其輸出暫存 + tile 輸出暫存, 再加 DMA 與 NOP),
-  //           oc 達到上限 CQD + NCU + 3 (界限是緊的); 之後放開回壓並照常比對
+  //           oc 達到上限 CQD + NCU + 4 (界限是緊的); 再加兩個 VEC (程式以後門預先放進 L2): 第二個等引擎忙碌、
+  //           再等 VEC 完成槽; 之後放開回壓 (4 個來源同時待回報) 並照常比對
   task automatic fill_all();
     localparam int K = 200, AL = (K + SPL - 1) / SPL, STRIDE = 2 * AL + CL;
     localparam int NG = 4 + NCU + 2;     // npu_core 最多 4 + NCU + 1 個, 另一個已在 tile 輸出暫存
@@ -379,27 +478,41 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
     n_batch++;
     p_cmd = 100; p_cpl = 0; p_rgnt = 100; p_wgnt = 100; p_rv = 100; fix_lat = -1; rlat = 2; test_en = 0;
     prog.delete(); prog_pos.delete(); cpl_pos.delete(); pidx = 0; ncpl = 0;
-    for (int i = 0; i < NG + 2; i++) begin
+    // 兩個 VEC 程式 (各填 2 個 line), 放在 GEMM / DMA 用到的範圍之後
+    for (int v = 0; v < 2; v++) begin
+      logic [511:0] d;
+      npu_vec_pkg::npu_vec_ins_t x;
+      d = '0;
+      for (int j = 0; j < 4; j++) begin
+        x = '0;
+        if (j % 2 == 0) begin x.op = npu_vec_pkg::VOP_SPLAT; x.vd = 3'(j); x.imm = $urandom(); end
+        else begin x.op = npu_vec_pkg::VOP_ST; x.va = 3'(j - 1); x.line = 26'((NG + 1) * STRIDE + 8 + 4 * v + j); end
+        d[128 * j +: 77] = x;
+      end
+      l2_bd_wr(l2i(26'((NG + 1) * STRIDE + v)), d); rl2[l2i(26'((NG + 1) * STRIDE + v))] = d;
+    end
+    for (int i = 0; i < NG + 4; i++) begin
       c = '0; c.id = 8'(i);
       if (i < NG) begin
         c.op = NPU_OP_GEMM; c.k = 16'(K); c.sa = 1'($urandom()); c.sb = 1'($urandom());
         c.a = 26'(i * STRIDE); c.b = c.a + 26'(AL); c.c = c.b + 26'(AL);
       end else if (i == NG) begin
         c.op = NPU_OP_DMA_LD; c.k = 16'd2; c.a = 26'(NG * STRIDE); c.ext = $urandom();
-      end else c.op = NPU_OP_NOP;
+      end else if (i == NG + 1) c.op = NPU_OP_NOP;
+      else begin c.op = NPU_OP_VEC; c.k = 16'd4; c.a = 26'((NG + 1) * STRIDE + i - NG - 2); end
       prog.push_back(c); prog_pos[i] = i; ref_exec(c);
     end
     in_batch = 1;
     // 等到所有槽都滿, 且 DMA / NOP 的完成都在待回報 (放開回壓後三個來源同時競爭)
-    for (int w = 0; w < 20000 && !(int'(dut.oc) == 4 + NCU + 3 && dut.dma_cv && dut.nop_cv); w++) @(posedge clk);
-    if (int'(dut.oc) != 4 + NCU + 3) begin $display("ERROR: fill_all did not reach oc = %0d (oc = %0d)", 4 + NCU + 3, dut.oc); n_err++; end
+    for (int w = 0; w < 20000 && !(int'(dut.oc) == 4 + NCU + 4 && dut.dma_cv && dut.nop_cv && dut.vec_cv); w++) @(posedge clk);
+    if (int'(dut.oc) != 4 + NCU + 4) begin $display("ERROR: fill_all did not reach oc = %0d (oc = %0d)", 4 + NCU + 4, dut.oc); n_err++; end
     p_cpl = 80;
-    while (ncpl != NG + 2) @(posedge clk);
+    while (ncpl != NG + 4) @(posedge clk);
     in_batch = 0;
     for (int w = 0; busy && w < 1000; w++) @(posedge clk);
     check_state();
     if (longint'(perf_steps) != longint'(48'(ps0 + longint'(NG * K)))) begin $display("ERROR: perf_steps (fill_all) %0d != %0d + %0d", perf_steps, ps0, NG * K); n_err++; end
-    n_cmds += NG + 2;
+    n_cmds += NG + 4;
   endtask
 
   int unsigned seed, nb, nc;
@@ -415,7 +528,7 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
     rst_n <= 1'b1;
     repeat (2) @(posedge clk);
     if ($value$plusargs("perf_dma=%d", fix_lat)) perf_dma();
-    else for (int b = 0; b < int'(nb); b++) if (b == 3) fill_all(); else batch((b % 5 == 0) ? 1 + ur(0, 3) : ur(nc / 2, nc), b == 1 && !$test$plusargs("no_big"));
+    else for (int b = 0; b < int'(nb); b++) if (b % 10 == 3) fill_all(); else batch((b % 5 == 0) ? 1 + ur(0, 3) : ur(nc / 2, nc), b == 1 && !$test$plusargs("no_big"));
     $display("NPUSS: N=%0d NCU=%0d NB=%0d seed=%0d batches=%0d cmds=%0d resets=%0d errors=%0d",
              N, NCU, NB, seed, n_batch, n_cmds, n_rst, n_err);
     if (n_err == 0) $display("TB PASS"); else $display("TB FAIL");

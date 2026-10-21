@@ -40,7 +40,8 @@ npu_core 加上命令前端與 DMA, 成為可以直接下命令的子系統 (由
 
 ```
 命令 ──► 命令佇列 (QD=8) ──► 依序分派 ──┬─► npu_core (GEMM, 多個 CU 同時執行)
-                                       ├─► npu_ss_dma (外部記憶體 ⇄ L2, 64 B line)
+                                       ├─► npu_ss_dma (外部記憶體 ⇄ L2, 64 B line) ─┐ npu_l2_arb2: 共用
+                                       ├─► npu_vec_eng (VEC: 向量程式)  ──────────┘ npu_core 的 host L2 埠
                                        └─► NOP (wt=1 時即 fence)
                     完成合併 (round-robin, 輸出暫存保持) ◄┘──► cpl_valid + id, irq
 ```
@@ -49,14 +50,15 @@ npu_core 加上命令前端與 DMA, 成為可以直接下命令的子系統 (由
 |---|---|
 | `GEMM` | C = A × B (INT8 → INT32, 資料已在 L2); K = 0 時只回報完成 |
 | `DMA_LD` / `DMA_ST` | 外部記憶體 → L2 / L2 → 外部記憶體, k 個 line (k = 0 時立即完成); 位址模數環繞 |
-| `NOP` | 只回報完成 |
+| `VEC` (op 4) | 執行 L2 line `a` 起的 `k` 個向量指令 (每 line 4 個; `docs/npu_vec.md`); k = 0 時只回報完成; 遇到非法指令時 `vec_err` 一拍 |
+| `NOP` (op 3; 保留的 op 5–7 同 NOP) | 只回報完成 |
 
 - **等待旗標 `wt`**: 先前所有命令完成 (結果已寫入, 完成已移入輸出暫存) 後才分派。沒有 `wt` 的命令可與先前的命令並行
   (例如 GEMM 執行時 DMA 載入下一批資料); 軟體須保證並行命令的 L2 / 外部區域不重疊, 否則設 `wt`。
 - 完成順序不保證與命令順序相同。
 - **DMA 吞吐量**: 每拍 1 line (64 B); 外部讀取延遲 L 拍時為 min(1, OUT / (L + 3)) line/拍, OUT = 在途上限
   (Nano 16 / X1 32 / Pro 64)。量測 (`npu_ss_tb +perf_dma=L`) 見下表。
-- **低功耗**: DMA 閒置時停止時脈 (ICG); npu_core 內每個 CU、每列另有 ICG。
+- **低功耗**: DMA 閒置時停止時脈 (ICG); 向量引擎閒置時停止取指 / 控制的時脈, 每個向量暫存器各有 ICG; npu_core 內每個 CU、每列另有 ICG。
 
 ### NPU Subsystem 驗證
 

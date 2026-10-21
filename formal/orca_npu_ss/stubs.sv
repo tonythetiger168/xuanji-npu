@@ -4,6 +4,7 @@
 //             等待 cpl_ready 期間保持 (id 不變); cmd_ready 任意但 p 滿時為 0; busy = (p != 0)。
 //             npu_core 本身由 run_npu_cov / run_npu_mutation 驗證。
 //   npu_ss_dma: 只在 idle 接受命令; done 在忙碌中任意一拍出現, 之後回到 idle (DMA 本身已形式證明)。
+//   npu_vec_eng: 同 DMA (只在 idle 接受; done 在忙碌中任意一拍; derr 任意); L2 埠不發請求 (仲裁器另外形式證明)。
 //   clock_gate: 直通 (閘控安全以 orca_npu_ss 內的組合性質檢查 en)。
 `include "orca_pkg.sv"
 module clock_gate (input logic clk, en, test_en, output logic clk_out);
@@ -62,4 +63,24 @@ module npu_ss_dma #(parameter int OUT = 8, DW = 512) (
     if (!rst_n) act <= 0;
     else if (cmd_valid && cmd_ready) act <= 1;
     else if (done) act <= 0;
+endmodule
+
+module npu_vec_eng #(parameter int NV = 8) (
+  input  logic clk, rst_n, test_en,
+  input  logic cmd_valid, output logic cmd_ready, input logic [25:0] cmd_line, input logic [15:0] cmd_n,
+  output logic done, derr, busy,
+  output logic rd_req, output logic [25:0] rd_line, input logic rd_gnt, input logic [511:0] rd_data,
+  output logic wr_req, output logic [25:0] wr_line, output logic [511:0] wr_data, input logic wr_gnt
+);
+  (* anyseq *) logic fin_any, err_any;
+  logic act;
+  assign cmd_ready = !act && !done; assign busy = act || done; assign derr = err_any;
+  assign rd_req = 0; assign rd_line = 0; assign wr_req = 0; assign wr_line = 0; assign wr_data = 0;
+  always @(posedge clk or negedge rst_n)
+    if (!rst_n) begin act <= 0; done <= 0; end
+    else begin
+      done <= act && fin_any;
+      if (cmd_valid && cmd_ready) act <= 1;
+      else if (act && fin_any) act <= 0;
+    end
 endmodule

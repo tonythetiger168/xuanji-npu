@@ -18,7 +18,7 @@ open(out, 'w').write(s.replace(o, nw, 1))
 PY
   nt=$((nt + 1)); mkdir -p $M/$n
   local extra=""; [ -f formal/$b/stubs.sv ] && extra=formal/$b/stubs.sv   # 子模組契約替身
-  sv2v -DFORMAL -E Assert -Irtl/common rtl/common/orca_pkg.sv $extra $M/$n.sv > $M/$n/$b.v
+  sv2v -DFORMAL -DFORMAL_TOP_$b -E Assert -Irtl/common rtl/common/orca_pkg.sv $extra $M/$n.sv > $M/$n/$b.v
   cp formal/$b/$b.sby $M/$n/
   (cd $M/$n && timeout 1800 sby -f $b.sby prove > sby.log 2>&1)
   # 只有證明真的失敗 (FAIL: 反例 / UNKNOWN: 歸納找到反例) 才算抓到; 逾時或工具錯誤不算

@@ -62,6 +62,9 @@ def main():
         if x < 0.004:
             prog.append(V.RESET)
             continue
+        if x < 0.008:
+            prog.append(V.ERRCLR)
+            continue
         if x < 0.02:                                 # 非法編碼
             k = r.randint(0, 3)
             op, fn = [(r.randint(11, 15), r.getrandbits(3)), (1, 7), (2, r.randint(2, 7)), (7, r.randint(6, 7))][k]

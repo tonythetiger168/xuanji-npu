@@ -4,8 +4,9 @@
 GELU / SiLU、INT32 GEMM 結果的反量化, 以及 BF16 / FP16 / MXFP8 / MXFP4 的載入轉換。
 計劃見 `docs/npu_plan.md` 階段 1 (#19); 浮點元件來自共用函式庫 `rtl/fp` (`docs/fp.md`)。
 
-**狀態**: 單元本身已驗證 (位元一致、coverage、mutation、形式證明、kernel 精度與拍數, 見下)。
-**尚未**: 接到 npu_core / orca_npu_ss (命令與 L2 埠)、矩陣核輸出直送向量核、MX 編碼 (FP32 → MX)、管線化。
+**狀態**: 單元已驗證 (位元一致、coverage、mutation、形式證明、kernel 精度與拍數, 見下); 已經由向量引擎 `npu_vec_eng`
+接進 NPU Subsystem (`VEC` 命令, 與 DMA 共用 host L2 埠; 見「向量引擎與 NPU Subsystem 整合」)。
+**尚未**: 矩陣核輸出直送向量核 (目前經 L2)、MX 編碼 (FP32 → MX)、管線化 / 雙發射。
 尚未合成, 不宣稱頻率 / 面積 / 功耗; 目前每個指令是單拍組合式運算 (含 16 個 SFU 與 15 + 15 個歸約節點)。
 
 ## 架構
@@ -103,3 +104,34 @@ softmax 的誤差主要來自 x − max 的 FP32 捨入 (|x − max| 達 60 時 
   運算式, coverage 出現大量結構性缺口 → 改為「精確元素解碼 (窄輸出, 不輸出恆為 0 的低位) + 共用的 MX 比例級」,
   各格式的特殊值規則以 generate 分支實作, 結構性豁免從數百項降到 1 項。
 - INT32 → FP32 正規化後的最低位恆為 0 (只有 −2^31 會不移位, 其最低位為 0) → 從資料路徑移除。
+
+## 向量引擎與 NPU Subsystem 整合 (`rtl/npu/npu_vec_eng.sv`, `rtl/npu/npu_l2_arb2.sv`)
+
+- **VEC 命令** (`npu_tile_cmd_t.op = 4`, 命令的 opcode 擴為 3 bit): 執行 L2 line `a` 起的 `k` 個指令。程式版面: 一個 64 B line
+  放 4 個指令, 第 j 個在 bit [128j +: 77]。k = 0 當 NOP; 保留的 op 5–7 也當 NOP。軟體通常先以 `DMA_LD` 把程式從外部記憶體
+  載入 L2, 再下 `VEC` (wt = 1 或範圍不重疊)。程式不可被自己的 ST 改寫 (預取可能已讀走舊內容)。
+- **取指**: 兩個 line 的緩衝, 執行一個 line 時預取下一個; 與 npu_vec 共用一個 L2 讀取埠 — 取指只在 npu_vec 沒有讀取請求時
+  開始, 一旦發出就保持到 grant (L2 介面規則: 請求與位址保持)。
+- **錯誤**: 命令開始時清除 npu_vec 的 err (`err_clr`); 命令完成時若遇過非法指令, `orca_npu_ss.vec_err` 一拍 →
+  APB `IRQ_STATUS.VEC_ERR` (黏著, W1C)。
+- **共用 host 埠** (`npu_l2_arb2`): DMA 與向量引擎輪流 (兩者都請求時 round-robin; 選中者等待 grant 期間鎖定, 下游的請求 /
+  位址 / 資料保持)。
+- **低功耗**: 引擎閒置時停止取指 / 控制的時脈; npu_vec 用未閘控的時脈 (只有 err 一個未閘控的 flop, 向量暫存器各有 ICG),
+  也讓 npu_vec 的 SVA 以未閘控時脈取樣。
+
+### 整合的驗證
+
+| 項目 | 內容 / 結果 |
+|---|---|
+| 引擎 (`dv/vec/npu_vec_eng_tb.sv`, `run_vec.sh`) | 4 seed × 60 個命令 (程式長度 1–200, 每個 seed 一個 65,280–65,535 個指令的長命令; 程式位置任意 26 bit, 含跨越 0x3FFFFFF 回繞; 3% 非法指令), 隨機 grant (50–100%), 命令之間偶爾 reset; 結果 (每個命令的 derr、最後的 L2 資料區) 與 `vec_ref.py` 位元一致 |
+| 引擎 SVA (`dv/vec/npu_vec_eng_sva.sv`) | 只在閒置時接受命令、done 一次、L2 讀 / 寫請求保持到 grant、時脈關閉時沒有活動; cover: 取指與 LD 競爭、預取、取指等待中 LD 也要讀、指令用完等取指 |
+| 引擎形式證明 (`formal/npu_vec_eng`, npu_vec 為契約替身) | 任選序號 i: 第 i 個交給 npu_vec 的指令 = 程式第 i 個字 (從埠記錄取指 grant 的資料); 恰好 n 個後 done; 讀取請求保持 |
+| 仲裁器形式證明 (`formal/npu_l2_arb2`) | grant 互斥且只給請求者、下游位址 / 資料屬於拿到 grant 者、下游請求保持、被插隊一次的主端下一次必得 grant |
+| NPU Subsystem (`npu_ss_tb`) | 隨機程式中 12% 為「DMA_LD 程式 + VEC」(程式: line 複製 / 填值 / 偶爾非法指令; 參考模型依序執行並計算預期的 vec_err 次數); 導向測試: 兩個 VEC 背靠背 (第二個等引擎忙碌、再等 VEC 完成槽), 4 個完成來源同時待回報 |
+| APB 整合 (`orca_npu_ss_apb_tb`) | 只經 APB: DMA_LD 程式 → VEC (LD / 非法 / ST) → DMA_ST 存回, 比對資料與 IRQ_STATUS.VEC_ERR 的設定 / W1C 清除 |
+
+驗證整合時發現: (1) 預取請求在沒拿到 grant 時, 若下一拍 npu_vec 也要讀, 原本會撤回請求 (違反 L2 介面的保持規則) →
+加上 f_pend 鎖定; (2) npu_vec 的 SVA 以引擎的閘控時脈取樣時, 時脈關閉期間的 reset 造成 `a_err_stk` 誤報 → npu_vec 改用
+未閘控時脈; (3) 引擎 SVA 原本假設命令保持到接受, 但 orca_npu_ss 在 VEC 完成槽被佔用時會撤回 `g_vec` (合法) → 移除該假設;
+(4) 仲裁器的形式檢查與環境假設在 orca_npu_ss 的證明中也被編入 (子模組的假設約束了上層) → 改以 `FORMAL_TOP_<block>`
+只在自己是證明頂層時編入。

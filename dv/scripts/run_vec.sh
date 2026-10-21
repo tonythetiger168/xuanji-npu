@@ -13,12 +13,16 @@ FP="rtl/fp/fp_add.sv rtl/fp/fp_mul.sv rtl/fp/fp_narrow.sv rtl/fp/fp_widen.sv rtl
 verilator --binary --timing -j "${JOBS:-4}" --assert --coverage -Wno-fatal -Wno-lint -Wno-style -Irtl/common -Irtl/fp --Mdir "$B/obj" \
   rtl/common/orca_pkg.sv rtl/common/clock_gate.sv $FP rtl/npu/npu_vec.sv dv/vec/npu_vec_sva.sv dv/vec/npu_vec_tb.sv \
   --top-module npu_vec_tb > "$B/build.log" 2>&1 || { tail -20 "$B/build.log"; echo "BUILD FAIL"; exit 1; }
+verilator --binary --timing -j "${JOBS:-4}" --assert --coverage -Wno-fatal -Wno-lint -Wno-style -Irtl/common -Irtl/fp --Mdir "$B/eobj" \
+  rtl/common/orca_pkg.sv rtl/common/clock_gate.sv $FP rtl/npu/npu_vec.sv dv/vec/npu_vec_sva.sv rtl/npu/npu_vec_eng.sv \
+  dv/vec/npu_vec_eng_sva.sv dv/vec/npu_vec_eng_tb.sv --top-module npu_vec_eng_tb > "$B/build_eng.log" 2>&1 \
+  || { tail -20 "$B/build_eng.log"; echo "BUILD FAIL eng"; exit 1; }
 fail=0
-run() {   # 名稱 base plusargs...
+run() {   # 名稱 base plusargs...  (EXE 預設 obj/Vnpu_vec_tb)
   local n=$1 v=$2; shift 2
-  if (cd "$B" && ./obj/Vnpu_vec_tb +vec=$v "$@" +verilator+coverage+file+cov_$n.dat > $n.log 2>&1) && grep -q "TB PASS" "$B/$n.log" \
+  if (cd "$B" && ./${EXE:-obj/Vnpu_vec_tb} +vec=$v "$@" +verilator+coverage+file+cov_$n.dat > $n.log 2>&1) && grep -q "TB PASS" "$B/$n.log" \
      && ! grep -q "Assertion failed" "$B/$n.log"; then
-    echo "PASS $n  $(grep -m1 '^VEC:' "$B/$n.log")"
+    echo "PASS $n  $(grep -m1 -E '^(VEC|VECENG):' "$B/$n.log")"
   else
     echo "FAIL $n"; grep -m5 -E "MISMATCH|Assertion|ERROR" "$B/$n.log" || true; fail=1
   fi
@@ -32,11 +36,17 @@ for k in $(awk '/^KERNEL/ {print $2}' "$B/kernels.txt"); do
   run k_$k k_$k +seed=3
   run perf_$k k_$k +perf
 done
+# 向量引擎 (取指 / 預取 / 與 LD 共用讀取埠 / 命令完成): 多個命令的程式, 隨機 grant
+for ((s = 1; s <= NS; s++)); do
+  python3 dv/vec/gen_eng_vectors.py "$B/e$s" $s 60 > /dev/null
+  EXE=eobj/Vnpu_vec_eng_tb run eng_s$s e$s +seed=$s +gnt_p=$((30 + 20 * s))
+done
+EXE=eobj/Vnpu_vec_eng_tb run eng_perf e1 +perf
 echo "=== RTL structural coverage (line / branch / expr / toggle)"
-python3 dv/scripts/cov_report.py "$B"/cov_*.dat --by-module --rtl '^rtl/(npu/npu_vec|fp/(fp_max|fp_small_dec|fp_mx_scale|fp_from_int))\.sv' \
-  --expect rtl/npu/npu_vec.sv --expect rtl/fp/fp_max.sv --expect rtl/fp/fp_small_dec.sv --expect rtl/fp/fp_mx_scale.sv --expect rtl/fp/fp_from_int.sv \
+python3 dv/scripts/cov_report.py "$B"/cov_*.dat --by-module --rtl '^rtl/(npu/npu_vec(_eng)?|fp/(fp_max|fp_small_dec|fp_mx_scale|fp_from_int))\.sv' \
+  --expect rtl/npu/npu_vec.sv --expect rtl/npu/npu_vec_eng.sv --expect rtl/fp/fp_max.sv --expect rtl/fp/fp_small_dec.sv --expect rtl/fp/fp_mx_scale.sv --expect rtl/fp/fp_from_int.sv \
   --waivers dv/vec/waivers.txt --require 100 --list "${LIST:-40}" || fail=1
 echo "=== functional coverage (covergroup) + SVA cover (user)"
-python3 dv/scripts/cov_report.py "$B"/cov_*.dat --by-module --rtl '^dv/vec/npu_vec_sva' --types covergroup,user \
-  --expect dv/vec/npu_vec_sva.sv --waivers dv/vec/waivers.txt --require 100 --list "${LIST:-40}" || fail=1
+python3 dv/scripts/cov_report.py "$B"/cov_*.dat --by-module --rtl '^dv/vec/npu_vec(_eng)?_sva' --types covergroup,user \
+  --expect dv/vec/npu_vec_sva.sv --expect dv/vec/npu_vec_eng_sva.sv --waivers dv/vec/waivers.txt --require 100 --list "${LIST:-40}" || fail=1
 [ "$fail" -eq 0 ] && echo "##### vec PASS" || { echo "##### vec FAIL"; exit 1; }
