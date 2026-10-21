@@ -604,6 +604,20 @@ package orca_pkg;
   parameter int MOE_MAX_EXPERTS   = 256;   // MoE 最大專家數
   parameter int CLOUD_NOC_W       = 1024;  // scale-out 鏈路寬 (1024-bit flit)
 
+  // ---------------- NPU L2 位址對應 (npu_l2_xbar 與 TB 後門共用) ----------------
+  // bank = line 低 bw 位元 XOR (列位址各 bw 位元段) — 對齊的區域 (例如每個命令一個對齊 slot) 不會全部從同一 bank
+  // 開始而在多個 CU 間形成同步衝突 (convoy); 連續 NB 個 line 仍落在 NB 個不同 bank。只摺疊列位址 [bw, bw+dw)
+  // 內的位元, 所以 line 與 line + 容量仍對應同一位置 (超出容量的位址模數環繞)。列 = line[bw +: dw] (不變)。
+  function automatic int unsigned npu_l2_bank(logic [25:0] l, int bw, int dw);
+    logic [25:0] b, m;
+    m = (26'(1) << bw) - 1'b1;
+    b = l & m;
+    for (int s = bw; s < bw + dw; s += bw) b ^= (l >> s) & m & ((26'(1) << (bw + dw - s)) - 1'b1);
+    return int'(b);
+  endfunction
+  function automatic int unsigned npu_l2_row(logic [25:0] l, int bw, int dw);
+    return int'((l >> bw) & ((26'(1) << dw) - 1'b1));
+  endfunction
 endpackage : orca_pkg
 
 

@@ -56,7 +56,11 @@ module npu_core
   output logic [47:0]  perf_busy,
   output logic [47:0]  perf_steps
 );
-  localparam int NM = NCU + 1;
+  localparam int RP = (N == 32) ? 2 : 1;      // 每個 CU 的 L2 讀取埠數 (與 npu_gemm_cu 相同公式)
+  // xbar 主端: 讀 [0, NCU) = 各 CU 的埠 0, NCU = host, [NCU+1, NCU+1+NCU) = 各 CU 的埠 1 (RP = 2);
+  //           寫 [0, NCU) = 各 CU, NCU = host
+  localparam int NM = NCU * RP + 1;
+  localparam int NW = NCU + 1;
   localparam int QW = $clog2(QD);
 
   typedef struct packed {
@@ -102,22 +106,34 @@ module npu_core
   end
 
   // ---------------- 計算單元 ----------------
-  logic [NM-1:0]        rd_req, rd_gnt, wr_req, wr_gnt;
-  logic [NM-1:0][25:0]  rd_line, wr_line;
-  logic [NM-1:0][511:0] rd_data, wr_data;
-  logic [NCU-1:0]       cu_en;
+  logic [NM-1:0]        rd_req, rd_gnt;
+  logic [NM-1:0][25:0]  rd_line;
+  logic [NM-1:0][511:0] rd_data;
+  logic [NW-1:0]        wr_req, wr_gnt;
+  logic [NW-1:0][25:0]  wr_line;
+  logic [NW-1:0][511:0] wr_data;
+  logic [NCU-1:0]       cu_en, cu_rd;             // cu_rd: CU 任一讀取埠有請求
   for (genvar i = 0; i < NCU; i++) begin : g_cu
     // CU 時脈致能: 忙碌、本拍分派 (CU 在 idle 取樣命令)、或 done 脈衝尚待清除
     assign cu_en[i] = !cu_ready[i] || cu_v[i] || cu_done[i];
     logic gclk;
     clock_gate u_icg (.clk(clk), .en(cu_en[i]), .test_en(test_en), .clk_out(gclk));
+    logic [RP-1:0]        c_rq, c_rg;
+    logic [RP-1:0][25:0]  c_rl;
+    logic [RP-1:0][511:0] c_rd;
+    for (genvar p = 0; p < RP; p++) begin : g_p
+      localparam int M = (p == 0) ? i : NCU + 1 + i;   // 此讀取埠對應的 xbar 主端
+      assign rd_req[M] = c_rq[p]; assign rd_line[M] = c_rl[p];
+      assign c_rg[p] = rd_gnt[M]; assign c_rd[p] = rd_data[M];
+    end
+    assign cu_rd[i] = |c_rq;
     npu_gemm_cu #(.N(N)) u_cu (
       .clk(gclk), .rst_n(rst_n), .test_en(test_en),
       .cmd_valid(cu_v[i]), .cmd_ready(cu_ready[i]),
       .cmd_a_line(head.a), .cmd_b_line(head.b), .cmd_c_line(head.c), .cmd_k(head.k),
       .cmd_a_signed(head.sa), .cmd_b_signed(head.sb),
       .done(cu_done[i]), .feeding(cu_feed[i]),
-      .rd_req(rd_req[i]), .rd_line(rd_line[i]), .rd_gnt(rd_gnt[i]), .rd_data(rd_data[i]),
+      .rd_req(c_rq), .rd_line(c_rl), .rd_gnt(c_rg), .rd_data(c_rd),
       .wr_req(wr_req[i]), .wr_line(wr_line[i]), .wr_data(wr_data[i]), .wr_gnt(wr_gnt[i]));
   end
 
@@ -127,7 +143,7 @@ module npu_core
   assign wr_req[NCU] = h_wr_req;  assign wr_line[NCU] = h_wr_line;  assign wr_data[NCU] = h_wr_data;
   assign h_wr_gnt = wr_gnt[NCU];
 
-  npu_l2_xbar #(.NM(NM), .NB(NB), .DEPTH(DEPTH)) u_l2 (
+  npu_l2_xbar #(.NM(NM), .NW(NW), .NB(NB), .DEPTH(DEPTH)) u_l2 (
     .clk(clk), .rst_n(rst_n),
     .rd_req(rd_req), .rd_line(rd_line), .rd_gnt(rd_gnt), .rd_data(rd_data),
     .wr_req(wr_req), .wr_line(wr_line), .wr_data(wr_data), .wr_gnt(wr_gnt));

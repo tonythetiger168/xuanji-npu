@@ -49,7 +49,9 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
   function automatic logic [511:0] erd(int unsigned a); return emem.exists(a) ? emem[a] : einit(a); endfunction
   function automatic logic [511:0] rerd(int unsigned a); return rext.exists(a) ? rext[a] : einit(a); endfunction
   function automatic int l2i(logic [25:0] l); return int'(l) % LINES; endfunction
-  function automatic logic [511:0] l2_bd(int i); return dut.u_core.u_l2.mem[i % NB][(i / NB) % DEPTH]; endfunction
+  function automatic logic [511:0] l2_bd(int i);
+    return dut.u_core.u_l2.mem[npu_l2_bank(26'(i), $clog2(NB), $clog2(DEPTH))][npu_l2_row(26'(i), $clog2(NB), $clog2(DEPTH))];
+  endfunction
 
   // 參考模型: 依序執行一個命令
   function automatic void ref_exec(npu_tile_cmd_t c);

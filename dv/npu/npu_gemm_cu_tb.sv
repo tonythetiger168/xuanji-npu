@@ -8,6 +8,7 @@
 // plusargs: +seed=N  +cmds=N (預設 200)
 //=============================================================================
 module npu_gemm_cu_tb #(parameter int N = 8);
+  localparam int RP = (N == 32) ? 2 : 1;         // CU 讀取埠數 (與 npu_gemm_cu 相同公式)
   localparam int KMAX = 65535;
   localparam int AMAX = (KMAX * N + 63) / 64;    // A / B 各最多佔的 line 數 (N=16: 16384, N=32: 32768)
   localparam int LW = (N == 32) ? 17 : 16, LINES = 1 << LW;   // 模型只解碼低 LW bit
@@ -18,9 +19,12 @@ module npu_gemm_cu_tb #(parameter int N = 8);
   logic [25:0] cmd_a_line = '0, cmd_b_line = '0, cmd_c_line = '0;
   logic [15:0] cmd_k = 16'd1;
   logic cmd_a_signed = 1'b0, cmd_b_signed = 1'b0;
-  logic rd_req, rd_gnt, wr_req, wr_gnt;
-  logic [25:0] rd_line, wr_line;
-  logic [511:0] rd_data, wr_data;
+  logic [RP-1:0] rd_req, rd_gnt;
+  logic wr_req, wr_gnt;
+  logic [RP-1:0][25:0] rd_line;
+  logic [25:0] wr_line;
+  logic [RP-1:0][511:0] rd_data;
+  logic [511:0] wr_data;
   always #5 clk = ~clk;
 
   npu_gemm_cu #(.N(N)) dut (.*);
@@ -28,11 +32,17 @@ module npu_gemm_cu_tb #(parameter int N = 8);
   // ---------------- L2 模型 ----------------
   logic [511:0] mem [LINES];
   int gnt_pct = 100;                           // 每拍給 grant 的機率 (%)
-  logic rg, wg;
-  always @(negedge clk) begin rg = ($urandom_range(99, 0) < gnt_pct); wg = ($urandom_range(99, 0) < gnt_pct); end
-  assign rd_gnt  = rd_req && rg;
+  logic [RP-1:0] rg;                           // 每個讀取埠各自隨機 grant
+  logic wg;
+  always @(negedge clk) begin
+    for (int p = 0; p < RP; p++) rg[p] = ($urandom_range(99, 0) < gnt_pct);
+    wg = ($urandom_range(99, 0) < gnt_pct);
+  end
+  assign rd_gnt  = rd_req & rg;
   assign wr_gnt  = wr_req && wg;
-  assign rd_data = mem[rd_line[LW-1:0]];
+  for (genvar p = 0; p < RP; p++) begin : g_rd
+    assign rd_data[p] = mem[rd_line[p][LW-1:0]];
+  end
   int n_wr_bad = 0;
   logic [25:0] c_lo, c_hi;                     // 本命令的 C 區 [c_lo, c_hi) (line)
   always @(posedge clk) if (rst_n && wr_gnt) begin

@@ -9,13 +9,14 @@ module clock_gate (input logic clk, en, test_en, output logic clk_out);
   assign clk_out = clk;
 endmodule
 
-module npu_gemm_cu #(parameter int N = 8) (
+module npu_gemm_cu #(parameter int N = 8, localparam int RP = (N == 32) ? 2 : 1) (
   input  logic clk, rst_n, test_en,
   input  logic cmd_valid, output logic cmd_ready,
   input  logic [25:0] cmd_a_line, cmd_b_line, cmd_c_line, input logic [15:0] cmd_k,
   input  logic cmd_a_signed, cmd_b_signed,
   output logic done, feeding,
-  output logic rd_req, output logic [25:0] rd_line, input logic rd_gnt, input logic [511:0] rd_data,
+  output logic [RP-1:0] rd_req, output logic [RP-1:0][25:0] rd_line, input logic [RP-1:0] rd_gnt,
+  input  logic [RP-1:0][511:0] rd_data,
   output logic wr_req, output logic [25:0] wr_line, output logic [511:0] wr_data, input logic wr_gnt
 );
   (* anyseq *) logic fin_any, feed_any;
@@ -31,13 +32,14 @@ module npu_gemm_cu #(parameter int N = 8) (
     end
 endmodule
 
-module npu_l2_xbar #(parameter int NM = 5, NB = 4, DEPTH = 1024, LDW = 512) (
+module npu_l2_xbar #(parameter int NM = 5, NW = NM, NB = 4, DEPTH = 1024, LDW = 512) (
   input  logic clk, rst_n,
   input  logic [NM-1:0] rd_req, input logic [NM-1:0][25:0] rd_line,
   output logic [NM-1:0] rd_gnt, output logic [NM-1:0][LDW-1:0] rd_data,
-  input  logic [NM-1:0] wr_req, input logic [NM-1:0][25:0] wr_line, input logic [NM-1:0][LDW-1:0] wr_data,
-  output logic [NM-1:0] wr_gnt
+  input  logic [NW-1:0] wr_req, input logic [NW-1:0][25:0] wr_line, input logic [NW-1:0][LDW-1:0] wr_data,
+  output logic [NW-1:0] wr_gnt
 );
-  (* anyseq *) logic [NM-1:0] rg, wg;
+  (* anyseq *) logic [NM-1:0] rg;
+  (* anyseq *) logic [NW-1:0] wg;
   assign rd_gnt = rd_req & rg; assign wr_gnt = wr_req & wg; assign rd_data = '0;
 endmodule

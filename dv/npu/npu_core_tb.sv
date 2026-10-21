@@ -14,6 +14,7 @@
 // plusargs: +seed=N  +cmds=N (預設 200)  +perf [+perf_k=K]  +min_util=P  +long
 //=============================================================================
 module npu_core_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB = 4, parameter int DEPTH = 1024);
+  import orca_pkg::*;
   localparam int QD = 4;                                  // 與 npu_core 預設一致
   localparam int SPL = 64 / N, CL = (4 * N * N + 63) / 64;
   // slot 數 > NCU + QD (全部 CU 同時忙碌且佇列滿); 2 的冪, 至少 16 (Max: NCU + QD = 28 → 32)
@@ -254,7 +255,9 @@ module npu_core_tb #(parameter int N = 8, parameter int NCU = 4, parameter int N
     logic [511:0] junk = {16{$urandom()}};
     wait (!busy);
     prepare(ur(1, 2 * SPL), x, id, 2);
-    scr = x.c + 26'(NB * ((CL + NB - 1) / NB));   // C 區之後、同 bank 的 line (仍在本命令的 slot 內)
+    // C 區之後第一個與 C 第一個 line 同 bank 的 line (雜湊對應; 仍在本命令的 slot 內)
+    scr = x.c + 26'(CL);
+    while (npu_l2_bank(scr, $clog2(NB), $clog2(DEPTH)) != npu_l2_bank(x.c, $clog2(NB), $clog2(DEPTH))) scr++;
     fork
       begin issue(x, id); end
       begin cpl_bp = 0; consumer(1); fin = 1; end
@@ -298,7 +301,7 @@ module npu_core_tb #(parameter int N = 8, parameter int NCU = 4, parameter int N
   // C 區寫回發生在全部讀取之後 (輸出階段), 因此即使 C 與 A / B 的折返範圍重疊也不影響參考值。
   function automatic logic [7:0] bd8(longint unsigned line, int off);
     longint unsigned l = (line + off / 64) % LINES;
-    return dut.u_l2.mem[l % NB][(l / NB) % DEPTH][(off % 64) * 8 +: 8];
+    return dut.u_l2.mem[npu_l2_bank(26'(l), $clog2(NB), $clog2(DEPTH))][npu_l2_row(26'(l), $clog2(NB), $clog2(DEPTH))][(off % 64) * 8 +: 8];
   endfunction
   task automatic long_run();
     rec_t r; logic [511:0] ln;

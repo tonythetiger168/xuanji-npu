@@ -55,7 +55,7 @@ mut npu_l2_xbar $X no_bank_chk "for (int i = 0; i < NM; i++) rq[i] = req[i] && b
 mut npu_l2_xbar $X gnt_all     "assign rd_gnt[m]  = rd_req[m] && rd_bv[rb] && rd_bm[rb] == MW'(m);" "assign rd_gnt[m]  = rd_req[m] && rd_bv[rb];"
 mut npu_l2_xbar $X wdata_m0    "if (wr_bv[b]) mem[b][row_of(wr_line[wr_bm[b]])] <= wr_data[wr_bm[b]];" "if (wr_bv[b]) mem[b][row_of(wr_line[wr_bm[b]])] <= wr_data[0];"
 mut npu_l2_xbar $X rdata_bank0 "assign rd_data[m] = mem[rb][row_of(rd_line[m])];" "assign rd_data[m] = mem[0][row_of(rd_line[m])];"
-mut npu_l2_xbar $X row_bits    "function automatic logic [DW-1:0] row_of(logic [25:0] l);  return l[BW +: DW]; endfunction" "function automatic logic [DW-1:0] row_of(logic [25:0] l);  return l[0 +: DW]; endfunction"
+mut npu_l2_xbar $X row_bits    "function automatic logic [DW-1:0] row_of(logic [25:0] l);  return DW'(npu_l2_row(l, BW, DW)); endfunction" "function automatic logic [DW-1:0] row_of(logic [25:0] l);  return l[0 +: DW]; endfunction"
 mut npu_l2_xbar $X rr_rot2     "m = MW'((int'(rr) + 1 + f) % NM);" "m = MW'((int'(rr) + f) % NM);"
 C=rtl/npu/npu_core.sv
 mut npu_core $C done_dispatch "assign cu_free    = cu_ready & ~cpl_pend & ~cu_done;" "assign cu_free    = cu_ready & ~cpl_pend;"

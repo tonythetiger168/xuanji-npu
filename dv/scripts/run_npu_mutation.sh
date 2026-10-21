@@ -63,22 +63,30 @@ mut start_busy    $MMA "S_IDLE:  if (start) st_n = S_RUN;" "S_IDLE:  if (start) 
       S_OUT:   if (start) st_n = S_RUN;"                                                                   # 輸出中接受 start
 mut last_early    $MMA "S_RUN:   if (fire_in && in_last) st_n = S_DRAIN;" "S_RUN:   if (in_last) st_n = S_DRAIN;"  # in_last 未握手即結束
 # ---- npu_gemm_cu ----
-mut cu_aptr_stuck $CU "a_ptr <= a_ptr + 1'b1; end" "a_ptr <= a_ptr; end"                                      # A line 指標不前進
+mut cu_aptr_stuck $CU "a_ptr <= a_ptr + 1'b1; fa <= fa - 1'b1; end" "a_ptr <= a_ptr; fa <= fa - 1'b1; end"   # A line 指標不前進
 mut cu_pop_early  $CU "wire pop  = feed && (step == SW'(SPL - 1) || mma_in_last);" "wire pop  = feed && (step == SW'(SPL - 2) || mma_in_last);"  # 提早換 line
 mut cu_no_wgnt    $CU "G_WR:  if (wr_gnt) begin" "G_WR:  begin"                                                # 不等寫入 grant
-mut cu_no_rgnt    $CU "      if (rd_gnt) begin
-        if (!f_b)" "      if (rd_req) begin
-        if (!f_b)"                                                                                          # 不等讀取 grant
-mut cu_overflow   $CU "(f_b || cnt != 2'd2)" "(1'b1)"                                                        # 緩衝滿仍預取 (覆蓋未用的 line)
 mut cu_last       $CU "assign mma_in_last   = (k_left == 16'd1);" "assign mma_in_last   = (k_left == 16'd2);"  # 少一個 k 步
-mut cu_fleft      $CU "FW'((32'(cmd_k) + SPL - 1) / SPL)" "FW'((32'(cmd_k) + SPL - 1) / SPL + 1)"           # 多讀一個 line (帳目錯)
-mut cu_bsel       $CU "assign b_vec         = buf_b[rptr][step * N * 8 +: N * 8];" "assign b_vec         = buf_b[wptr][step * N * 8 +: N * 8];"  # 讀錯緩衝槽
+mut cu_fleft      $CU "fa <= FW'((32'(cmd_k) + SPL - 1) / SPL);" "fa <= FW'((32'(cmd_k) + SPL - 1) / SPL + 1);"   # A 多讀一個 line (帳目錯)
+mut cu_bsel       $CU "assign b_vec         = buf_b[rptr][step * N * 8 +: N * 8];" "assign b_vec         = buf_b[wb][step * N * 8 +: N * 8];"  # 讀錯緩衝槽
+mut cu_have       $CU "assign have          = (a_cnt != '0) && (b_cnt != '0);" "assign have          = (a_cnt != '0);"  # B 未到齊就餵入
+if [ $N -eq 32 ]; then   # 雙讀取埠 (RP = 2) 與一列兩個 C line
+  mut cu_no_rgnt  $CU "assign a_gnt = rd_gnt[0]; assign b_gnt = rd_gnt[1];" "assign a_gnt = rd_req[0]; assign b_gnt = rd_gnt[1];"  # A 埠不等讀取 grant
+  mut cu_overflow $CU "assign a_req = run && (fa != '0) && (a_cnt != (PW+1)'(PF));" "assign a_req = run && (fa != '0);"  # A 緩衝滿仍預取
+  mut cu_b_full   $CU "assign b_req = run && (fb != '0) && (b_cnt != (PW+1)'(PF));" "assign b_req = run && (fb != '0);"  # B 緩衝滿仍預取
+  mut cu_hi_half  $CU "else if (out_fire) begin c_hi <= mma_out_vec[N-1:N/2];" "else if (out_fire) begin c_hi <= mma_out_vec[N/2-1:0];"  # 後半列放錯 (曾犯的錯)
+  mut cu_one_half $CU "assign row_last = c_half;" "assign row_last = 1'b1;"                                # 每列只寫前半
+else                     # 單一讀取埠, A / B 輪流
+  mut cu_no_rgnt  $CU "assign a_gnt = rd_gnt[0] && !f_b; assign b_gnt = rd_gnt[0] && f_b;" "assign a_gnt = rd_req[0] && !f_b; assign b_gnt = rd_req[0] && f_b;"  # 不等讀取 grant
+  mut cu_overflow $CU "assign a_req = run && !f_b && (fa != '0) && (a_cnt != (PW+1)'(PF));" "assign a_req = run && !f_b && (fa != '0);"  # 緩衝滿仍預取 (覆蓋未用的 line)
+  mut cu_alt      $CU "else if (rd_gnt[0]) f_b <= ~f_b;" "else if (rd_req[0]) f_b <= ~f_b;"               # 未 grant 就換軌
+fi
 [ $N -lt 16 ] && mut cu_slot $CU "c_line_n[slot * N * 32 +: N * 32] = mma_out_vec;" "c_line_n[0 +: N * 32] = mma_out_vec;"  # C 列放錯位置 (N=16 每列一個 line, 不適用)
 # ---- npu_l2_xbar ----
 mut xb_two_gnt    $XB "assign rd_gnt[m]  = rd_req[m] && rd_bv[rb] && rd_bm[rb] == MW'(m);" "assign rd_gnt[m]  = rd_req[m] && rd_bv[rb];"  # 同 bank 多個讀 grant
 mut xb_no_rr      $XB "if (rd_bv[b]) rd_rr[b] <= rd_bm[b];" "if (1'b0) rd_rr[b] <= rd_bm[b];"               # 固定優先權 (可能飢餓)
 mut xb_no_wrr     $XB "if (wr_bv[b]) wr_rr[b] <= wr_bm[b];" "if (1'b0) wr_rr[b] <= wr_bm[b];"               # 寫入固定優先權
-mut xb_row        $XB "function automatic logic [DW-1:0] row_of(logic [25:0] l);  return l[BW +: DW]; endfunction" "function automatic logic [DW-1:0] row_of(logic [25:0] l);  return l[BW + 1 +: DW]; endfunction"  # bank 列位址錯
+mut xb_row        $XB "function automatic logic [DW-1:0] row_of(logic [25:0] l);  return DW'(npu_l2_row(l, BW, DW)); endfunction" "function automatic logic [DW-1:0] row_of(logic [25:0] l);  return DW'(npu_l2_row(l >> 1, BW, DW)); endfunction"  # bank 列位址錯
 mut xb_wr_any     $XB "assign wr_gnt[m]  = wr_req[m] && wr_bv[wb] && wr_bm[wb] == MW'(m);" "assign wr_gnt[m]  = wr_req[m];"  # 寫入不仲裁
 # ---- npu_core ----
 mut core_done_disp $CORE "assign cu_free    = cu_ready & ~cpl_pend & ~cu_done;" "assign cu_free    = cu_ready & ~cpl_pend;"  # done 當拍分派 (已修正的 bug)

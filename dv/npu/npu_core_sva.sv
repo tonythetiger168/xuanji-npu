@@ -7,7 +7,7 @@ module npu_core_sva #(parameter int NCU = 4, parameter int QD = 4) (
   input logic h_rd_req, h_rd_gnt, h_wr_req, h_wr_gnt,
   input logic [$clog2(QD):0] q_cnt,
   input logic [NCU-1:0] cu_ready, cu_done, cu_v, cu_free, cpl_pend, cu_en, cu_feed,
-  input logic [NCU-1:0] rd_req, wr_req           // 只取 CU 主端 (低 NCU 位)
+  input logic [NCU-1:0] rd_req, wr_req           // CU 的讀取請求 (任一埠, cu_rd) / 寫入請求 (低 NCU 位)
 );
   default clocking cb @(posedge clk); endclocking
   default disable iff (!rst_n);
@@ -47,4 +47,4 @@ endmodule
 bind npu_core npu_core_sva #(.NCU(NCU), .QD(QD)) u_sva (
   .clk, .rst_n, .test_en, .cmd_valid, .cmd_ready, .cpl_valid, .cpl_ready, .busy, .cpl_id,
   .h_rd_req, .h_rd_gnt, .h_wr_req, .h_wr_gnt, .q_cnt, .cu_ready, .cu_done, .cu_v, .cu_free, .cpl_pend, .cu_en, .cu_feed,
-  .rd_req(rd_req[NCU-1:0]), .wr_req(wr_req[NCU-1:0]));
+  .rd_req(cu_rd), .wr_req(wr_req[NCU-1:0]));
