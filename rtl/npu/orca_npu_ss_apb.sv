@@ -42,7 +42,7 @@ module orca_npu_ss_apb
   logic [7:0]    cpl_id;
   logic [47:0]   perf_busy, perf_steps;
   npu_ss_regs #(.TILE_ID(TILE_ID), .N(N), .NCU(NCU), .NB(NB), .DEPTH(DEPTH), .QD(QD), .OUT(OUT), .CQ(CQ)) u_regs (
-    .clk, .rst_n, .psel, .penable, .pwrite, .paddr, .pwdata, .pstrb, .pready, .prdata, .pslverr, .irq,
+    .clk, .rst_n, .test_en, .psel, .penable, .pwrite, .paddr, .pwdata, .pstrb, .pready, .prdata, .pslverr, .irq,
     .cmd_valid, .cmd_ready, .cmd, .cpl_valid, .cpl_ready, .cpl_id, .ss_busy, .vec_err,
     .perf_wr, .perf_busy, .perf_steps);
   assign busy = ss_busy || cmd_valid;

@@ -26,6 +26,7 @@ module npu_ss_regs
   parameter int CQ    = 4              // APB 命令 FIFO 深度 (2 的冪, <= 8)
 )(
   input  logic        clk, rst_n,
+  input  logic        test_en,         // DFT: 強制開啟所有 ICG (功能不變)
   // APB4 從端
   input  logic        psel, penable, pwrite,
   input  logic [11:0] paddr,           // 4 KiB 視窗內的位元組位址 (位元 [1:0] 忽略)
@@ -78,7 +79,11 @@ module npu_ss_regs
   logic [31:0] r_ctl, r_ext;
   logic [25:0] r_a, r_b, r_c;
   logic [3:0]  r_ien;
-  always_ff @(posedge clk or negedge rst_n)
+  // 低功耗: 暫存區 / 中斷致能只在 APB 寫入拍收到時脈 (ICG); 資料致能仍為 wr, test_en 強制開時脈時功能不變
+  // (reset 期間 ICG 也打開: 模擬開始時 rst_n 已為低、沒有 negedge 時, 閘控的 flop 仍在時脈沿上 reset)
+  logic gclk_w;
+  clock_gate u_icg_w (.clk(clk), .en(wr || !rst_n), .test_en(test_en), .clk_out(gclk_w));
+  always_ff @(posedge gclk_w or negedge rst_n)
     if (!rst_n) begin
       r_ctl <= '0; r_ext <= '0; r_a <= '0; r_b <= '0; r_c <= '0; r_ien <= '0;
     end else if (wr) begin
@@ -117,7 +122,9 @@ module npu_ss_regs
       if (push) q_wr <= q_wr + 1'b1;
       if (pop)  q_rd <= q_rd + 1'b1;
     end
-  always_ff @(posedge clk)                                  // 資料暫存器: 只在 push 拍寫入
+  logic gclk_q;                                             // FIFO 資料: 只在 push 拍收到時脈
+  clock_gate u_icg_q (.clk(clk), .en(push || !rst_n), .test_en(test_en), .clk_out(gclk_q));
+  always_ff @(posedge gclk_q)
     if (push) q[q_wr[CW-1:0]] <= stg;
   assign cmd_valid = (q_n != '0);
   assign cmd       = q[q_rd[CW-1:0]];

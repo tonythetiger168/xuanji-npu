@@ -17,7 +17,7 @@ open(out, 'w').write(s.replace(o, nw, 1))
 PY
   nt=$((nt + 1))
   verilator --binary --timing -j "${JOBS:-4}" --assert -Wno-fatal -Wno-lint -Wno-style -Irtl/common --Mdir $M/$n.obj \
-    rtl/common/orca_pkg.sv $M/$n.sv dv/npu/npu_ss_regs_sva.sv dv/npu/npu_ss_regs_tb.sv --top-module npu_ss_regs_tb \
+    rtl/common/orca_pkg.sv rtl/common/clock_gate.sv $M/$n.sv dv/npu/npu_ss_regs_sva.sv dv/npu/npu_ss_regs_tb.sv --top-module npu_ss_regs_tb \
     > $M/$n.build 2>&1 || { echo "$n: BUILD FAIL"; rm -rf $M/$n.obj; surv=1; return; }
   $M/$n.obj/Vnpu_ss_regs_tb +seed=1 +cycles=100000 > $M/$n.log 2>&1; rm -rf $M/$n.obj
   if grep -q "TB PASS" $M/$n.log && ! grep -q "Assertion failed" $M/$n.log; then echo "$n: SURVIVED"; surv=1
@@ -47,5 +47,7 @@ mut rst_ctl     "r_ctl <= '0; r_ext <= '0;" "r_ext <= '0;"                      
 mut op_hi       "stg.op  = npu_op_e'({r_ctl[5], r_ctl[1:0]});" "stg.op  = npu_op_e'({1'b0, r_ctl[1:0]});"   # OP[2] 遺失 (VEC 變 GEMM)
 mut verr_no_w1c "verr <= (verr && !(w1c && pwdata[3])) || vec_err;" "verr <= verr || vec_err;"            # VEC_ERR 清不掉
 mut verr_none   "verr <= (verr && !(w1c && pwdata[3])) || vec_err;" "verr <= (verr && !(w1c && pwdata[3]));"  # 沒記錄 VEC 錯誤
+mut icg_w       "u_icg_w (.clk(clk), .en(wr || !rst_n)" "u_icg_w (.clk(clk), .en((wr && wa != A_CMD_EXT) || !rst_n)"   # 時脈閘控漏掉一個暫存器
+mut icg_q       ".en(push || !rst_n)" ".en((push && !cmd_ready) || !rst_n)"                              # FIFO 同拍 push / pop 時沒有時脈
 echo "=== npu_ss_regs mutation: $nk / $nt mutants killed"
 [ $surv -eq 0 ] && [ $nk -eq $nt ]

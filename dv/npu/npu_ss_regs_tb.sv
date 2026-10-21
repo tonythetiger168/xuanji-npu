@@ -18,6 +18,8 @@ module npu_ss_regs_tb;
   npu_tile_cmd_t cmd;
   logic [7:0]  cpl_id = '0;
   logic [47:0] perf_busy = '0, perf_steps = '0;
+  logic test_en = 0;                                        // DFT: 隨機強制開啟 ICG (功能必須相同)
+  always @(posedge clk) if ($urandom_range(99) == 0) test_en <= !test_en;
   npu_ss_regs #(.TILE_ID(3), .N(8), .NCU(4), .NB(4), .DEPTH(1024), .QD(8), .OUT(32), .CQ(CQ)) dut (.*);
 
   // ---------------- 參考模型 ----------------
