@@ -27,6 +27,9 @@ module npu_ss_regs
 )(
   input  logic        clk, rst_n,
   input  logic        test_en,         // DFT: 強制開啟所有 ICG (功能不變)
+  // retention (v6.3.11): IRQ_EN 斷電後保留。clk_aon / por_n 為常開域時脈與上電 reset; ret_save / ret_restore 來自 PMU
+  input  logic        clk_aon, por_n,
+  input  logic        ret_save, ret_restore,
   // APB4 從端
   input  logic        psel, penable, pwrite,
   input  logic [11:0] paddr,           // 4 KiB 視窗內的位元組位址 (位元 [1:0] 忽略)
@@ -81,18 +84,24 @@ module npu_ss_regs
   logic [3:0]  r_ien;
   // 低功耗: 暫存區 / 中斷致能只在 APB 寫入拍收到時脈 (ICG); 資料致能仍為 wr, test_en 強制開時脈時功能不變
   // (reset 期間 ICG 也打開: 模擬開始時 rst_n 已為低、沒有 negedge 時, 閘控的 flop 仍在時脈沿上 reset)
+  // retention: IRQ_EN 的影子暫存器在常開域; 上電後 ret_restore 拍載回 (之後同拍的 APB 寫入優先)
+  logic [3:0] ien_ret;
+  ret_shadow #(.W(4)) u_ret_ien (.clk_aon, .por_n, .save(ret_save), .d(r_ien), .q(ien_ret));
   logic gclk_w;
-  clock_gate u_icg_w (.clk(clk), .en(wr || !rst_n), .test_en(test_en), .clk_out(gclk_w));
+  clock_gate u_icg_w (.clk(clk), .en(wr || ret_restore || !rst_n), .test_en(test_en), .clk_out(gclk_w));
   always_ff @(posedge gclk_w or negedge rst_n)
     if (!rst_n) begin
       r_ctl <= '0; r_ext <= '0; r_a <= '0; r_b <= '0; r_c <= '0; r_ien <= '0;
-    end else if (wr) begin
+    end else begin
+      if (ret_restore) r_ien <= ien_ret;
+      if (wr) begin
       if (wa == A_CMD_CTL) r_ctl <= merge(r_ctl, pwdata, bm) & 32'hFFFF_FF3F;   // 保留位元 [7:6] 為 0
       if (wa == A_CMD_EXT) r_ext <= merge(r_ext, pwdata, bm);
       if (wa == A_CMD_A)   r_a   <= 26'(merge({6'd0, r_a}, pwdata, bm));
       if (wa == A_CMD_B)   r_b   <= 26'(merge({6'd0, r_b}, pwdata, bm));
       if (wa == A_CMD_C)   r_c   <= 26'(merge({6'd0, r_c}, pwdata, bm));
       if (wa == A_IRQ_EN)  r_ien <= 4'(merge({28'd0, r_ien}, pwdata, bm));
+      end
     end
   npu_tile_cmd_t stg;
   always_comb begin
@@ -186,7 +195,8 @@ module npu_ss_regs
   logic f_past;
   initial f_past = 1'b0;
   always @(posedge clk) f_past <= 1'b1;
-  initial assume (!rst_n);
+  initial assume (!rst_n && !por_n);                     // 上電: 域 reset 與上電 reset 同時有效
+  always @(*) assert (ien_ret == f_ien_sh);                    // retention 影子 (常開域, 與域 reset 無關)
   // 環境: APB 主端協定; orca_npu_ss 端的完成在 cpl_ready 之前保持
   always @(posedge clk) if (f_past && rst_n && $past(rst_n)) begin
     if ($past(psel && !penable)) begin assume (psel && penable && paddr == $past(paddr) && pwrite == $past(pwrite)
@@ -202,8 +212,11 @@ module npu_ss_regs
                                    10'h00B, 10'h00C, 10'h00D, 10'h010, 10'h011, 10'h014, 10'h015, 10'h016, 10'h017, 10'h018};
   wire [31:0] f_bm = {{8{pstrb[3]}}, {8{pstrb[2]}}, {8{pstrb[1]}}, {8{pstrb[0]}}};
   logic [31:0] f_ctl, f_ext, f_a, f_b, f_c;
-  logic [3:0]  f_ien;
+  logic [3:0]  f_ien, f_ien_sh;                            // f_ien_sh: retention 影子 (常開域, por_n)
   logic        f_ovf, f_berr, f_verr;
+  always @(posedge clk_aon or negedge por_n)
+    if (!por_n) f_ien_sh <= '0;
+    else if (ret_save) f_ien_sh <= f_ien;
   logic [CW:0] f_cnt;                                       // 已接受、尚未送出的命令數
   logic [7:0]  f_acc_n, f_out_n;                            // 已接受 / 已送出的命令序號
   (* anyconst *) logic [7:0] f_idx;
@@ -230,6 +243,7 @@ module npu_ss_regs
       if (f_wr && f_wa == 10'h00B) f_b <= ((f_b & ~f_bm) | (pwdata & f_bm)) & 32'h03FF_FFFF;
       if (f_wr && f_wa == 10'h00C) f_c <= ((f_c & ~f_bm) | (pwdata & f_bm)) & 32'h03FF_FFFF;
       if (f_wr && f_wa == 10'h007) f_ien <= 4'(({28'd0, f_ien} & ~f_bm) | (pwdata & f_bm));
+      else if (ret_restore)        f_ien <= f_ien_sh;
       f_ovf  <= (f_ovf && !(f_wr && f_wa == 10'h006 && pstrb[0] && pwdata[1])) || (f_pushreq && f_full);
       f_berr <= (f_berr && !(f_wr && f_wa == 10'h006 && pstrb[0] && pwdata[2])) || (f_acc && !f_def);
       f_verr <= (f_verr && !(f_wr && f_wa == 10'h006 && pstrb[0] && pwdata[3])) || vec_err;

@@ -18,7 +18,7 @@ module orca_npu_ss_apb_tb;
   logic [31:0] m_rd_addr, m_wr_addr;
   logic [511:0] m_rd_rdata = '0, m_wr_data;
   logic test_en = 0;
-  orca_npu_ss_apb #(.TILE_ID(3)) dut (.clk, .rst_n, .test_en, .psel, .penable, .pwrite, .paddr, .pwdata,
+  orca_npu_ss_apb #(.TILE_ID(3)) dut (.clk, .rst_n, .test_en, .clk_aon(clk), .por_n(rst_n), .ret_save(1'b0), .ret_restore(1'b0), .psel, .penable, .pwrite, .paddr, .pwdata,
     .pstrb, .pready, .prdata, .pslverr, .irq, .m_rd_req, .m_rd_addr, .m_rd_gnt, .m_rd_rvalid, .m_rd_rdata,
     .m_wr_req, .m_wr_addr, .m_wr_data, .m_wr_gnt);
 

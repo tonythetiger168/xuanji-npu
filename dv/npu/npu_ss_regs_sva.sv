@@ -12,7 +12,10 @@ module npu_ss_regs_sva
   input logic cmd_valid, cmd_ready, cpl_valid, cpl_ready,
   input npu_tile_cmd_t cmd,
   input logic push, push_req, pop, q_full, hit,
-  input logic [$clog2(CQ):0] q_n
+  input logic [$clog2(CQ):0] q_n,
+  input logic ret_save, ret_restore, wr,       // retention (v6.3.11)
+  input logic [9:0] wa,
+  input logic [3:0] r_ien, ien_ret
 );
   default clocking cb @(posedge clk); endclocking
   default disable iff (!rst_n);
@@ -29,6 +32,9 @@ module npu_ss_regs_sva
   a_qn:      assert property (q_n <= ($clog2(CQ)+1)'(CQ));
   a_qcnt:    assert property (q_n == $past(q_n) + ($past(push) ? 1 : 0) - ($past(pop) ? 1 : 0));
   a_drop:    assert property (push_req && q_full |-> !push);
+  // retention: IRQ_EN 只在 APB 寫入或 ret_restore 拍改變; restore 載入影子 (同拍寫入 IRQ_EN 時寫入優先)
+  a_ien_hold: assert property (!(wr && wa == 10'h007) && !ret_restore |=> $stable(r_ien));
+  a_ien_rest: assert property (ret_restore && !(wr && wa == 10'h007) |=> r_ien == $past(ien_ret));
 
   c_full_push: cover property (push_req && q_full);
   c_push_pop:  cover property (push && pop);
@@ -37,6 +43,9 @@ module npu_ss_regs_sva
   c_cpl_empty: cover property (cpl_ready && !cpl_valid);
   c_irq:       cover property (irq);
   c_b2b:       cover property (psel && penable ##1 psel && !penable);  // 連續交易
+  c_save:      cover property (ret_save && r_ien != '0);
+  c_restore:   cover property (ret_restore && ien_ret != r_ien);        // 還原改變了 IRQ_EN
+  c_rest_wr:   cover property (ret_restore && wr && wa == 10'h007);      // 還原與寫入同拍 (寫入優先)
 
   covergroup cg_apb @(posedge clk iff (rst_n && psel && penable));
     cp_reg: coverpoint paddr[11:2] {

@@ -20,6 +20,9 @@ module npu_ss_regs_tb;
   logic [47:0] perf_busy = '0, perf_steps = '0;
   logic test_en = 0;                                        // DFT: 隨機強制開啟 ICG (功能必須相同)
   always @(posedge clk) if ($urandom_range(99) == 0) test_en <= !test_en;
+  // retention: clk_aon = 未閘控的 clk; por_n 只在開始時; ret_save / ret_restore 隨機, 另有「存檔 → 域 reset → 還原」序列
+  wire  clk_aon = clk;
+  logic por_n = 0, ret_save = 0, ret_restore = 0;
   npu_ss_regs #(.TILE_ID(3), .N(8), .NCU(4), .NB(4), .DEPTH(1024), .QD(8), .OUT(32), .CQ(CQ)) dut (.*);
 
   // ---------------- 參考模型 ----------------
@@ -31,7 +34,7 @@ module npu_ss_regs_tb;
                        A_CMD_C, A_CMD_PUSH, A_CPL_POP, A_CPL_PEEK, A_PERF_CTRL, A_PB_LO, A_PB_HI, A_PS_LO, A_PS_HI};
   logic [31:0] m_ctl, m_ext;
   logic [25:0] m_a, m_b, m_c;
-  logic [3:0]  m_ien;
+  logic [3:0]  m_ien, m_sh;                               // m_sh: retention 影子 (只由 por_n 清除)
   logic        m_ovf, m_berr, m_verr;
   logic [15:0] m_shb, m_shs;
   npu_tile_cmd_t m_q [$];
@@ -78,6 +81,7 @@ module npu_ss_regs_tb;
     m_q.delete();
   endtask
 
+  int n_save = 0, n_rest = 0, n_pcyc = 0, n_por = 0;
   int n_err = 0, n_rd = 0, n_wr = 0, n_push = 0, n_pop = 0, n_cpl = 0, n_ovf = 0, n_slverr = 0, n_rst = 0;
   task automatic err(string s);
     n_err++; if (n_err < 10) $display("MISMATCH %0t %s", $time, s);
@@ -91,6 +95,7 @@ module npu_ss_regs_tb;
     logic [31:0] exp_rd = rd ? (hit ? m_read(a) : '0) : '0;
     bit e_cv = m_q.size() != 0;
     bit e_pwr = wr && a == A_PERF_CTRL && pstrb[0] && pwdata[0];
+    logic [3:0] o_ien = m_ien, o_sh = m_sh;
     if (pready !== 1'b1) err("pready");
     if (pslverr !== (acc && !hit)) err($sformatf("pslverr a=%h", a));
     if (prdata !== exp_rd) err($sformatf("prdata a=%h got %h exp %h", a, prdata, exp_rd));
@@ -99,6 +104,8 @@ module npu_ss_regs_tb;
     if (cpl_ready !== (rd && a == A_CPL_POP)) err("cpl_ready");
     if (irq !== |({m_verr, m_berr, m_ovf, cpl_valid} & m_ien)) err("irq");
     if (perf_wr !== e_pwr) err("perf_wr");
+    if (!por_n) m_sh = '0;
+    else if (ret_save) begin m_sh = o_ien; n_save++; end                // 影子在常開域: 域 reset 期間仍運作
     if (!rst_n) return;
     // 模型轉移
     if (rd) n_rd++;
@@ -127,6 +134,7 @@ module npu_ss_regs_tb;
       A_IRQ_EN:  m_ien = 4'(mrg({28'd0, m_ien}, pwdata, pstrb));
       default: ;
     endcase
+    if (ret_restore && !(wr && a == A_IRQ_EN)) begin m_ien = o_sh; n_rest++; end   // 同拍寫入 IRQ_EN 優先
   endtask
 
   // ---------------- 刺激 ----------------
@@ -154,6 +162,8 @@ module npu_ss_regs_tb;
     if (cpl_valid && cpl_ready) cpl_valid = 0;
     if (!cpl_valid && $urandom_range(99) < 20) begin cpl_valid = 1; cpl_id = 8'($urandom); n_cpl++; end
     ss_busy = ($urandom_range(99) < 50);
+    ret_save    = ($urandom_range(999) < 5);
+    ret_restore = ($urandom_range(999) < 5);
     vec_err = ($urandom_range(99) < 2);
     if (perf_wr) begin perf_busy = '0; perf_steps = '0; end
     else if ($urandom_range(99) < 30) begin perf_busy = {16'($urandom), 32'($urandom)}; perf_steps = {16'($urandom), 32'($urandom)}; end
@@ -172,22 +182,33 @@ module npu_ss_regs_tb;
     void'($value$plusargs("seed=%d", seed));
     void'($value$plusargs("cycles=%d", cycles));
     void'($urandom(seed));
-    m_reset();
+    m_reset(); m_sh = '0;
     repeat (3) @(posedge clk);
-    #1 rst_n = 1;
+    #1 rst_n = 1; por_n = 1;
     for (int c = 0; c < cycles; c++) begin
       @(negedge clk);
       check_and_step();
       @(posedge clk); #1;
       if ($urandom_range(9999) < 5) begin                                    // 中途 reset
-        rst_n = 0; ph = P_IDLE; psel = 0; penable = 0; cpl_valid = 0; m_reset(); n_rst++;
-        @(negedge clk); check_and_step(); @(posedge clk); #1 rst_n = 1;
+        bit pc;                                                              // 一半是斷電週期: 存檔 → 域 reset → 還原
+        pc = (ph != P_SETUP) && 1'($urandom_range(1));                      // (分開宣告: Verilator 的帶初值區域變數是 static; SETUP 拍不可中斷)
+        if (pc) begin
+          psel = 0; penable = 0; ph = P_IDLE; ret_save = 1; ret_restore = 0;
+          @(negedge clk); check_and_step(); @(posedge clk); #1 ret_save = 0;
+        end
+        rst_n = 0; ph = P_IDLE; psel = 0; penable = 0; cpl_valid = 0; ret_restore = 0; m_reset(); n_rst++;
+        if (!pc && $urandom_range(3) == 0) begin por_n = 0; n_por++; end        // 偶爾整片上電 reset: 影子也清除
+        @(negedge clk); check_and_step(); @(posedge clk); #1 rst_n = 1; por_n = 1;
+        if (pc) begin
+          ret_restore = 1; n_pcyc++;
+          @(negedge clk); check_and_step(); @(posedge clk); #1 ret_restore = 0;
+        end
       end
       drive();
     end
-    $display("REGS: cycles=%0d rd=%0d wr=%0d push=%0d pop=%0d cpl=%0d ovf=%0d slverr=%0d resets=%0d errors=%0d",
-             cycles, n_rd, n_wr, n_push, n_pop, n_cpl, n_ovf, n_slverr, n_rst, n_err);
-    if (n_err == 0 && n_push > 100 && n_ovf > 0 && n_slverr > 0) $display("TB PASS"); else $display("TB FAIL");
+    $display("REGS: cycles=%0d rd=%0d wr=%0d push=%0d pop=%0d cpl=%0d ovf=%0d slverr=%0d resets=%0d save=%0d restore=%0d power_cycles=%0d por=%0d errors=%0d",
+             cycles, n_rd, n_wr, n_push, n_pop, n_cpl, n_ovf, n_slverr, n_rst, n_save, n_rest, n_pcyc, n_por, n_err);
+    if (n_err == 0 && n_push > 100 && n_ovf > 0 && n_slverr > 0 && n_pcyc > 0 && n_por > 0) $display("TB PASS"); else $display("TB FAIL");
     $finish;
   end
 endmodule

@@ -12,13 +12,14 @@ declare -A SRC=(
   [npu_l2_xbar]="rtl/npu/npu_l2_xbar.sv"
   [npu_core]="formal/npu_core/stubs.sv rtl/npu/npu_core.sv"
   [npu_vec]="formal/npu_vec/stubs.sv rtl/npu/npu_vec.sv"
-  [npu_ss_regs]="formal/npu_ss_regs/stubs.sv rtl/npu/npu_ss_regs.sv"
+  [npu_ss_regs]="formal/npu_ss_regs/stubs.sv rtl/common/ret_shadow.sv rtl/npu/npu_ss_regs.sv"
   [npu_l2_arb2]="rtl/npu/npu_l2_arb2.sv"
   [npu_vec_eng]="formal/npu_vec_eng/stubs.sv rtl/npu/npu_vec_eng.sv"
   [orca_apb_xbar]="rtl/soc/orca_apb_xbar.sv"
   [orca_sys_regs]="formal/orca_sys_regs/stubs.sv rtl/soc/orca_sys_regs.sv"
   [orca_pmu_regs]="formal/orca_pmu_regs/stubs.sv rtl/soc/orca_pmu_regs.sv"
-  [gs_raster_regs]="formal/gs_raster_regs/stubs.sv rtl/sis/gs_raster_regs.sv"
+  [orca_pmu]="rtl/soc/orca_pmu.sv"
+  [gs_raster_regs]="formal/gs_raster_regs/stubs.sv rtl/common/ret_shadow.sv rtl/sis/gs_raster_regs.sv"
 )
 blocks=${*:-${!SRC[@]}}
 rc=0

@@ -17,7 +17,7 @@ open(out, 'w').write(s.replace(o, nw, 1))
 PY
   nt=$((nt + 1))
   verilator --binary --timing -j "${JOBS:-4}" --assert -Wno-fatal -Wno-lint -Wno-style -Irtl/common --Mdir $M/$n.obj \
-    rtl/common/orca_pkg.sv rtl/common/clock_gate.sv $M/$n.sv dv/npu/npu_ss_regs_sva.sv dv/npu/npu_ss_regs_tb.sv --top-module npu_ss_regs_tb \
+    rtl/common/orca_pkg.sv rtl/common/clock_gate.sv rtl/common/ret_shadow.sv $M/$n.sv dv/npu/npu_ss_regs_sva.sv dv/npu/npu_ss_regs_tb.sv --top-module npu_ss_regs_tb \
     > $M/$n.build 2>&1 || { echo "$n: BUILD FAIL"; rm -rf $M/$n.obj; surv=1; return; }
   $M/$n.obj/Vnpu_ss_regs_tb +seed=1 +cycles=100000 > $M/$n.log 2>&1; rm -rf $M/$n.obj
   if grep -q "TB PASS" $M/$n.log && ! grep -q "Assertion failed" $M/$n.log; then echo "$n: SURVIVED"; surv=1

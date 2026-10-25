@@ -19,11 +19,20 @@ PY
   nt=$((nt + 1)); mkdir -p $M/$n
   local extra=""; [ -f formal/$b/stubs.sv ] && extra=formal/$b/stubs.sv   # 子模組契約替身
   [ "$b" = orca_npu_ss ] && extra="$extra rtl/npu/npu_l2_arb2.sv"           # 真的仲裁器 (不是替身)
+  [[ "$b" =~ ^(npu_ss_regs|gs_raster_regs)$ ]] && extra="$extra rtl/common/ret_shadow.sv"   # retention 影子
   sv2v -DFORMAL -DFORMAL_TOP_$b -E Assert -Irtl/common rtl/common/orca_pkg.sv $extra $M/$n.sv > $M/$n/$b.v
   cp formal/$b/$b.sby $M/$n/
   (cd $M/$n && timeout 1800 sby -f $b.sby prove > sby.log 2>&1)
   # 只有證明真的失敗 (FAIL: 反例 / UNKNOWN: 歸納找到反例) 才算抓到; 逾時或工具錯誤不算
-  if grep -qE "DONE \((FAIL|UNKNOWN)" $M/$n/sby.log; then
+  if grep -qE "DONE \((FAIL|UNKNOWN)" $M/$n/sby.log && [ "$b" = orca_pmu ]; then
+    # orca_pmu 的歸納需要引用內部狀態的輔助不變式: 另以 BMC (深度 30, 拿掉輔助不變式) 確認
+    # mutant 違反的是埠層級的性質 (真的反例), 而不只是輔助不變式
+    sv2v -DFORMAL -DFORMAL_TOP_$b -DFORMAL_NO_HELPER -E Assert -Irtl/common rtl/common/orca_pkg.sv $extra $M/$n.sv > $M/$n/$b.v
+    sed 's/^prove: mode prove/prove: mode bmc/; s/^prove: depth 4/prove: depth 30/' formal/$b/$b.sby > $M/$n/$b.sby
+    (cd $M/$n && timeout 1800 sby -f $b.sby prove > bmc.log 2>&1)
+    if grep -q "DONE (FAIL" $M/$n/bmc.log; then nk=$((nk + 1)); echo "$n: killed (BMC counterexample, port-level property)"
+    else echo "$n: SURVIVED (only the helper invariants fail)"; surv=1; fi
+  elif grep -qE "DONE \((FAIL|UNKNOWN)" $M/$n/sby.log; then
     nk=$((nk + 1)); echo "$n: killed ($(grep -oE 'DONE \([A-Z]+' $M/$n/sby.log | tail -1))"
   elif grep -q "DONE (PASS" $M/$n/sby.log; then echo "$n: SURVIVED"; surv=1
   else echo "$n: INCONCLUSIVE (timeout / tool error)"; surv=1; fi
@@ -77,6 +86,9 @@ mut npu_vec $V rd_line      "assign rd_line   = ins.line;" "assign rd_line   = i
 mut npu_vec $V reg_all      "if (we && ins.vd == 3'(r)) q <= wd;" "if (we) q <= wd;"
 mut npu_vec $V st_illegal   "wire is_st = ins_valid && !illegal && ins.op == VOP_ST;" "wire is_st = ins_valid && ins.op == VOP_ST;"
 R=rtl/npu/npu_ss_regs.sv
+mut npu_ss_regs rtl/npu/npu_ss_regs.sv no_restore "      if (ret_restore) r_ien <= ien_ret;" ""
+mut npu_ss_regs rtl/npu/npu_ss_regs.sv rest_lost_wr "      if (ret_restore) r_ien <= ien_ret;" "      if (ret_restore && !wr) r_ien <= ien_ret;"
+mut npu_ss_regs rtl/npu/npu_ss_regs.sv save_always "ret_shadow #(.W(4)) u_ret_ien (.clk_aon, .por_n, .save(ret_save)," "ret_shadow #(.W(4)) u_ret_ien (.clk_aon, .por_n, .save(1'b1),"
 mut npu_ss_regs $R push_full  "wire           push   = push_req && !q_full;" "wire           push   = push_req;"
 mut npu_ss_regs $R head_wrong "assign cmd       = q[q_rd[CW-1:0]];" "assign cmd       = q[q_wr[CW-1:0]];"
 mut npu_ss_regs $R ovf_no_w1c "ovf  <= (ovf  && !(w1c && pwdata[1]))" "ovf  <= (ovf)"
@@ -107,12 +119,24 @@ mut orca_sys_regs $S be_no_w1c   "berr <= (berr && !clr) || set;" "berr <= berr 
 mut orca_sys_regs $S ea_always   "if (set && !berr) begin" "if (set) begin"
 mut orca_sys_regs $S irq_nomask  "assign irq = (berr && r_mhi) || |(irq_in & r_mlo);" "assign irq = berr || |irq_in;"
 mut orca_sys_regs $S scr_strb    "if (wr && wa == A_SCRATCH) r_scr <= (r_scr & ~bm) | (pwdata & bm);" "if (wr && wa == A_SCRATCH) r_scr <= pwdata;"
+Q=rtl/soc/orca_pmu.sv
+mut orca_pmu $Q pdn_no_wait  "P_PDN:  if (!pd_pwr_ack[g]) st_n = P_OFF;" "P_PDN:  st_n = P_OFF;"
+mut orca_pmu $Q pup_no_wait  "P_PUP:  if (pd_pwr_ack[g]) st_n = P_RST;" "P_PUP:  st_n = P_RST;"
+mut orca_pmu $Q pdn_abort    "P_PDN:  if (!pd_pwr_ack[g]) st_n = P_OFF;" "P_PDN:  if (!pd_pwr_ack[g]) st_n = P_OFF; else if (wake_req) st_n = P_ON;"
+mut orca_pmu $Q iso_late     "iso_q   <= !(st_n == P_ON || st_n == P_IDLE);" "iso_q   <= !(st_n == P_ON || st_n == P_IDLE || st_n == P_RET);"
+mut orca_pmu $Q rst_early    "rstn_q  <= !(st_n == P_PDN || st_n == P_OFF || st_n == P_PUP);" "rstn_q  <= !(st_n == P_PDN || st_n == P_OFF);"
+mut orca_pmu $Q no_save      "assign pd_ret_save[g]    = (st == P_IDLE) && (st_n == P_RET);" "assign pd_ret_save[g]    = 1'b0;"
+mut orca_pmu $Q no_restore   "assign pd_ret_restore[g] = (st == P_RST);" "assign pd_ret_restore[g] = 1'b0;"
+mut orca_pmu $Q rst_no_clk   "assign pd_clk_gate[g]    = !(st == P_ON || st == P_RST);" "assign pd_clk_gate[g]    = !(st == P_ON);"
+mut orca_pmu $Q clk_in_pup   "assign pd_clk_gate[g]    = !(st == P_ON || st == P_RST);" "assign pd_clk_gate[g]    = !(st == P_ON || st == P_RST || st == P_PUP);"
 P=rtl/soc/orca_pmu_regs.sv
 mut orca_pmu_regs $P rej_writes  "if (wa == A_DVFS_REQ && pstrb[0] && !rej) r_dvfs <= pwdata[2:0];" "if (wa == A_DVFS_REQ && pstrb[0]) r_dvfs <= pwdata[2:0];"
 mut orca_pmu_regs $P wake_level  "ev_wake[g] = (pd_state[g] == ST_ON) && !was_on[g];" "ev_wake[g] = (pd_state[g] == ST_ON);"
 mut orca_pmu_regs $P off_no_w1c  "of   <= (of & ~NPD'(wclr[15:8])) | ev_off;" "of   <= of | ev_off;"
 mut orca_pmu_regs $P wake_strb   "wire [7:0]  b0 = pstrb[0] ? pwdata[7:0] : 8'd0;" "wire [7:0]  b0 = pwdata[7:0];"
 G=rtl/sis/gs_raster_regs.sv
+mut gs_raster_regs rtl/sis/gs_raster_regs.sv no_restore "      if (ret_restore) {r_ien, r_bg} <= ret_q;" "      if (ret_restore) r_ien <= ret_q[27:24];"
+mut gs_raster_regs rtl/sis/gs_raster_regs.sv save_always "ret_shadow #(.W(28)) u_ret (.clk_aon, .por_n, .save(ret_save)," "ret_shadow #(.W(28)) u_ret (.clk_aon, .por_n, .save(ret_save || ret_restore),"
 mut gs_raster_regs $G start_busy  "assign start       = go && !r_busy;" "assign start       = go;"
 mut gs_raster_regs $G push_full   "wire         push     = push_req && !q_full;" "wire         push     = push_req;"
 mut gs_raster_regs $G head_wrong  "assign hd      = q[q_rd[CW-1:0]];" "assign hd      = q[q_wr[CW-1:0]];"
