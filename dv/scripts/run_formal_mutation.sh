@@ -35,7 +35,13 @@ PY
   elif grep -qE "DONE \((FAIL|UNKNOWN)" $M/$n/sby.log; then
     nk=$((nk + 1)); echo "$n: killed ($(grep -oE 'DONE \([A-Z]+' $M/$n/sby.log | tail -1))"
   elif grep -q "DONE (PASS" $M/$n/sby.log; then echo "$n: SURVIVED"; surv=1
-  else echo "$n: INCONCLUSIVE (timeout / tool error)"; surv=1; fi
+  else
+    # 歸納逾時: 以 ABC bmc3 (深度 30) 找反例 (未植入錯誤的設計在同一設定下必須通過, run_formal.sh 的 prove 已保證)
+    sed 's/^prove: mode prove/prove: mode bmc/; s/^prove: depth [0-9]*/prove: depth 30/; s/^smtbmc z3/abc bmc3/' formal/$b/$b.sby > $M/$n/bmc.sby
+    (cd $M/$n && timeout 1800 sby -f bmc.sby prove > bmc3.log 2>&1)
+    if grep -q "was asserted in frame" $M/$n/bmc3.log; then nk=$((nk + 1)); echo "$n: killed (ABC bmc3 counterexample, $(grep -oE 'frame [0-9]+' $M/$n/bmc3.log | head -1))"
+    else echo "$n: INCONCLUSIVE (timeout / tool error)"; surv=1; fi
+  fi
 }
 D=rtl/npu/npu_ss_dma.sv
 mut npu_ss_dma $D done_early  "assign done      = act && (wr == n);" "assign done      = act && (iss == n);"
