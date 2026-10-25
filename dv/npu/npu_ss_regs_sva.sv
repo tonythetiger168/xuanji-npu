@@ -13,6 +13,7 @@ module npu_ss_regs_sva
   input npu_tile_cmd_t cmd,
   input logic push, push_req, pop, q_full, hit,
   input logic [$clog2(CQ):0] q_n,
+  input logic clk_aon,                         // 常開 (未閘控) 時脈: retention 性質以此取樣
   input logic ret_save, ret_restore, wr,       // retention (v6.3.11)
   input logic [9:0] wa,
   input logic [3:0] r_ien, ien_ret
@@ -32,9 +33,10 @@ module npu_ss_regs_sva
   a_qn:      assert property (q_n <= ($clog2(CQ)+1)'(CQ));
   a_qcnt:    assert property (q_n == $past(q_n) + ($past(push) ? 1 : 0) - ($past(pop) ? 1 : 0));
   a_drop:    assert property (push_req && q_full |-> !push);
-  // retention: IRQ_EN 只在 APB 寫入或 ret_restore 拍改變; restore 載入影子 (同拍寫入 IRQ_EN 時寫入優先)
-  a_ien_hold: assert property (!(wr && wa == 10'h007) && !ret_restore |=> $stable(r_ien));
-  a_ien_rest: assert property (ret_restore && !(wr && wa == 10'h007) |=> r_ien == $past(ien_ret));
+  // retention: IRQ_EN 只在 APB 寫入或 ret_restore 拍改變; restore 載入影子 (同拍寫入 IRQ_EN 時寫入優先)。
+  // 以未閘控的 clk_aon 取樣: clk 被電源域閘控時, 域 reset 在時脈停止期間發生, 以 clk 取樣的 |=> 會誤報
+  a_ien_hold: assert property (@(posedge clk_aon) !(wr && wa == 10'h007) && !ret_restore |=> $stable(r_ien));
+  a_ien_rest: assert property (@(posedge clk_aon) ret_restore && !(wr && wa == 10'h007) |=> r_ien == $past(ien_ret));
 
   c_full_push: cover property (push_req && q_full);
   c_push_pop:  cover property (push && pop);

@@ -8,7 +8,7 @@ F=rtl/npu/npu_ss_regs.sv
 nk=0; nt=0; surv=0
 mut() {   # name old new
   local n=$1
-  python3 - "$2" "$3" "$M/$n.sv" "$F" <<'PY' || { echo "$n: pattern not found"; surv=1; return; }
+  python3 - "$2" "$3" "$M/$n.sv" "$F" <<'PY' || { echo "$n: pattern not found"; nt=$((nt + 1)); surv=1; return; }
 import sys
 o, nw, out, f = sys.argv[1:5]
 s = open(f).read()
@@ -47,7 +47,12 @@ mut rst_ctl     "r_ctl <= '0; r_ext <= '0;" "r_ext <= '0;"                      
 mut op_hi       "stg.op  = npu_op_e'({r_ctl[5], r_ctl[1:0]});" "stg.op  = npu_op_e'({1'b0, r_ctl[1:0]});"   # OP[2] 遺失 (VEC 變 GEMM)
 mut verr_no_w1c "verr <= (verr && !(w1c && pwdata[3])) || vec_err;" "verr <= verr || vec_err;"            # VEC_ERR 清不掉
 mut verr_none   "verr <= (verr && !(w1c && pwdata[3])) || vec_err;" "verr <= (verr && !(w1c && pwdata[3]));"  # 沒記錄 VEC 錯誤
-mut icg_w       "u_icg_w (.clk(clk), .en(wr || !rst_n)" "u_icg_w (.clk(clk), .en((wr && wa != A_CMD_EXT) || !rst_n)"   # 時脈閘控漏掉一個暫存器
+mut icg_w       "u_icg_w (.clk(clk), .en(wr || ret_restore || !rst_n)" "u_icg_w (.clk(clk), .en((wr && wa != A_CMD_EXT) || ret_restore || !rst_n)"   # 時脈閘控漏掉一個暫存器
 mut icg_q       ".en(push || !rst_n)" ".en((push && !cmd_ready) || !rst_n)"                              # FIFO 同拍 push / pop 時沒有時脈
+mut icg_rest    "u_icg_w (.clk(clk), .en(wr || ret_restore || !rst_n)" "u_icg_w (.clk(clk), .en(wr || !rst_n)"   # 還原拍沒有時脈
+mut no_restore  "      if (ret_restore) r_ien <= ien_ret;" ""                                          # 不還原
+mut rest_lost   "      if (ret_restore) r_ien <= ien_ret;" "      if (ret_restore && !wr) r_ien <= ien_ret;"  # 同拍有其他寫入時沒還原
+mut save_always ".save(ret_save), .d(r_ien)" ".save(1'b1), .d(r_ien)"                                  # 影子一直跟著主暫存器
+mut save_none   ".save(ret_save), .d(r_ien)" ".save(1'b0), .d(r_ien)"                                  # 從不存檔
 echo "=== npu_ss_regs mutation: $nk / $nt mutants killed"
 [ $surv -eq 0 ] && [ $nk -eq $nt ]
