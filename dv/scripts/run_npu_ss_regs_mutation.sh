@@ -32,9 +32,9 @@ mut full_off    "wire           q_full = (q_n == (CW+1)'(CQ));" "wire           
 mut head_wrong  "assign cmd       = q[q_rd[CW-1:0]];" "assign cmd       = q[q_wr[CW-1:0]];"                # 送出錯的 FIFO 項
 mut cpl_on_wr   "assign cpl_ready = rd && wa == A_CPL_POP;" "assign cpl_ready = acc && wa == A_CPL_POP;"    # 寫 CPL_POP 也取走
 mut peek_pops   "assign cpl_ready = rd && wa == A_CPL_POP;" "assign cpl_ready = rd && (wa == A_CPL_POP || wa == A_CPL_PEEK);"  # PEEK 也取走
-mut ovf_no_w1c  "ovf  <= (ovf  && !(w1c && pwdata[1]))" "ovf  <= (ovf)"                                     # CMD_OVF 清不掉
-mut berr_bit    "berr <= (berr && !(w1c && pwdata[2]))" "berr <= (berr && !(w1c && pwdata[1]))"              # 清錯位元
-mut w1c_strb    "wire  w1c = wr && wa == A_IRQ_ST && pstrb[0];" "wire  w1c = wr && wa == A_IRQ_ST;"          # W1C 忽略 PSTRB
+mut ovf_no_w1c  "ovf  <= (ovf  && !(w1c && pstrb[0] && pwdata[1]))" "ovf  <= (ovf)"                                     # CMD_OVF 清不掉
+mut berr_bit    "berr <= (berr && !(w1c && pstrb[3] && pwdata[31]))" "berr <= (berr && !(w1c && pstrb[0] && pwdata[2]))"              # 清錯位元
+mut w1c_strb    "ovf  <= (ovf  && !(w1c && pstrb[0] && pwdata[1]))" "ovf  <= (ovf  && !(w1c && pwdata[1]))"          # W1C 忽略 PSTRB
 mut irq_nomask  "assign irq = |(ist & r_ien);" "assign irq = |ist;"                                         # 中斷不看致能
 mut perf_strb   "wr && wa == A_PERF_CTRL && pstrb[0] && pwdata[0]" "wr && wa == A_PERF_CTRL && pwdata[0]"   # 清除忽略 PSTRB
 mut shadow_hi   "if (rd && wa == A_PB_LO) sh_b <= perf_busy[47:32];" "if (rd && wa == A_PB_HI) sh_b <= perf_busy[47:32];"  # 讀 HI 才存高位 (不一致)
@@ -45,8 +45,8 @@ mut cfg_depth   "8'(\$clog2(DEPTH))" "8'(DEPTH)"                                
 mut busy_q      "ss_busy || cmd_valid" "ss_busy"                                                            # FIFO 有命令時 BUSY 為 0
 mut rst_ctl     "r_ctl <= '0; r_ext <= '0;" "r_ext <= '0;"                                                  # CMD_CTL 不 reset
 mut op_hi       "stg.op  = npu_op_e'({r_ctl[5], r_ctl[1:0]});" "stg.op  = npu_op_e'({1'b0, r_ctl[1:0]});"   # OP[2] 遺失 (VEC 變 GEMM)
-mut verr_no_w1c "verr <= (verr && !(w1c && pwdata[3])) || vec_err;" "verr <= verr || vec_err;"            # VEC_ERR 清不掉
-mut verr_none   "verr <= (verr && !(w1c && pwdata[3])) || vec_err;" "verr <= (verr && !(w1c && pwdata[3]));"  # 沒記錄 VEC 錯誤
+mut verr_no_w1c "verr <= (verr && !(w1c && pstrb[0] && pwdata[2]))  || vec_err;" "verr <= verr || vec_err;"            # VEC_ERR 清不掉
+mut verr_none   "verr <= (verr && !(w1c && pstrb[0] && pwdata[2]))  || vec_err;" "verr <= (verr && !(w1c && pstrb[0] && pwdata[2]));"  # 沒記錄 VEC 錯誤
 mut icg_w       "u_icg_w (.clk(clk), .en(wr || ret_restore || !rst_n)" "u_icg_w (.clk(clk), .en((wr && wa != A_CMD_EXT) || ret_restore || !rst_n)"   # 時脈閘控漏掉一個暫存器
 mut icg_q       ".en(push || !rst_n)" ".en((push && !cmd_ready) || !rst_n)"                              # FIFO 同拍 push / pop 時沒有時脈
 mut icg_rest    "u_icg_w (.clk(clk), .en(wr || ret_restore || !rst_n)" "u_icg_w (.clk(clk), .en(wr || !rst_n)"   # 還原拍沒有時脈
@@ -54,5 +54,7 @@ mut no_restore  "      if (ret_restore) r_ien <= ien_ret;" ""                   
 mut rest_lost   "      if (ret_restore) r_ien <= ien_ret;" "      if (ret_restore && !wr) r_ien <= ien_ret;"  # 同拍有其他寫入時沒還原
 mut save_always ".save(ret_save), .d(r_ien)" ".save(1'b1), .d(r_ien)"                                  # 影子一直跟著主暫存器
 mut save_none   ".save(ret_save), .d(r_ien)" ".save(1'b0), .d(r_ien)"                                  # 從不存檔
+mut hdr_err     "  wire       hdr = (wa[9:4] == 6'd0);" "  wire       hdr = (wa[9:2] == 8'd0);"     # 表頭保留字報錯
+mut ien_bit31   "    return {w[31], w[2:0]};" "    return {w[30], w[2:0]};"                                # IRQ_ENABLE.BUS_ERR 取錯位元
 echo "=== npu_ss_regs mutation: $nk / $nt mutants killed"
 [ $surv -eq 0 ] && [ $nk -eq $nt ]

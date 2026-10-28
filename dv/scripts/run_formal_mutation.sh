@@ -97,7 +97,7 @@ mut npu_ss_regs rtl/npu/npu_ss_regs.sv rest_lost_wr "      if (ret_restore) r_ie
 mut npu_ss_regs rtl/npu/npu_ss_regs.sv save_always "ret_shadow #(.W(4)) u_ret_ien (.clk_aon, .por_n, .save(ret_save)," "ret_shadow #(.W(4)) u_ret_ien (.clk_aon, .por_n, .save(1'b1),"
 mut npu_ss_regs $R push_full  "wire           push   = push_req && !q_full;" "wire           push   = push_req;"
 mut npu_ss_regs $R head_wrong "assign cmd       = q[q_rd[CW-1:0]];" "assign cmd       = q[q_wr[CW-1:0]];"
-mut npu_ss_regs $R ovf_no_w1c "ovf  <= (ovf  && !(w1c && pwdata[1]))" "ovf  <= (ovf)"
+mut npu_ss_regs $R ovf_no_w1c "ovf  <= (ovf  && !(w1c && pstrb[0] && pwdata[1]))" "ovf  <= (ovf)"
 mut npu_ss_regs $R irq_nomask "assign irq = |(ist & r_ien);" "assign irq = |ist;"
 mut npu_ss_regs $R slverr_none "assign pslverr = acc && !hit;" "assign pslverr = 1'b0;"
 mut npu_ss_regs $R cpl_on_wr  "assign cpl_ready = rd && wa == A_CPL_POP;" "assign cpl_ready = acc && wa == A_CPL_POP;"
@@ -123,7 +123,7 @@ mut orca_apb_xbar $X resp_err     "        pslverr = s_pslverr[i];" "        psl
 S=rtl/soc/orca_sys_regs.sv
 mut orca_sys_regs $S be_no_w1c   "berr <= (berr && !clr) || set;" "berr <= berr || set;"
 mut orca_sys_regs $S ea_always   "if (set && !berr) begin" "if (set) begin"
-mut orca_sys_regs $S irq_nomask  "assign irq = (berr && r_mhi) || |(irq_in & r_mlo);" "assign irq = berr || |irq_in;"
+mut orca_sys_regs $S irq_nomask  "assign irq = (own_irq && r_mhi) || |(irq_in & r_mlo);" "assign irq = berr || |irq_in;"
 mut orca_sys_regs $S scr_strb    "if (wr && wa == A_SCRATCH) r_scr <= (r_scr & ~bm) | (pwdata & bm);" "if (wr && wa == A_SCRATCH) r_scr <= pwdata;"
 Q=rtl/soc/orca_pmu.sv
 mut orca_pmu $Q pdn_no_wait  "P_PDN:  if (!pd_pwr_ack[g]) st_n = P_OFF;" "P_PDN:  st_n = P_OFF;"

@@ -26,12 +26,14 @@ module npu_ss_regs_tb;
   npu_ss_regs #(.TILE_ID(3), .N(8), .NCU(4), .NB(4), .DEPTH(1024), .QD(8), .OUT(32), .CQ(CQ)) dut (.*);
 
   // ---------------- 參考模型 ----------------
-  localparam int A_ID = 'h000, A_CFG0 = 'h004, A_CFG1 = 'h008, A_STATUS = 'h014, A_IRQ_ST = 'h018, A_IRQ_EN = 'h01C,
-                 A_CMD_CTL = 'h020, A_CMD_EXT = 'h024, A_CMD_A = 'h028, A_CMD_B = 'h02C, A_CMD_C = 'h030,
-                 A_CMD_PUSH = 'h034, A_CPL_POP = 'h040, A_CPL_PEEK = 'h044, A_PERF_CTRL = 'h050,
-                 A_PB_LO = 'h054, A_PB_HI = 'h058, A_PS_LO = 'h05C, A_PS_HI = 'h060;
-  int defined [19] = '{A_ID, A_CFG0, A_CFG1, A_STATUS, A_IRQ_ST, A_IRQ_EN, A_CMD_CTL, A_CMD_EXT, A_CMD_A, A_CMD_B,
-                       A_CMD_C, A_CMD_PUSH, A_CPL_POP, A_CPL_PEEK, A_PERF_CTRL, A_PB_LO, A_PB_HI, A_PS_LO, A_PS_HI};
+  // 共用表頭 (docs/apb.md): 0x000 ID, 0x004 CFG0, 0x008 CFG1, 0x010 IRQ_STATUS, 0x014 IRQ_ENABLE; 0x00C / 0x018..0x03C 保留 (讀 0)
+  localparam int A_ID = 'h000, A_CFG0 = 'h004, A_CFG1 = 'h008, A_IRQ_ST = 'h010, A_IRQ_EN = 'h014, A_HRSV = 'h00C,
+                 A_STATUS = 'h040,
+                 A_CMD_CTL = 'h060, A_CMD_EXT = 'h064, A_CMD_A = 'h068, A_CMD_B = 'h06C, A_CMD_C = 'h070,
+                 A_CMD_PUSH = 'h074, A_CPL_POP = 'h080, A_CPL_PEEK = 'h084, A_PERF_CTRL = 'h090,
+                 A_PB_LO = 'h094, A_PB_HI = 'h098, A_PS_LO = 'h09C, A_PS_HI = 'h0A0;
+  int defined [20] = '{A_ID, A_CFG0, A_CFG1, A_STATUS, A_IRQ_ST, A_IRQ_EN, A_CMD_CTL, A_CMD_EXT, A_CMD_A, A_CMD_B,
+                       A_CMD_C, A_CMD_PUSH, A_CPL_POP, A_CPL_PEEK, A_PERF_CTRL, A_PB_LO, A_PB_HI, A_PS_LO, A_PS_HI, A_HRSV};
   logic [31:0] m_ctl, m_ext;
   logic [25:0] m_a, m_b, m_c;
   logic [3:0]  m_ien, m_sh;                               // m_sh: retention 影子 (只由 por_n 清除)
@@ -40,6 +42,7 @@ module npu_ss_regs_tb;
   npu_tile_cmd_t m_q [$];
 
   function automatic bit is_def(int a);
+    if (a < 'h040) return 1;                                   // 表頭 (含保留字) 都是已定義位址
     foreach (defined[i]) if (defined[i] == a) return 1;
     return 0;
   endfunction
@@ -55,13 +58,13 @@ module npu_ss_regs_tb;
   endfunction
   function automatic logic [31:0] m_read(int a);
     case (a)
-      A_ID:       return 32'h584E_0100;
+      A_ID:       return 32'h584E_0200;
       A_CFG0:     return {8'd10, 8'd4, 8'd4, 8'd8};
       A_CFG1:     return {8'(CQ), 8'd3, 8'd32, 8'd8};
       A_STATUS:   return {20'd0, 4'(CQ - m_q.size()), 4'd0, m_q.size() == 0, m_q.size() == CQ, cpl_valid,
                           ss_busy || m_q.size() != 0};
-      A_IRQ_ST:   return {28'd0, m_verr, m_berr, m_ovf, cpl_valid};
-      A_IRQ_EN:   return {28'd0, m_ien};
+      A_IRQ_ST:   return {m_berr, 28'd0, m_verr, m_ovf, cpl_valid};
+      A_IRQ_EN:   return {m_ien[3], 28'd0, m_ien[2:0]};
       A_CMD_CTL:  return m_ctl;
       A_CMD_EXT:  return m_ext;
       A_CMD_A:    return {6'd0, m_a};
@@ -102,7 +105,7 @@ module npu_ss_regs_tb;
     if (cmd_valid !== e_cv) err("cmd_valid");
     if (e_cv && cmd !== m_q[0]) err($sformatf("cmd got %h exp %h", cmd, m_q[0]));
     if (cpl_ready !== (rd && a == A_CPL_POP)) err("cpl_ready");
-    if (irq !== |({m_verr, m_berr, m_ovf, cpl_valid} & m_ien)) err("irq");
+    if (irq !== |({m_berr, m_verr, m_ovf, cpl_valid} & m_ien)) err("irq");
     if (perf_wr !== e_pwr) err("perf_wr");
     if (!por_n) m_sh = '0;
     else if (ret_save) begin m_sh = o_ien; n_save++; end                // 影子在常開域: 域 reset 期間仍運作
@@ -118,10 +121,10 @@ module npu_ss_regs_tb;
     end
     if (e_cv && cmd_ready) begin void'(m_q.pop_front()); n_pop++; end
     if (wr && a == A_CMD_PUSH && !(m_q.size() + (e_cv && cmd_ready) == CQ)) begin m_q.push_back(m_stg()); n_push++; end
-    if (wr && a == A_IRQ_ST && pstrb[0]) begin
-      if (pwdata[1]) m_ovf = 0;
-      if (pwdata[2]) m_berr = 0;
-      if (pwdata[3]) m_verr = 0;
+    if (wr && a == A_IRQ_ST) begin
+      if (pstrb[0] && pwdata[1]) m_ovf = 0;
+      if (pstrb[0] && pwdata[2]) m_verr = 0;
+      if (pstrb[3] && pwdata[31]) m_berr = 0;
     end
     if (vec_err) m_verr = 1;
     if (acc && !hit) m_berr = 1;
@@ -131,7 +134,7 @@ module npu_ss_regs_tb;
       A_CMD_A:   m_a = 26'(mrg({6'd0, m_a}, pwdata, pstrb));
       A_CMD_B:   m_b = 26'(mrg({6'd0, m_b}, pwdata, pstrb));
       A_CMD_C:   m_c = 26'(mrg({6'd0, m_c}, pwdata, pstrb));
-      A_IRQ_EN:  m_ien = 4'(mrg({28'd0, m_ien}, pwdata, pstrb));
+      A_IRQ_EN:  begin logic [31:0] w; w = mrg({m_ien[3], 28'd0, m_ien[2:0]}, pwdata, pstrb); m_ien = {w[31], w[2:0]}; end
       default: ;
     endcase
     if (ret_restore && !(wr && a == A_IRQ_EN)) begin m_ien = o_sh; n_rest++; end   // 同拍寫入 IRQ_EN 優先
@@ -144,15 +147,15 @@ module npu_ss_regs_tb;
   function automatic logic [11:0] rnd_addr();
     int k = $urandom_range(99);
     logic [11:0] a;
-    if (k < 80) a = 12'(defined[$urandom_range(18)]);
-    else if (k < 95) a = 12'($urandom_range(31) * 4);                   // 定義區附近 (含空洞)
+    if (k < 80) a = 12'(defined[$urandom_range(19)]);
+    else if (k < 95) a = 12'($urandom_range(63) * 4);                   // 表頭與定義區附近 (含空洞)
     else a = 12'($urandom);
     return a | 12'($urandom_range(3) * (k % 2));                       // paddr[1:0] 應被忽略
   endfunction
   function automatic logic [31:0] rnd_data(logic [11:0] a);
     int k = $urandom_range(99);
     if ({a[11:2], 2'b00} == A_IRQ_ST || {a[11:2], 2'b00} == A_PERF_CTRL || {a[11:2], 2'b00} == A_IRQ_EN)
-      return (k < 50) ? 32'($urandom_range(15)) : $urandom;
+      return (k < 50) ? {1'($urandom_range(1)), 27'd0, 4'($urandom_range(15))} : $urandom;
     return (k < 10) ? '0 : (k < 20) ? '1 : $urandom;
   endfunction
   task automatic drive();

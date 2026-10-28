@@ -35,8 +35,8 @@ module npu_ss_regs_sva
   a_drop:    assert property (push_req && q_full |-> !push);
   // retention: IRQ_EN 只在 APB 寫入或 ret_restore 拍改變; restore 載入影子 (同拍寫入 IRQ_EN 時寫入優先)。
   // 以未閘控的 clk_aon 取樣: clk 被電源域閘控時, 域 reset 在時脈停止期間發生, 以 clk 取樣的 |=> 會誤報
-  a_ien_hold: assert property (@(posedge clk_aon) !(wr && wa == 10'h007) && !ret_restore |=> $stable(r_ien));
-  a_ien_rest: assert property (@(posedge clk_aon) ret_restore && !(wr && wa == 10'h007) |=> r_ien == $past(ien_ret));
+  a_ien_hold: assert property (@(posedge clk_aon) !(wr && wa == 10'h005) && !ret_restore |=> $stable(r_ien));
+  a_ien_rest: assert property (@(posedge clk_aon) ret_restore && !(wr && wa == 10'h005) |=> r_ien == $past(ien_ret));
 
   c_full_push: cover property (push_req && q_full);
   c_push_pop:  cover property (push && pop);
@@ -47,14 +47,15 @@ module npu_ss_regs_sva
   c_b2b:       cover property (psel && penable ##1 psel && !penable);  // 連續交易
   c_save:      cover property (ret_save && r_ien != '0);
   c_restore:   cover property (ret_restore && ien_ret != r_ien);        // 還原改變了 IRQ_EN
-  c_rest_wr:   cover property (ret_restore && wr && wa == 10'h007);      // 還原與寫入同拍 (寫入優先)
+  c_rest_wr:   cover property (ret_restore && wr && wa == 10'h005);      // 還原與寫入同拍 (寫入優先)
 
   covergroup cg_apb @(posedge clk iff (rst_n && psel && penable));
     cp_reg: coverpoint paddr[11:2] {
-      bins id = {'h000}; bins cfg0 = {'h001}; bins cfg1 = {'h002}; bins status = {'h005}; bins irq_st = {'h006};
-      bins irq_en = {'h007}; bins ctl = {'h008}; bins ext = {'h009}; bins a = {'h00A}; bins b = {'h00B};
-      bins c = {'h00C}; bins push = {'h00D}; bins pop = {'h010}; bins peek = {'h011}; bins perf = {'h014};
-      bins pb_lo = {'h015}; bins pb_hi = {'h016}; bins ps_lo = {'h017}; bins ps_hi = {'h018};
+      bins id = {'h000}; bins cfg0 = {'h001}; bins cfg1 = {'h002}; bins irq_st = {'h004}; bins irq_en = {'h005};
+      bins hdr_rsv = {'h003, ['h006:'h00F]};                                  // 共用表頭的保留字
+      bins status = {'h010}; bins ctl = {'h018}; bins ext = {'h019}; bins a = {'h01A}; bins b = {'h01B};
+      bins c = {'h01C}; bins push = {'h01D}; bins pop = {'h020}; bins peek = {'h021}; bins perf = {'h024};
+      bins pb_lo = {'h025}; bins pb_hi = {'h026}; bins ps_lo = {'h027}; bins ps_hi = {'h028};
       bins undef = default;
     }
     cp_dir: coverpoint pwrite;

@@ -61,7 +61,7 @@ module orca_npu_ss_apb_tb;
     return {16'(k), 8'(id), 2'd0, 1'(op >> 2), 1'b0, 1'b0, wt, 2'(op)};   // OP[2] 在 bit 5
   endfunction
   task automatic push(int op, bit wt, int id, int k, logic [31:0] e, logic [25:0] a);
-    wr(12'h020, ctl(op, wt, id, k)); wr(12'h024, e); wr(12'h028, {6'd0, a}); wr(12'h034, 0);
+    wr(12'h060, ctl(op, wt, id, k)); wr(12'h064, e); wr(12'h068, {6'd0, a}); wr(12'h074, 0);
   endtask
 
   initial begin
@@ -76,10 +76,10 @@ module orca_npu_ss_apb_tb;
       ext[32'h500] = '0; ext[32'h500][76:0] = x0; ext[32'h500][128 +: 77] = x1; ext[32'h500][256 +: 77] = x2;
     end
     repeat (3) @(posedge clk); rst_n = 1;
-    apb(0, 12'h000, 0, r, e); if (r !== 32'h584E_0100) begin n_err++; $display("ERROR: ID %h", r); end
+    apb(0, 12'h000, 0, r, e); if (r !== 32'h584E_0200) begin n_err++; $display("ERROR: ID %h", r); end
     apb(0, 12'h004, 0, r, e); if (r !== {8'd10, 8'd4, 8'd4, 8'd8}) begin n_err++; $display("ERROR: CFG0 %h", r); end
     apb(0, 12'h008, 0, r, e); if (r !== {8'd4, 8'd3, 8'd32, 8'd8}) begin n_err++; $display("ERROR: CFG1 %h", r); end
-    wr(12'h01C, 32'h1);                                        // IRQ_ENABLE.CPL
+    wr(12'h014, 32'h1);                                        // IRQ_ENABLE.CPL
     push(NPU_OP_NOP, 0, 8'h11, 0, 0, 0);
     push(NPU_OP_GEMM, 0, 8'h12, 0, 0, 0);                      // K = 0: 只回報完成
     push(NPU_OP_DMA_LD, 0, 8'h13, 8, 32'h100, 26'h40);
@@ -89,7 +89,7 @@ module orca_npu_ss_apb_tb;
     push(NPU_OP_DMA_ST, 1, 8'h17, 1, 32'h300, 26'h60);          // 結果存回外部
     for (int t = 0; t < 4000 && got.size() < 7; t++) begin
       if (irq) begin
-        apb(0, 12'h040, 0, r, e);                              // CPL_POP
+        apb(0, 12'h080, 0, r, e);                              // CPL_POP
         if (r[31]) got.push_back(int'(r[7:0]));
       end else @(negedge clk);
     end
@@ -104,28 +104,29 @@ module orca_npu_ss_apb_tb;
         n_err++; $display("ERROR: ext[%h]", 32'h200 + i);
       end
     if (!ext.exists(32'h300) || ext[32'h300] !== ext[32'h100]) begin n_err++; $display("ERROR: VEC copy result"); end
-    apb(0, 12'h018, 0, r, e); if (r[3] !== 1'b1) begin n_err++; $display("ERROR: VEC_ERR not set (%h)", r); end
-    wr(12'h018, 32'h8);
-    apb(0, 12'h018, 0, r, e); if (r[3] !== 1'b0) begin n_err++; $display("ERROR: VEC_ERR not cleared"); end
-    apb(0, 12'h014, 0, r, e);                                  // STATUS: 閒置、FIFO 空
+    apb(0, 12'h010, 0, r, e); if (r[2] !== 1'b1) begin n_err++; $display("ERROR: VEC_ERR not set (%h)", r); end
+    wr(12'h010, 32'h4);
+    apb(0, 12'h010, 0, r, e); if (r[2] !== 1'b0) begin n_err++; $display("ERROR: VEC_ERR not cleared"); end
+    apb(0, 12'h040, 0, r, e);                                  // STATUS: 閒置、FIFO 空
     if (r[3:0] !== 4'b1000 || r[11:8] !== 4'd4) begin n_err++; $display("ERROR: STATUS %h", r); end
-    wr(12'h050, 32'h1);                                        // 清除效能計數
-    apb(0, 12'h054, 0, r, e); if (r !== 0) begin n_err++; $display("ERROR: PERF_BUSY_LO %h", r); end
+    wr(12'h090, 32'h1);                                        // 清除效能計數
+    apb(0, 12'h094, 0, r, e); if (r !== 0) begin n_err++; $display("ERROR: PERF_BUSY_LO %h", r); end
     apb(0, 12'h400, 0, r, e); if (!e || r !== 0) begin n_err++; $display("ERROR: undefined address"); end
-    apb(0, 12'h018, 0, r, e); if (r[2] !== 1'b1) begin n_err++; $display("ERROR: BUS_ERR not set"); end
-    wr(12'h018, 32'h4);
-    apb(0, 12'h018, 0, r, e); if (r[2] !== 1'b0) begin n_err++; $display("ERROR: BUS_ERR not cleared"); end
+    apb(0, 12'h010, 0, r, e); if (r[31] !== 1'b1) begin n_err++; $display("ERROR: BUS_ERR not set"); end
+    wr(12'h010, 32'h8000_0000);
+    apb(0, 12'h010, 0, r, e); if (r[31] !== 1'b0) begin n_err++; $display("ERROR: BUS_ERR not cleared"); end
     for (int i = 0; i < 3000; i++) begin                     // 隨機存取 (含高位址、paddr[1:0])
-      logic [11:0] a = (i % 4 == 0) ? 12'($urandom) : 12'($urandom_range(24) * 4 + $urandom_range(3));
+      logic [11:0] a;
       bit def;
-      if (a[11:2] == 10'h00D || a[11:2] == 10'h014) a = 12'h01C;
-      def = a[11:2] inside {10'h000, 10'h001, 10'h002, 10'h005, 10'h006, 10'h007, 10'h008, 10'h009, 10'h00A, 10'h00B,
-                            10'h00C, 10'h00D, 10'h010, 10'h011, 10'h014, 10'h015, 10'h016, 10'h017, 10'h018};
+      a = (i % 4 == 0) ? 12'($urandom) : 12'($urandom_range(44) * 4 + $urandom_range(3));
+      if (a[11:2] == 10'h01D || a[11:2] == 10'h024) a = 12'h014;  // 不推命令 / 不清計數
+      def = (a[11:2] < 10'h010) || a[11:2] inside {10'h010, 10'h018, 10'h019, 10'h01A, 10'h01B,
+                            10'h01C, 10'h01D, 10'h020, 10'h021, 10'h024, 10'h025, 10'h026, 10'h027, 10'h028};
       apb($urandom_range(1), a, $urandom, r, e);
       if (e === def) begin n_err++; $display("ERROR: random access %h slverr=%0d", a, e); end
     end
     rst_n = 0; repeat (2) @(posedge clk); rst_n = 1;
-    apb(0, 12'h018, 0, r, e); if (r !== 0) begin n_err++; $display("ERROR: IRQ_STATUS after reset %h", r); end
+    apb(0, 12'h010, 0, r, e); if (r !== 0) begin n_err++; $display("ERROR: IRQ_STATUS after reset %h", r); end
     $display("NPUSSAPB: completions=%0d errors=%0d", got.size(), n_err);
     if (n_err == 0) $display("TB PASS"); else $display("TB FAIL");
     $finish;
