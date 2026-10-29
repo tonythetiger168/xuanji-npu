@@ -26,7 +26,7 @@ module npu_core
   parameter int NB    = 4,
   parameter int DEPTH = 1024,          // 每個 bank 的 line 數
   parameter int QD    = 4,             // 命令佇列深度 (2 的冪)
-  parameter int LS_IDLE = 32,          // L2 bank 閒置幾拍後進入 SRAM light sleep (0 = 不睡; 見 npu_l2_xbar)
+  parameter int LS_IDLE = 64,          // L2 bank 閒置幾拍後進入 SRAM light sleep (0 = 不睡; 見 npu_l2_xbar; 32 時 Pro 的利用率掉到 92.9%)
   parameter int LS_WAKE = 2            // light sleep 喚醒拍數
 )(
   input  logic clk, rst_n,

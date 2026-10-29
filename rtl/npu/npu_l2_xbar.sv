@@ -22,7 +22,7 @@ module npu_l2_xbar
   parameter int NB    = 4,
   parameter int DEPTH = 1024,
   parameter int LDW   = 512,           // line 資料寬度 (形式驗證以較小值證明控制與資料搬移)
-  parameter int LS_IDLE = 32,          // 閒置幾拍後進入 light sleep (0 = 不睡)
+  parameter int LS_IDLE = 64,          // 閒置幾拍後進入 light sleep (0 = 不睡)
   parameter int LS_WAKE = 2            // light sleep 喚醒拍數 (>= 1)
 )(
   input  logic clk, rst_n,

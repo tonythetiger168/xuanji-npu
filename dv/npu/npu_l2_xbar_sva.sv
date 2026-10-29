@@ -4,7 +4,7 @@
 module npu_l2_xbar_sva
   import orca_pkg::*;
 #(parameter int NM = 5, parameter int NW = NM, parameter int NB = 4, parameter int DEPTH = 1024,
-  parameter int LS_IDLE = 32, parameter int LS_WAKE = 2) (
+  parameter int LS_IDLE = 64, parameter int LS_WAKE = 2) (
   input logic clk, rst_n,
   input logic [NM-1:0] rd_req, rd_gnt,
   input logic [NW-1:0] wr_req, wr_gnt,

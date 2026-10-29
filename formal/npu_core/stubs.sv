@@ -32,7 +32,7 @@ module npu_gemm_cu #(parameter int N = 8, localparam int RP = (N == 32) ? 2 : 1)
     end
 endmodule
 
-module npu_l2_xbar #(parameter int NM = 5, NW = NM, NB = 4, DEPTH = 1024, LDW = 512, LS_IDLE = 32, LS_WAKE = 2) (
+module npu_l2_xbar #(parameter int NM = 5, NW = NM, NB = 4, DEPTH = 1024, LDW = 512, LS_IDLE = 64, LS_WAKE = 2) (
   input  logic clk, rst_n,
   input  logic [NM-1:0] rd_req, input logic [NM-1:0][25:0] rd_line,
   output logic [NM-1:0] rd_gnt, output logic [NM-1:0][LDW-1:0] rd_data,
