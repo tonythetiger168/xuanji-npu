@@ -128,7 +128,7 @@ module orca_npu_ss
   logic [511:0] d_wr_data, a_rd_data;         // a_rd_data: 經仲裁器的 host 讀資料
   logic d_done, d_busy, d_en, d_gclk;
   assign d_en = d_busy || g_dma;          // 閒置且沒有分派時停止 DMA 時脈 (命令在 idle 取樣)
-  clock_gate u_dma_icg (.clk(clk), .en(d_en), .test_en(test_en), .clk_out(d_gclk));
+  clock_gate u_dma_icg (.clk(clk), .en(d_en || !rst_n), .test_en(test_en), .clk_out(d_gclk));
   npu_ss_dma #(.OUT(OUT)) u_dma (
     .clk(d_gclk), .rst_n(rst_n),
     .cmd_valid(g_dma), .cmd_ready(d_cmd_ready), .cmd_st(head.op == NPU_OP_DMA_ST),

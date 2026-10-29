@@ -35,6 +35,13 @@ for ((s = 1; s <= NS; s++)); do
     echo "FAIL s$s"; grep -m5 -E "MISMATCH|Assertion|ERROR|Error" "$B/s$s.log" || true; fail=1
   fi
 done
+for r in 1 2; do   # 上電時未 reset 的儲存為隨機值 (Verilator 隨機初值)
+  if (cd "$B" && ./tb/Vnpu_ss_tb +seed=$((r + 50)) +batches=$((NBT / 2)) +verilator+rand+reset+2 +verilator+seed+$r +verilator+coverage+file+cov_rand$r.dat > rand$r.log 2>&1) && grep -q "TB PASS" "$B/rand$r.log"; then
+    echo "PASS rand$r  $(grep -m1 '^NPUSS:' "$B/rand$r.log")"
+  else
+    echo "FAIL rand$r"; grep -m5 -E "MISMATCH|Assertion|ERROR|Error" "$B/rand$r.log" || true; fail=1
+  fi
+done
 for lat in 0 $((TILE_OUT - 3)) $((TILE_OUT * 2)) 100; do   # DMA 吞吐量 (只報告): min(1, OUT / (L + 3)) line/拍
   if (cd "$B" && ./tb/Vnpu_ss_tb +seed=1 +perf_dma=$lat +verilator+coverage+file+cov_perf$lat.dat > perf$lat.log 2>&1) && grep -q "TB PASS" "$B/perf$lat.log"; then
     echo "PASS perf_dma lat=$lat  $(grep -m1 '^PERFDMA:' "$B/perf$lat.log")"

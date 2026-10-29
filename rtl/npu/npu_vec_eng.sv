@@ -37,7 +37,7 @@ module npu_vec_eng
   logic gclk;
   logic act;
   wire  en = act || cmd_valid || done;
-  clock_gate u_icg (.clk(clk), .en(en), .test_en(test_en), .clk_out(gclk));
+  clock_gate u_icg (.clk(clk), .en(en || !rst_n), .test_en(test_en), .clk_out(gclk));
 
   // ---------------- 取指 ----------------
   logic [511:0] fb [2];                    // 取指緩衝

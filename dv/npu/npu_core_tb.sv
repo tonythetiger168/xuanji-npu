@@ -323,9 +323,12 @@ module npu_core_tb #(parameter int N = 8, parameter int NCU = 4, parameter int N
     consumer(1);
   endtask
 
+  // SRAM light sleep 量測: 各 bank 睡眠 (含喚醒中) 的拍數總和 / (拍數 × NB)
+  longint ls_cyc = 0, all_cyc = 0;
+  always @(posedge clk) if (rst_n) begin ls_cyc += $countones(dut.l2_ls); all_cyc++; end
   task automatic perf_run();
     rec_t r [$]; logic [7:0] ids [$];
-    longint ks = 0, b0, s0;
+    longint ks = 0, b0, s0, l0, a0;
     real util;
     int ns = NSLOT / NCU;                                 // 每個命令佔 NSLOT/NCU 個 slot: K 可到 4000
     int k = ((ns * SLOT - CL - 2) / 2) * SPL;
@@ -333,7 +336,7 @@ module npu_core_tb #(parameter int N = 8, parameter int NCU = 4, parameter int N
     if (k > 4000) k = 4000;
     if ($value$plusargs("perf_k=%d", pk) && pk < k) k = pk;   // +perf_k=K: 量測較短 K 的利用率
     for (int c = 0; c < NCU; c++) begin rec_t x; logic [7:0] id; prepare(k, x, id, ns); r.push_back(x); ids.push_back(id); ks += k; end
-    b0 = perf_busy; s0 = perf_steps;
+    b0 = perf_busy; s0 = perf_steps; l0 = ls_cyc; a0 = all_cyc;
     fork
       foreach (r[c]) issue(r[c], ids[c]);
       consumer(r.size());
@@ -342,6 +345,7 @@ module npu_core_tb #(parameter int N = 8, parameter int NCU = 4, parameter int N
     $display("PERF: N=%0d NCU=%0d NB=%0d K=%0d cmds=%0d busy_cycles=%0d steps=%0d MAC/cycle=%0.1f (peak %0d) utilization=%0.1f%%",
              N, NCU, NB, k, r.size(), perf_busy - b0, perf_steps - s0,
              real'(perf_steps - s0) * N * N / real'(perf_busy - b0), N * N * NCU, util);
+    $display("PERF_LS: bank light-sleep ratio during GEMM = %0.1f%%", 100.0 * real'(ls_cyc - l0) / (real'(all_cyc - a0) * NB));
     if (perf_steps - s0 != ks) begin $display("ERROR: perf_steps %0d != sum K %0d", perf_steps - s0, ks); n_err++; end
     if (util < real'(min_util)) begin $display("ERROR: utilization %0.1f%% < required %0d%%", util, min_util); n_err++; end
   endtask
@@ -371,6 +375,7 @@ module npu_core_tb #(parameter int N = 8, parameter int NCU = 4, parameter int N
     end
     $display("NPUCORE: N=%0d NCU=%0d NB=%0d seed=%0d issued=%0d completed=%0d resets=%0d max_q=%0d host_cu_overlap=%0d errors=%0d",
              N, NCU, NB, seed, n_issued, n_ok, n_rst, max_q, n_ovl, n_err);
+    $display("NPUCORE_LS: cycles=%0d bank light-sleep ratio=%0.1f%%", all_cyc, 100.0 * real'(ls_cyc) / (real'(all_cyc) * NB));
     if (n_err == 0) $display("TB PASS"); else $display("TB FAIL");
     $finish;
   end

@@ -40,6 +40,11 @@ PY
     $([ $top = npu_core_tb ] && echo "-GNCU=$NCU -GNB=$NB -GDEPTH=$DEPTH") --Mdir "$M/$n.obj" -Irtl/common \
     $src --top-module $top > "$M/$n.build" 2>&1 || { echo "$n: BUILD FAIL"; rm -rf "$M/$n.obj"; surv=1; return; }
   "$M/$n.obj/V$top" +seed=7 $args > "$M/$n.log" 2>&1
+  # 全 0 上電通過時, 再以隨機上電狀態 (未 reset 的儲存為隨機值) 執行
+  for r in 2 3; do
+    grep -q "TB PASS" "$M/$n.log" && ! grep -q "Assertion failed" "$M/$n.log" \
+      && "$M/$n.obj/V$top" +seed=$((7 + r)) $args +verilator+rand+reset+2 +verilator+seed+$r > "$M/$n.log" 2>&1
+  done
   rm -rf "$M/$n.obj"                       # 每個 mutant 的建置目錄數百 MB: 用完即刪
   if grep -q "TB PASS" "$M/$n.log" && ! grep -q "Assertion failed" "$M/$n.log"; then
     echo "$n: SURVIVED"; surv=1
@@ -62,6 +67,7 @@ mut acc_trunc     $MMA "acc[r][c] + 32'(prod)" "acc[r][c] + 32'(prod[15:0])"    
 mut start_busy    $MMA "S_IDLE:  if (start) st_n = S_RUN;" "S_IDLE:  if (start) st_n = S_RUN;
       S_OUT:   if (start) st_n = S_RUN;"                                                                   # 輸出中接受 start
 mut last_early    $MMA "S_RUN:   if (fire_in && in_last) st_n = S_DRAIN;" "S_RUN:   if (in_last) st_n = S_DRAIN;"  # in_last 未握手即結束
+mut icg_rst       $MMA ".en(row_act[r] || clr || !rst_n)" ".en(row_act[r] || clr)"                          # reset 期間列時脈關閉 (隨機上電時 token 不清除)
 # ---- npu_gemm_cu ----
 mut cu_aptr_stuck $CU "a_ptr <= a_ptr + 1'b1; fa <= fa - 1'b1; end" "a_ptr <= a_ptr; fa <= fa - 1'b1; end"   # A line 指標不前進
 mut cu_pop_early  $CU "wire pop  = feed && (step == SW'(SPL - 1) || mma_in_last);" "wire pop  = feed && (step == SW'(SPL - 2) || mma_in_last);"  # 提早換 line
@@ -89,7 +95,13 @@ mut xb_no_rr      $XB "if (rd_bv[b]) rd_rr[b] <= rd_bm[b];" "if (1'b0) rd_rr[b] 
 mut xb_no_wrr     $XB "if (wr_bv[b]) wr_rr[b] <= wr_bm[b];" "if (1'b0) wr_rr[b] <= wr_bm[b];"               # 寫入固定優先權
 mut xb_row        $XB "function automatic logic [DW-1:0] row_of(logic [25:0] l);  return DW'(npu_l2_row(l, BW, DW)); endfunction" "function automatic logic [DW-1:0] row_of(logic [25:0] l);  return DW'(npu_l2_row(l >> 1, BW, DW)); endfunction"  # bank 列位址錯
 mut xb_wr_any     $XB "assign wr_gnt[m]  = wr_req[m] && wr_bv[wb] && wr_bm[wb] == WW'(m);" "assign wr_gnt[m]  = wr_req[m];"  # 寫入不仲裁
+mut xb_ls_nowait  $XB "if (rd_rq[b] || wr_rq[b]) begin ls[b] <= 1'b0; wk[b] <= KW'(LS_WAKE); end" "if (rd_rq[b] || wr_rq[b]) begin ls[b] <= 1'b0; wk[b] <= '0; end"  # 喚醒不等 SRAM
+mut xb_ls_nowake  $XB "if (rd_rq[b] || wr_rq[b]) begin ls[b] <= 1'b0; wk[b] <= KW'(LS_WAKE); end" "if (1'b0) begin ls[b] <= 1'b0; wk[b] <= KW'(LS_WAKE); end"  # 睡了不醒 (死結)
+mut xb_ls_rdidle  $XB "else if (rd_rq[b] || wr_rq[b]) idle[b] <= '0;" "else if (wr_rq[b]) idle[b] <= '0;"  # 讀取中仍計閒置 (存取中睡著)
+mut xb_ls_rdy     $XB "assign b_rdy[b]   = !ls[b] && wk[b] == '0;" "assign b_rdy[b]   = wk[b] == '0;"   # 睡眠中仍給 grant
+mut xb_ls_early   $XB "else if (idle[b] == IW'(LS_IDLE - 1)) begin" "else if (idle[b] == IW'(LS_IDLE - 2)) begin"  # 提早睡
 # ---- npu_core ----
+mut core_icg_rst   $CORE ".en(cu_en[i] || !rst_n)" ".en(cu_en[i])"                                         # reset 期間 CU 時脈關閉
 mut core_done_disp $CORE "assign cu_free    = cu_ready & ~cpl_pend & ~cu_done;" "assign cu_free    = cu_ready & ~cpl_pend;"  # done 當拍分派 (已修正的 bug)
 mut core_cpl_hold  $CORE "wire cpl_load = (cpl_pend != '0) && (!cpl_valid || cpl_ready);" "wire cpl_load = (cpl_pend != '0);"  # 完成輸出不保持
 mut core_gate      $CORE "assign cu_en[i] = !cu_ready[i] || cu_v[i] || cu_done[i];" "assign cu_en[i] = !cu_ready[i] || cu_v[i];"  # 閘控未涵蓋 done 脈衝

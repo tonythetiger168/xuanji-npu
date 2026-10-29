@@ -25,7 +25,9 @@ module npu_core
   parameter int NCU   = 4,
   parameter int NB    = 4,
   parameter int DEPTH = 1024,          // 每個 bank 的 line 數
-  parameter int QD    = 4              // 命令佇列深度 (2 的冪)
+  parameter int QD    = 4,             // 命令佇列深度 (2 的冪)
+  parameter int LS_IDLE = 32,          // L2 bank 閒置幾拍後進入 SRAM light sleep (0 = 不睡; 見 npu_l2_xbar)
+  parameter int LS_WAKE = 2            // light sleep 喚醒拍數
 )(
   input  logic clk, rst_n,
   input  logic test_en,
@@ -117,7 +119,7 @@ module npu_core
     // CU 時脈致能: 忙碌、本拍分派 (CU 在 idle 取樣命令)、或 done 脈衝尚待清除
     assign cu_en[i] = !cu_ready[i] || cu_v[i] || cu_done[i];
     logic gclk;
-    clock_gate u_icg (.clk(clk), .en(cu_en[i]), .test_en(test_en), .clk_out(gclk));
+    clock_gate u_icg (.clk(clk), .en(cu_en[i] || !rst_n), .test_en(test_en), .clk_out(gclk));
     logic [RP-1:0]        c_rq, c_rg;
     logic [RP-1:0][25:0]  c_rl;
     logic [RP-1:0][511:0] c_rd;
@@ -143,10 +145,11 @@ module npu_core
   assign wr_req[NCU] = h_wr_req;  assign wr_line[NCU] = h_wr_line;  assign wr_data[NCU] = h_wr_data;
   assign h_wr_gnt = wr_gnt[NCU];
 
-  npu_l2_xbar #(.NM(NM), .NW(NW), .NB(NB), .DEPTH(DEPTH)) u_l2 (
+  logic [NB-1:0] l2_ls;                          // 各 bank 的 SRAM light sleep (觀察用; TB 量測睡眠比例)
+  npu_l2_xbar #(.NM(NM), .NW(NW), .NB(NB), .DEPTH(DEPTH), .LS_IDLE(LS_IDLE), .LS_WAKE(LS_WAKE)) u_l2 (
     .clk(clk), .rst_n(rst_n),
     .rd_req(rd_req), .rd_line(rd_line), .rd_gnt(rd_gnt), .rd_data(rd_data),
-    .wr_req(wr_req), .wr_line(wr_line), .wr_data(wr_data), .wr_gnt(wr_gnt));
+    .wr_req(wr_req), .wr_line(wr_line), .wr_data(wr_data), .wr_gnt(wr_gnt), .bank_ls(l2_ls));
 
   // ---------------- 完成佇列 ----------------
   // 輸出暫存: cpl_valid 期間 cpl_id 保持 (等待 cpl_ready); 空出時從待回報槽 round-robin 取一個 (one-hot)

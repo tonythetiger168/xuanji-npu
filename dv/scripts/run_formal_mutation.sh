@@ -24,13 +24,15 @@ PY
   cp formal/$b/$b.sby $M/$n/
   (cd $M/$n && timeout 1800 sby -f $b.sby prove > sby.log 2>&1)
   # 只有證明真的失敗 (FAIL: 反例 / UNKNOWN: 歸納找到反例) 才算抓到; 逾時或工具錯誤不算
-  if grep -qE "DONE \((FAIL|UNKNOWN)" $M/$n/sby.log && [ "$b" = orca_pmu ]; then
-    # orca_pmu 的歸納需要引用內部狀態的輔助不變式: 另以 BMC (深度 30, 拿掉輔助不變式) 確認
+  if grep -qE "DONE \((FAIL|UNKNOWN)" $M/$n/sby.log && [[ "$b" =~ ^(orca_pmu|npu_l2_xbar)$ ]]; then
+    # orca_pmu / npu_l2_xbar 的歸納需要引用內部狀態的輔助不變式: 另以 BMC (深度 30, 拿掉輔助不變式) 確認
     # mutant 違反的是埠層級的性質 (真的反例), 而不只是輔助不變式
     sv2v -DFORMAL -DFORMAL_TOP_$b -DFORMAL_NO_HELPER -E Assert -Irtl/common rtl/common/orca_pkg.sv $extra $M/$n.sv > $M/$n/$b.v
-    sed 's/^prove: mode prove/prove: mode bmc/; s/^prove: depth 4/prove: depth 30/' formal/$b/$b.sby > $M/$n/$b.sby
+    sed 's/^prove: mode prove/prove: mode bmc/; s/^prove: depth [0-9]*/prove: depth 30/' formal/$b/$b.sby > $M/$n/$b.sby
+    [ "$b" = npu_l2_xbar ] && sed -i 's/^smtbmc z3/abc bmc3/' $M/$n/$b.sby   # 含 SRAM 陣列: z3 BMC 30 拍太慢, 改用 ABC bmc3
     (cd $M/$n && timeout 1800 sby -f $b.sby prove > bmc.log 2>&1)
-    if grep -q "DONE (FAIL" $M/$n/bmc.log; then nk=$((nk + 1)); echo "$n: killed (BMC counterexample, port-level property)"
+    # ABC 回報 FAIL (反例) 時 sby 可能無法產生波形而報 ERROR, 以 engine 的結果為準
+    if grep -qE "DONE \(FAIL|returned FAIL" $M/$n/bmc.log; then nk=$((nk + 1)); echo "$n: killed (BMC counterexample, port-level property)"
     else echo "$n: SURVIVED (only the helper invariants fail)"; surv=1; fi
   elif grep -qE "DONE \((FAIL|UNKNOWN)" $M/$n/sby.log; then
     nk=$((nk + 1)); echo "$n: killed ($(grep -oE 'DONE \([A-Z]+' $M/$n/sby.log | tail -1))"
@@ -72,6 +74,11 @@ mut npu_l2_xbar $X gnt_all     "assign rd_gnt[m]  = rd_req[m] && rd_bv[rb] && rd
 mut npu_l2_xbar $X wdata_m0    "if (wr_bv[b]) mem[b][row_of(wr_line[wr_bm[b]])] <= wr_data[wr_bm[b]];" "if (wr_bv[b]) mem[b][row_of(wr_line[wr_bm[b]])] <= wr_data[0];"
 mut npu_l2_xbar $X rdata_bank0 "assign rd_data[m] = mem[rb][row_of(rd_line[m])];" "assign rd_data[m] = mem[0][row_of(rd_line[m])];"
 mut npu_l2_xbar $X row_bits    "function automatic logic [DW-1:0] row_of(logic [25:0] l);  return DW'(npu_l2_row(l, BW, DW)); endfunction" "function automatic logic [DW-1:0] row_of(logic [25:0] l);  return DW'(npu_l2_row(l, BW, DW)) & ~DW'(1); endfunction"   # 列位元 0 卡在 0 (兩個 line 別名; 原本的 l[0 +: DW] 在 (bank, 低位元) 下仍一對一, 是等價 mutant)
+mut npu_l2_xbar $X ls_nowait   "if (rd_rq[b] || wr_rq[b]) begin ls[b] <= 1'b0; wk[b] <= KW'(LS_WAKE); end" "if (rd_rq[b] || wr_rq[b]) begin ls[b] <= 1'b0; wk[b] <= '0; end"
+mut npu_l2_xbar $X ls_nowake   "if (rd_rq[b] || wr_rq[b]) begin ls[b] <= 1'b0; wk[b] <= KW'(LS_WAKE); end" "if (1'b0) begin ls[b] <= 1'b0; wk[b] <= KW'(LS_WAKE); end"
+mut npu_l2_xbar $X ls_rdidle   "else if (rd_rq[b] || wr_rq[b]) idle[b] <= '0;" "else if (wr_rq[b]) idle[b] <= '0;"
+mut npu_l2_xbar $X ls_rdy      "assign b_rdy[b]   = !ls[b] && wk[b] == '0;" "assign b_rdy[b]   = wk[b] == '0;"
+mut npu_l2_xbar $X ls_early    "else if (idle[b] == IW'(LS_IDLE - 1)) begin" "else if (idle[b] == IW'(LS_IDLE - 2)) begin"
 mut npu_l2_xbar $X rr_rot2     "m = MW'((int'(rr) + 1 + f) % NM);" "m = MW'((int'(rr) + f) % NM);"
 C=rtl/npu/npu_core.sv
 mut npu_core $C done_dispatch "assign cu_free    = cu_ready & ~cpl_pend & ~cu_done;" "assign cu_free    = cu_ready & ~cpl_pend;"
@@ -135,6 +142,11 @@ mut orca_pmu $Q no_save      "assign pd_ret_save[g]    = (st == P_IDLE) && (st_n
 mut orca_pmu $Q no_restore   "assign pd_ret_restore[g] = (st == P_RST);" "assign pd_ret_restore[g] = 1'b0;"
 mut orca_pmu $Q rst_no_clk   "assign pd_clk_gate[g]    = !(st == P_ON || st == P_RST);" "assign pd_clk_gate[g]    = !(st == P_ON);"
 mut orca_pmu $Q clk_in_pup   "assign pd_clk_gate[g]    = !(st == P_ON || st == P_RST);" "assign pd_clk_gate[g]    = !(st == P_ON || st == P_RST || st == P_PUP);"
+mut orca_pmu $Q dv_settle   "wire dv_end = dv_cnt == (dv_chf ? TW'(F_LOCK - 1) : TW'(V_SETTLE - 1));" "wire dv_end = dv_cnt == (dv_chf ? TW'(F_LOCK - 1) : TW'(F_LOCK - 1));"   # 電壓未穩定就換頻率
+mut orca_pmu $Q dv_order    "wire dv_up  = dv_tgt > dv_v;" "wire dv_up  = 1'b0;"   # 升檔先換頻率 (頻率超過電壓)
+mut orca_pmu $Q dv_retgt    "else if (dv_new) begin dv_tgt <= dvfs_req; dv_cnt <= '0; end" "else if (dv_new) begin dv_tgt <= dvfs_req; dv_cnt <= dv_cnt; end"   # 改目標不重新計數
+mut orca_pmu $Q dv_rej      "wire dv_new = dvfs_req <= 3'd4 && dvfs_req != dv_tgt;" "wire dv_new = dvfs_req != dv_tgt;"   # 不合法效能點仍接受
+mut orca_pmu $Q dv_busy     "assign dvfs_busy     = dv_up || dv_chf || dv_dn;" "assign dvfs_busy     = dv_up || dv_dn;"   # 換頻率時不報 busy
 P=rtl/soc/orca_pmu_regs.sv
 mut orca_pmu_regs $P rej_writes  "if (wa == A_DVFS_REQ && pstrb[0] && !rej) r_dvfs <= pwdata[2:0];" "if (wa == A_DVFS_REQ && pstrb[0]) r_dvfs <= pwdata[2:0];"
 mut orca_pmu_regs $P wake_level  "ev_wake[g] = (pd_state[g] == ST_ON) && !was_on[g];" "ev_wake[g] = (pd_state[g] == ST_ON);"

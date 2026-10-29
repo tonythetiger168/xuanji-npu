@@ -118,7 +118,7 @@ module npu_mma
     // 的 token 相同 (a_tok_diag), a_gate_safe 檢查關閉時鐘時上一列也沒有 token。
     assign row_act[r] = a_tok_edge[r] || (|tok_q[r]);
     logic gclk;
-    clock_gate u_icg (.clk(clk), .en(row_act[r] || clr), .test_en(test_en), .clk_out(gclk));
+    clock_gate u_icg (.clk(clk), .en(row_act[r] || clr || !rst_n), .test_en(test_en), .clk_out(gclk));
     for (genvar c = 0; c < N; c++) begin : g_pe
       logic [7:0] a_in, b_in;                   // 左鄰 / 上鄰 (陣列邊緣接 skew 輸出)
       logic       t_in;

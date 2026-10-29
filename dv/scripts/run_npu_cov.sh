@@ -42,6 +42,12 @@ for ((s = 1; s <= NS; s++)); do
   run npu_gemm_cu_tb cu_s$s GEMMCU +seed=$s +cmds=$NT
   run npu_core_tb core_s$s NPUCORE +seed=$s +cmds=$NT
 done
+# 上電時未 reset 的儲存為隨機值 (Verilator 隨機初值; 被閘控的 flop 在 reset 期間也要收到時脈才會被 reset)
+for r in 1 2; do
+  run npu_mma_tb mma_rand$r MMA +seed=$((r + 50)) +tiles=$NT +verilator+rand+reset+2 +verilator+seed+$r
+  run npu_gemm_cu_tb cu_rand$r GEMMCU +seed=$((r + 50)) +cmds=$((NT / 2)) +verilator+rand+reset+2 +verilator+seed+$r
+  run npu_core_tb core_rand$r NPUCORE +seed=$((r + 50)) +cmds=$((NT / 2)) +verilator+rand+reset+2 +verilator+seed+$r
+done
 run npu_core_tb perf PERF +seed=1 +perf +min_util=$MIN_UTIL
 for pk in 64 256 1024; do run npu_core_tb perf_k$pk PERF +seed=1 +perf +perf_k=$pk; done   # 較短 K 的利用率 (只報告)
 run npu_core_tb long NPUCORE +seed=1 +long

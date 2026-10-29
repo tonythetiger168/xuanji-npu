@@ -102,6 +102,12 @@ PY
       why="$v: $(grep -m1 -oE 'MISMATCH [a-z]+|ERROR: [a-z ]+|u_sva\.[A-Za-z_.0-9\[\]]*' "$M/$n.$v.log")"; break
     fi
   done
+  if [ -z "$why" ]; then   # 隨機上電狀態 (未 reset 的儲存為隨機值)
+    (cd "$M" && "./$n.obj/Vnpu_vec_eng_tb" +vec=e1 +seed=4 +gnt_p=60 +verilator+rand+reset+2 +verilator+seed+2 > "$n.rand.log" 2>&1)
+    if ! grep -q "TB PASS" "$M/$n.rand.log" || grep -q "Assertion failed" "$M/$n.rand.log"; then
+      why="random power-up: $(grep -m1 -oE 'MISMATCH [a-z]+|ERROR: [a-z ]+|u_sva\.[A-Za-z_.0-9\[\]]*' "$M/$n.rand.log")"
+    fi
+  fi
   rm -rf "${M:?}/${n:?}.obj"
   if [ -z "$why" ]; then echo "$n: SURVIVED"; surv=1; else nk=$((nk + 1)); echo "$n: killed ($why)"; fi
 }
@@ -116,5 +122,6 @@ mut_e eng_errclr  ".err(v_err), .err_clr(start)," ".err(v_err), .err_clr(1'b0),"
 mut_e eng_ready   "  assign cmd_ready = !act && !done;" "  assign cmd_ready = !act;"                                # done 拍又接受命令
 mut_e eng_gate    "  wire  en = act || cmd_valid || done;" "  wire  en = act || cmd_valid;"                       # done 拍時脈關閉
 mut_e eng_vgnt    "  assign v_rd_gnt = !f_sel && v_rd_req && rd_gnt;" "  assign v_rd_gnt = v_rd_req && rd_gnt;"     # 取指的 grant 也給 npu_vec
+mut_e eng_icg_rst ".en(en || !rst_n)" ".en(en)"                                                   # reset 期間時脈關閉 (隨機上電時不清除)
 echo "=== vec mutation: $nk / $nt mutants killed"
 [ $surv -eq 0 ] && [ $nk -eq $nt ]

@@ -42,6 +42,8 @@ for ((s = 1; s <= NS; s++)); do
   EXE=eobj/Vnpu_vec_eng_tb run eng_s$s e$s +seed=$s +gnt_p=$((30 + 20 * s))
 done
 EXE=eobj/Vnpu_vec_eng_tb run eng_perf e1 +perf
+# 上電時未 reset 的儲存為隨機值
+for r in 1 2; do EXE=eobj/Vnpu_vec_eng_tb run eng_rand$r e$r +seed=$((r + 50)) +gnt_p=50 +verilator+rand+reset+2 +verilator+seed+$r; done
 echo "=== RTL structural coverage (line / branch / expr / toggle)"
 python3 dv/scripts/cov_report.py "$B"/cov_*.dat --by-module --rtl '^rtl/(npu/npu_vec(_eng)?|fp/(fp_max|fp_small_dec|fp_mx_scale|fp_from_int))\.sv' \
   --expect rtl/npu/npu_vec.sv --expect rtl/npu/npu_vec_eng.sv --expect rtl/fp/fp_max.sv --expect rtl/fp/fp_small_dec.sv --expect rtl/fp/fp_mx_scale.sv --expect rtl/fp/fp_from_int.sv \

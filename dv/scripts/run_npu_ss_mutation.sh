@@ -35,6 +35,9 @@ PY
     rtl/npu/npu_core.sv dv/npu/npu_core_sva.sv $dma $tile dv/npu/npu_ss_sva.sv dv/npu/npu_ss_tb.sv \
     --top-module npu_ss_tb > "$M/$n.build" 2>&1 || { echo "$n: BUILD FAIL"; rm -rf "$M/$n.obj"; surv=1; return; }
   timeout 1800 "$M/$n.obj/Vnpu_ss_tb" +seed=7 +batches=$NBT +no_big > "$M/$n.log" 2>&1
+  # 全 0 上電通過時, 再以隨機上電狀態 (未 reset 的儲存為隨機值) 執行
+  grep -q "TB PASS" "$M/$n.log" && ! grep -q "Assertion failed" "$M/$n.log" \
+    && timeout 1800 "$M/$n.obj/Vnpu_ss_tb" +seed=9 +batches=$NBT +no_big +verilator+rand+reset+2 +verilator+seed+2 > "$M/$n.log" 2>&1
   rm -rf "$M/$n.obj"
   if grep -q "TB PASS" "$M/$n.log" && ! grep -q "Assertion failed" "$M/$n.log"; then
     echo "$n: SURVIVED"; surv=1
@@ -43,6 +46,7 @@ PY
   fi
 }
 # ---- orca_npu_ss ----
+mut dma_icg_rst  $TILE ".en(d_en || !rst_n)" ".en(d_en)"                                                    # reset 期間 DMA 時脈關閉 (隨機上電時不清除)
 mut wt_ignored   $TILE "wire go     = q_hv && (!head.wt || oc == '0);" "wire go     = q_hv;"                        # 等待旗標無效
 mut oc_no_dec    $TILE "oc <= oc + OCW'(q_pop) - OCW'(load);" "oc <= oc + OCW'(q_pop);"                                 # 完成不扣帳 (wt 永遠等待)
 mut oc_early     $TILE "oc <= oc + OCW'(q_pop) - OCW'(load);" "oc <= oc + OCW'(q_pop) - OCW'(load || d_done);"          # DMA 完成時提早扣帳
