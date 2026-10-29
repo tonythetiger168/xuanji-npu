@@ -76,13 +76,17 @@ bash dv/scripts/run_npu_ss_mutation.sh <nano|x1|pro|all>                # 檢查
 | covergroup | 命令類型 × `wt`、分派時未完成數、每種來源組合下的選擇、佇列深度、DMA 長度、在途數 / FIFO 深度 |
 | 範圍 | 量測 tile 自身 (`orca_npu_ss`、`npu_ss_dma`、`clock_gate`); npu_core 子樹由上面的 NPU flow 收斂 |
 
-### NPU Subsystem 結果 (每款 6 seed × 30 batch + DMA 吞吐量量測; 豁免 0 項)
+### NPU Subsystem 結果 (每款 6 seed × 30 batch + 2 次隨機上電 + DMA 吞吐量量測; 豁免 0 項; v6.3.11 重新收斂)
 
 | 組態 | DMA OUT | line | branch | expr | toggle | covergroup | SVA cover | mutation |
 |---|---|---|---|---|---|---|---|---|
-| X1-Nano | 16 | 100% (13) | 100% (48) | 100% (106) | 100% (29 868) | 100% (96) | 100% (24) | 23 / 23 |
-| X1 | 32 | 100% (13) | 100% (48) | 100% (106) | 100% (46 260) | 100% (144) | 100% (24) | 23 / 23 |
-| X1-Pro | 64 | 100% (13) | 100% (48) | 100% (106) | 100% (79 036) | 100% (240) | 100% (24) | 23 / 23 |
+| X1-Nano | 16 | 100% (15) | 100% (70) | 100% (152) | 100% (38 700) | 100% (110) | 100% (31) | 見下 |
+| X1 | 32 | 100% (15) | 100% (70) | 100% (152) | 100% (55 092) | 100% (158) | 100% (31) | 見下 |
+| X1-Pro | 64 | 100% (15) | 100% (70) | 100% (152) | 100% (87 870) | 100% (254) | 100% (31) | 見下 |
+
+mutation: 加入向量引擎 (#19) 後 `run_npu_ss_mutation.sh` 有兩個 mutant 的 pattern 失效、數個存活, 尚在修正 (#19), 不列數字;
+v6.3.11 新增的 DMA ICG reset mutant (`dma_icg_rst`) 已確認被抓到。Pro 的 completion 競爭 bin「VEC 待回報時選中 DMA」
+在隨機中沒有出現, TB 的 `fill_all` 加上只有 DMA 與 VEC 競爭的情境 (prime 5)。
 
 DMA 讀取吞吐量 (LD 2048 line, 外部埠全速; 寫入 ST 在所有情況為 0.998 line/拍):
 
@@ -121,8 +125,8 @@ bash dv/scripts/run_formal_mutation.sh   # 形式 mutation: 植入錯誤的 RTL 
 | 區塊 | 參數 | 性質 | 結果 |
 |---|---|---|---|
 | `npu_ss_dma` | OUT = 4, DW = 8 (計數器為實際 16 bit) | 計數順序 (寫 ≤ 讀 ≤ n)、在途 ≤ OUT、FIFO 佔用 / 指標、done 恰在第 n 個寫入、有額度就發讀、請求等待 grant 時保持、done 為單拍; **資料完整**: 任選一個 line index (anyconst), 從輸入埠記錄的資料必須等於寫出的資料 | k-induction 證明通過 (深度 5); cover 3 / 3 可達; 形式 mutation 7 / 7 無法證明 |
-| `orca_npu_ss` (前端) | QD = 4, NCU = 2; npu_core / DMA / ICG 以契約替身取代 (`formal/orca_npu_ss/stubs.sv`) | 命令守恆 (接受 = 佇列中 + 已分派; 已分派 = 未完成 + 已載入; 已載入 = 已輸出 + 輸出暫存中)、未完成數 = core 內 + DMA + NOP 且 ≤ 上限、等待旗標 (oc = 0 才分派)、可分派時必分派、K = 0 不送 core、DMA / NOP 完成槽的 id 不被覆蓋、完成合併選一個有效來源且為**確切 round-robin** (檢查器自己記錄上次選中者)、輸出等待時保持、core 的 id 原樣輸出、busy / irq、DMA 時脈閘控安全 | k-induction 證明通過 (深度 6); cover 4 / 4 可達; 形式 mutation 11 / 11 無法證明 |
-| `npu_l2_xbar` | NM = 3, NB = 2, DEPTH = 2, LDW = 8 (新增參數 LDW, 預設 512) | grant 必有請求、每個 bank 每拍最多一讀一寫 grant、**確切 round-robin** 且 work-conserving (檢查器從 gnt 埠記錄得主)、等待 ≤ NM − 1 拍; **資料**: 任選一個 line (anyconst), 讀到的必是最後寫入的資料 | k-induction 證明通過 (深度 4); cover 4 / 4 可達; 形式 mutation 8 / 8 無法證明 |
+| `orca_npu_ss` (前端) | QD = 4, NCU = 2; npu_core / DMA / ICG 以契約替身取代 (`formal/orca_npu_ss/stubs.sv`) | 命令守恆 (接受 = 佇列中 + 已分派; 已分派 = 未完成 + 已載入; 已載入 = 已輸出 + 輸出暫存中)、未完成數 = core 內 + DMA + NOP 且 ≤ 上限、等待旗標 (oc = 0 才分派)、可分派時必分派、K = 0 不送 core、DMA / NOP 完成槽的 id 不被覆蓋、完成合併選一個有效來源且為**確切 round-robin** (檢查器自己記錄上次選中者)、輸出等待時保持、core 的 id 原樣輸出、busy / irq、DMA 時脈閘控安全 | k-induction 證明通過 (深度 6); cover 4 / 4 可達; 形式 mutation 14 / 14 無法證明 |
+| `npu_l2_xbar` | NM = 4, NW = 3, NB = 2, DEPTH = 2, LDW = 8 (新增參數 LDW, 預設 512); light sleep LS_IDLE = 3、LS_WAKE = 2 | grant 必有請求、每個 bank 每拍最多一讀一寫 grant、醒著時**確切 round-robin** 且 work-conserving (檢查器從 gnt 埠記錄得主)、等待 ≤ NM − 1 + LS_WAKE + 1 拍; light sleep: 檢查器由請求埠重算每個 bank 的睡眠 / 喚醒狀態, `bank_ls` 相符、睡眠 / 喚醒中不給 grant; **資料**: 任選一個 line (anyconst), 讀到的必是最後寫入的資料 | k-induction 證明通過 (深度 10); 拿掉輔助不變式的 ABC BMC 30 拍通過; cover 5 / 5 可達; 形式 mutation 13 / 13 無法證明 (含 light sleep 5) |
 | `npu_core` (控制) | QD = 4, NCU = 3; CU / xbar / ICG 以契約替身取代 (`formal/npu_core/stubs.sv`) | 命令守恆 (接受 − 輸出 = 未完成) 且上限 QD + NCU + 1 為緊; 輸出的 id 必是尚未完成的命令 (不捏造、不重複; host 契約: id 不與未完成者重複); 分派最多一個 CU、只給可用的 CU (閒置、無待回報、不在 done 那拍)、給編號最小者、可分派時必分派; 輸出等待時保持; **完成仲裁公平**: 待回報期間被略過 ≤ NCU − 1 次; busy / cmd_ready | k-induction 證明通過 (深度 4, 約 9 分鐘); cover 4 / 4 可達; 形式 mutation 9 / 9 無法證明 |
 
 替身只遵守介面契約 (npu_core: 容量 CQD + NCU + 1、只在有未回報命令時回報、等待時保持; DMA: idle 才接受、忙碌中某拍 done;
@@ -132,7 +136,7 @@ DMA、xbar、npu_core 見上表; CU (`npu_gemm_cu`) 與 `npu_mma` 的運算由 N
 
 DW / LDW = 8 的資料完整性推廣到 512: DMA 與 xbar 不運算資料, 只依位置搬移, 每個 bit 獨立。
 
-形式 mutation 合計 35 / 35 無法證明 (DMA 7、前端 11、xbar 8、npu_core 9)。只有證明實際失敗 (FAIL / UNKNOWN) 才算抓到;
+形式 mutation 合計 43 / 43 無法證明 (DMA 7、前端 14、xbar 13、npu_core 9)。只有證明實際失敗 (FAIL / UNKNOWN) 才算抓到;
 逾時或工具錯誤記為 INCONCLUSIVE 並使流程失敗。xbar 原本的 `gnt_no_req` 是等價 mutant (grant 得主必是請求者, 拿掉 req 條件不改行為),
 已換成 `gnt_all`。
 

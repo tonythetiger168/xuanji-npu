@@ -67,7 +67,8 @@ mut acc_trunc     $MMA "acc[r][c] + 32'(prod)" "acc[r][c] + 32'(prod[15:0])"    
 mut start_busy    $MMA "S_IDLE:  if (start) st_n = S_RUN;" "S_IDLE:  if (start) st_n = S_RUN;
       S_OUT:   if (start) st_n = S_RUN;"                                                                   # 輸出中接受 start
 mut last_early    $MMA "S_RUN:   if (fire_in && in_last) st_n = S_DRAIN;" "S_RUN:   if (in_last) st_n = S_DRAIN;"  # in_last 未握手即結束
-mut icg_rst       $MMA ".en(row_act[r] || clr || !rst_n)" ".en(row_act[r] || clr)"                          # reset 期間列時脈關閉 (隨機上電時 token 不清除)
+# (列 ICG 拿掉 !rst_n 是等價 mutant: reset 期間 row_act = 0 表示本列 token 已全 0, 資料暫存只在有 token 時使用, 累加器由
+#  start 的 clr 清除; 仍保留 !rst_n 以符合共用規則。CU 層級的 ICG 拿掉 !rst_n 則會被抓到, 見 core_icg_rst)
 # ---- npu_gemm_cu ----
 mut cu_aptr_stuck $CU "a_ptr <= a_ptr + 1'b1; fa <= fa - 1'b1; end" "a_ptr <= a_ptr; fa <= fa - 1'b1; end"   # A line 指標不前進
 mut cu_pop_early  $CU "wire pop  = feed && (step == SW'(SPL - 1) || mma_in_last);" "wire pop  = feed && (step == SW'(SPL - 2) || mma_in_last);"  # 提早換 line

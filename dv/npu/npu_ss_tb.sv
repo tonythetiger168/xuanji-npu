@@ -470,7 +470,8 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
   // directed: 完成輸出回壓期間填滿所有槽 (npu_core 佇列 + 每個 CU + 其輸出暫存 + tile 輸出暫存, 再加 DMA 與 NOP),
   //           oc 達到上限 CQD + NCU + 4 (界限是緊的); 再加兩個 VEC (程式以後門預先放進 L2): 第二個等引擎忙碌、
   //           再等 VEC 完成槽; 之後放開回壓 (4 個來源同時待回報) 並照常比對
-  task automatic fill_all(int prime = 3);   // prime: round-robin 起點 (0 GEMM / 1 DMA / 2 NOP / 3 VEC / 4 VEC, 只有 GEMM 競爭)
+  task automatic fill_all(int prime = 3);   // prime: round-robin 起點 (0 GEMM / 1 DMA / 2 NOP / 3 VEC / 4 VEC, 只有 GEMM 競爭 /
+                                            //        5 VEC, 只有 DMA 與 VEC 競爭)
     localparam int K = 200, AL = (K + SPL - 1) / SPL, STRIDE = 2 * AL + CL;
     localparam int NG = 4 + NCU + 2;     // npu_core 最多 4 + NCU + 1 個, 另一個已在 tile 輸出暫存
     npu_tile_cmd_t c;
@@ -496,7 +497,7 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
     // 起點: prime != 0 時先送一個該來源的命令, 等它進入輸出暫存 (回壓中) 後才送其餘命令, 使 round-robin 的
     // 「上次選中者」為該來源; GEMM 少一個 (輸出暫存已被佔用), oc 上限不變。prime 4: VEC 起點且不送 DMA / NOP
     // (放開回壓後只有 GEMM 與 VEC 競爭, 上次選中者為 VEC)
-    ng = (prime == 0) ? NG : NG - 1;
+    ng = (prime == 0) ? NG : (prime == 5) ? 0 : NG - 1;
     if (prime != 0) begin
       c = '0; c.id = 8'(200);
       case (prime)
@@ -519,15 +520,15 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
         if (prime == 4) continue;
         c.op = NPU_OP_DMA_LD; c.k = 16'd2; c.a = 26'(NG * STRIDE); c.ext = $urandom();
       end else if (i == NG + 1) begin
-        if (prime == 4) continue;
+        if (prime == 4 || prime == 5) continue;
         c.op = NPU_OP_NOP;
       end else begin c.op = NPU_OP_VEC; c.k = 16'd4; c.a = 26'((NG + 1) * STRIDE + i - NG - 2); end
       prog_pos[i] = prog.size(); prog.push_back(c); ref_exec(c);
     end
     in_batch = 1;
     // 等到所有槽都滿, 且 DMA / NOP / VEC 的完成都在待回報 (放開回壓後 4 個來源同時競爭)
-    oc_exp = (prime == 4) ? 4 + NCU + 2 : 4 + NCU + 4;
-    for (int w = 0; w < 20000 && !(int'(dut.oc) == oc_exp && (prime == 4 || (dut.dma_cv && dut.nop_cv)) && dut.vec_cv); w++) @(posedge clk);
+    oc_exp = (prime == 4) ? 4 + NCU + 2 : (prime == 5) ? 2 : 4 + NCU + 4;
+    for (int w = 0; w < 20000 && !(int'(dut.oc) == oc_exp && (prime == 4 || (dut.dma_cv && (dut.nop_cv || prime == 5))) && dut.vec_cv); w++) @(posedge clk);
     if (int'(dut.oc) != oc_exp) begin $display("ERROR: fill_all did not reach oc = %0d (oc = %0d)", oc_exp, dut.oc); n_err++; end
     p_cpl = 80;
     while (ncpl != prog.size()) @(posedge clk);
@@ -551,7 +552,7 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
     rst_n <= 1'b1;
     repeat (2) @(posedge clk);
     if ($value$plusargs("perf_dma=%d", fix_lat)) perf_dma();
-    else for (int b = 0; b < int'(nb); b++) if (b % 10 == 3) fill_all((b / 10 + int'(seed)) % 5); else batch((b % 5 == 0) ? 1 + ur(0, 3) : ur(nc / 2, nc), b == 1 && !$test$plusargs("no_big"));
+    else for (int b = 0; b < int'(nb); b++) if (b % 10 == 3) begin fill_all((b / 10 + int'(seed)) % 5); if (b == 13) fill_all(5); end else batch((b % 5 == 0) ? 1 + ur(0, 3) : ur(nc / 2, nc), b == 1 && !$test$plusargs("no_big"));
     $display("NPUSS: N=%0d NCU=%0d NB=%0d seed=%0d batches=%0d cmds=%0d resets=%0d errors=%0d",
              N, NCU, NB, seed, n_batch, n_cmds, n_rst, n_err);
     if (n_err == 0) $display("TB PASS"); else $display("TB FAIL");
