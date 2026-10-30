@@ -64,13 +64,15 @@ mut dma_outst    $DMA "(outst != (OW+1)'(OUT))" "(outst != (OW+1)'(OUT - 1) && o
 mut dma_overrun  $DMA "wire [OW:0] outst = iss[OW:0] - wr[OW:0];" "wire [OW:0] outst = {1'b0, iss[OW-1:0] - wr[OW-1:0]};"  # 在途計算溢位 → FIFO 覆蓋
 mut dma_rd_qual  $DMA "wire iss_ok = st ? (h_rd_req && h_rd_gnt) : (m_rd_req && m_rd_gnt);" "wire iss_ok = st ? (h_rd_req && h_rd_gnt) : m_rd_gnt;"  # 外部 gnt 不限定 req
 mut dma_wr_qual  $DMA "wire pop    = st ? (m_wr_req && m_wr_gnt) : (h_wr_req && h_wr_gnt);" "wire pop    = st ? m_wr_gnt : (h_wr_req && h_wr_gnt);"
-mut dma_waddr    $DMA "assign m_wr_addr = ext + 32'(wr);" "assign m_wr_addr = ext + 32'(iss);"                       # 寫位址用錯計數器
+mut dma_waddr    $DMA "wire e_step = st ? pop : iss_ok;" "wire e_step = iss_ok;"                       # 寫位址用錯計數器
 mut dma_l2line   $DMA "assign h_wr_line = l2 + 26'(wr);" "assign h_wr_line = l2 + 26'(iss);"
 mut dma_done     $DMA "assign done      = act && (wr == n);" "assign done      = act && (iss == n);"                # 讀完就完成 (寫尚未完成)
 mut dma_fifo     $DMA "if (pop)  f_rd <= f_rd + 1'b1;" "if (pop && !push)  f_rd <= f_rd + 1'b1;"                  # FIFO 讀指標錯
-mut dma_ext31    $DMA "assign m_rd_addr = ext + 32'(iss);" "assign m_rd_addr = {1'b0, ext[30:0]} + 32'(iss);"       # 外部位址高位遺失
+mut dma_ext31    $DMA "wire [31:0] e_addr = erow + 32'(col);" "wire [31:0] e_addr = {1'b0, erow[30:0]} + 32'(col);"       # 外部位址高位遺失
 mut dma_pushd    $DMA "wire [DW-1:0] push_d = st ? h_rd_data : m_rd_rdata;" "wire [DW-1:0] push_d = st ? h_rd_data : h_rd_data;"
 mut dma_n0       $DMA "assign done      = act && (wr == n);" "assign done      = act && (wr == n) && n != '0;"       # n = 0 永不完成
+mut dma_2d_wrap  $DMA "wire e_wrap = (cols != '0) && (col == cols - 1'b1);" "wire e_wrap = (cols != '0) && (col == cols);"           # 2D: 列多一個 line
+mut dma_2d_strd  $DMA "if (e_wrap) begin col <= '0; erow <= erow + stride; end" "if (e_wrap) begin col <= '0; erow <= erow + 32'(cols); end"   # 2D: 忽略列距
 # ---- VEC 分派 / 完成槽 / host 埠共用 (v6.3.10) ----
 mut vec_no_wait  $TILE "wire g_vec  = go && head.op == NPU_OP_VEC && !h_nop && !vec_cv;" "wire g_vec  = go && head.op == NPU_OP_VEC && !h_nop;"   # 完成槽被佔用仍分派 (覆蓋 vec_id)
 mut vec_k0       $TILE "((head.op == NPU_OP_GEMM || head.op == NPU_OP_VEC) && head.k == '0);" "(head.op == NPU_OP_GEMM && head.k == '0);"   # K = 0 的 VEC 送引擎
