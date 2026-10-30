@@ -72,10 +72,11 @@ module orca_npu_ss
   assign head = q[q_rd];
 
   // ---------------- 分派 ----------------
-  // oc: 已分派、完成尚未移入輸出暫存的命令數。上限: npu_core 佇列 + 每個 CU 一個 (執行中或待回報, CU 有待回報的完成時
-  //     不再分派) + npu_core 輸出暫存 + DMA + NOP (SVA a_oc_bound)
+  // oc: 已分派、完成尚未移入輸出暫存的命令數。上限: npu_core 容量 CCAP (佇列 + 每個 CU 最多持有 3 個命令與 1 個待回報
+  //     + 輸出暫存; v6.3.12 命令重疊) + DMA + NOP + VEC (SVA a_oc_bound)
   localparam int CQD = 4;                // npu_core 命令佇列深度
-  localparam int OC_MAX = CQD + NCU + 1 + 3;
+  localparam int CCAP = CQD + 4 * NCU + 1;
+  localparam int OC_MAX = CCAP + 3;
   localparam int OCW = $clog2(OC_MAX + 1);
   logic [OCW-1:0] oc;
   logic       dma_cv, nop_cv, vec_cv;    // DMA / NOP / VEC 完成槽
@@ -226,13 +227,13 @@ module orca_npu_ss
   end
   wire [7:0] f_core_pend = f_cin - f_cout;
   // npu_core 的介面契約 (stub 內部也成立; 以 tile 自己的計數重述, 讓歸納不從不可達狀態出發):
-  //   容量 CQD + NCU + 1 滿時不收命令; 只在有未回報命令時回報完成
+  //   容量 CCAP 滿時不收命令; 只在有未回報命令時回報完成
   always @(*) if (rst_n) begin
-    assume (!c_cmd_ready || f_core_pend < 8'(CQD + NCU + 1));
+    assume (!c_cmd_ready || f_core_pend < 8'(CCAP));
     assume (!c_cpl_valid || f_core_pend != 0);
   end
   always @(*) if (rst_n) begin
-    assert (f_core_pend <= 8'(CQD + NCU + 1));
+    assert (f_core_pend <= 8'(CCAP));
     assert (q_cnt <= (QW+1)'(QD));
     assert (cmd_ready == (q_cnt != (QW+1)'(QD)));
     assert (8'(f_acc - f_disp) == 8'(q_cnt));

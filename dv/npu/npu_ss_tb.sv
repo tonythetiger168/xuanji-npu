@@ -86,8 +86,10 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
       NPU_OP_DMA_ST: for (int i = 0; i < int'(c.k); i++) rext[ext_of(c, i)] = rl2[l2i(c.a + 26'(i))];
       NPU_OP_GEMM: if (c.k != 0) begin
         logic [31:0] C [];
+        int nn, cl;                       // 迴圈上界用執行期變數: 常數上界會在每個內嵌點展開 N×N 份
+        nn = N; cl = CL;
         C = new[N * N];
-        for (int i = 0; i < N; i++) for (int j = 0; j < N; j++) begin
+        for (int i = 0; i < nn; i++) for (int j = 0; j < nn; j++) begin
           longint acc = 0;
           for (int kk = 0; kk < int'(c.k); kk++) begin
             logic [7:0] av = rl2[l2i(c.a + 26'(kk / SPL))][((kk % SPL) * N + i) * 8 +: 8];
@@ -96,7 +98,7 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
           end
           C[i * N + j] = 32'(acc);
         end
-        for (int l = 0; l < CL; l++) for (int e = 0; e < 16; e++) rl2[l2i(c.c + 26'(l))][e * 32 +: 32] = C[l * 16 + e];
+        for (int l = 0; l < cl; l++) for (int e = 0; e < 16; e++) rl2[l2i(c.c + 26'(l))][e * 32 +: 32] = C[l * 16 + e];
       end
       NPU_OP_VEC: vec_exec(c);
       default: ;
@@ -504,14 +506,14 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
   endtask
 
   // directed: 完成輸出回壓期間填滿所有槽 (npu_core 佇列 + 每個 CU + 其輸出暫存 + tile 輸出暫存, 再加 DMA 與 NOP),
-  //           oc 達到上限 CQD + NCU + 4 (界限是緊的); 再加兩個 VEC (程式以後門預先放進 L2): 第二個等引擎忙碌、
+  //           oc 達到上限 CQD + 4·NCU + 4 (界限是緊的); 再加兩個 VEC (程式以後門預先放進 L2): 第二個等引擎忙碌、
   //           再等 VEC 完成槽; 之後放開回壓 (4 個來源同時待回報) 並照常比對
   task automatic fill_all(int prime = 3);   // prime: round-robin 起點 (0 GEMM / 1 DMA / 2 NOP / 3 VEC / 4 VEC, 只有 GEMM 競爭 /
                                             //        5 VEC, 只有 DMA 與 VEC 競爭 / 6 NOP, 只有 NOP 與 VEC 競爭)
     localparam int K = 200, AL = (K + SPL - 1) / SPL, STRIDE = 2 * AL + CL;
-    localparam int NG = 4 + NCU + 2;     // npu_core 最多 4 + NCU + 1 個, 另一個已在 tile 輸出暫存
+    localparam int NG = 4 + 4 * NCU + 2; // npu_core 最多 4 + 4·NCU + 1 個, 另一個已在 tile 輸出暫存
     npu_tile_cmd_t c;
-    int ng, oc_exp;
+    int ng, oc_exp, nloop;
     longint unsigned ps0;
     ps0 = perf_steps;
     n_batch++;
@@ -546,7 +548,9 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
       for (int w = 0; w < 20000 && !(cpl_valid && cpl_id == 8'(200)); w++) @(posedge clk);
       if (!(cpl_valid && cpl_id == 8'(200))) begin $display("ERROR: fill_all prime %0d not in output register", prime); n_err++; end
     end
-    for (int i = 0; i < NG + 4; i++) begin
+    // 迴圈上界用執行期變數: 常數上界時 Verilator 會展開迴圈 (X1 的 26 次展開讓產生的 C++ 達 85 MB, 編譯 > 30 分鐘)
+    nloop = NG + 4;
+    for (int i = 0; i < nloop; i++) begin
       c = '0; c.id = 8'(i);
       if (i < NG) begin
         if (i >= ng) continue;
@@ -563,8 +567,9 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
     end
     in_batch = 1;
     // 等到所有槽都滿, 且 DMA / NOP / VEC 的完成都在待回報 (放開回壓後 4 個來源同時競爭)
-    oc_exp = (prime == 4) ? 4 + NCU + 2 : (prime >= 5) ? 2 : 4 + NCU + 4;
-    for (int w = 0; w < 20000 && !(int'(dut.oc) == oc_exp && (prime == 4 || (prime == 6 ? dut.nop_cv : (dut.dma_cv && (dut.nop_cv || prime == 5)))) && dut.vec_cv); w++) @(posedge clk);
+    oc_exp = (prime == 4) ? 4 + 4 * NCU + 2 : (prime >= 5) ? 2 : 4 + 4 * NCU + 4;
+    // GEMM 的完成也要已在等待 (src_v[0]; v6.3.12 起 CU 可持有多個命令, oc 到達上限時 GEMM 可能都還在計算)
+    for (int w = 0; w < 20000 && !(int'(dut.oc) == oc_exp && (prime >= 5 || dut.src_v[0]) && (prime == 4 || (prime == 6 ? dut.nop_cv : (dut.dma_cv && (dut.nop_cv || prime == 5)))) && dut.vec_cv); w++) @(posedge clk);
     if (int'(dut.oc) != oc_exp) begin $display("ERROR: fill_all did not reach oc = %0d (oc = %0d)", oc_exp, dut.oc); n_err++; end
     p_cpl = 80;
     while (ncpl != prog.size()) @(posedge clk);
@@ -583,16 +588,18 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
     logic [511:0] d;
     npu_vec_pkg::npu_vec_ins_t x;
     npu_tile_cmd_t c;
+    int nkind, nord, ngap;                 // 迴圈上界用執行期變數 (常數上界時 Verilator 展開迴圈, 每份都內嵌 ref_exec)
     n_batch++;
+    nkind = 2; nord = 2; ngap = 5;
     p_cmd = 100; p_cpl = 100; p_rgnt = 100; p_wgnt = 100; p_rv = 100; fix_lat = -1; rlat = 2; test_en = 0;
     // VEC 程式 (line 16): SPLAT v0, ST v0 → line 24
     d = '0;
     x = '0; x.op = npu_vec_pkg::VOP_SPLAT; x.vd = 3'd0; x.imm = $urandom(); d[0 +: 77] = x;
     x = '0; x.op = npu_vec_pkg::VOP_ST; x.va = 3'd0; x.line = 26'd24; d[128 +: 77] = x;
     l2_bd_wr(l2i(26'd16), d); rl2[l2i(26'd16)] = d;
-    for (int kind = 0; kind < 2; kind++)
-    for (int ord = 0; ord < 2; ord++)
-      for (int gap = 0; gap <= 5; gap++) begin
+    for (int kind = 0; kind < nkind; kind++)
+    for (int ord = 0; ord < nord; ord++)
+      for (int gap = 0; gap <= ngap; gap++) begin
         prog.delete(); prog_pos.delete(); cpl_pos.delete(); pidx = 0; ncpl = 0;
         for (int t = 0; t < 3 + gap; t++) begin
           c = '0; c.id = 8'(210 + t);
@@ -632,7 +639,12 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
     rst_n <= 1'b1;
     repeat (2) @(posedge clk);
     if ($value$plusargs("perf_dma=%d", fix_lat)) perf_dma();
-    else for (int b = 0; b < int'(nb); b++) if (b == 2) arb_lock(); else if (b % 10 == 3) begin fill_all((b / 10 + int'(seed)) % 5); if (b == 13) fill_all(5); if (b == 3) fill_all(6); end else batch((b % 5 == 0) ? 1 + ur(0, 3) : ur(nc / 2, nc), b == 1 && !$test$plusargs("no_big"));
+    else for (int b = 0; b < int'(nb); b++) if (b == 2) arb_lock(); else if (b % 10 == 3) begin
+      // fill_all 只有一個呼叫點 (每個呼叫點都會展開一份 task 與其內嵌的參考模型)
+      int pl [$];
+      pl.delete(); pl.push_back((b / 10 + int'(seed)) % 5); if (b == 13) pl.push_back(5); if (b == 3) pl.push_back(6);
+      foreach (pl[i]) fill_all(pl[i]);
+    end else batch((b % 5 == 0) ? 1 + ur(0, 3) : ur(nc / 2, nc), b == 1 && !$test$plusargs("no_big"));
     $display("NPUSS: N=%0d NCU=%0d NB=%0d seed=%0d batches=%0d cmds=%0d resets=%0d errors=%0d",
              N, NCU, NB, seed, n_batch, n_cmds, n_rst, n_err);
     if (n_err == 0) $display("TB PASS"); else $display("TB FAIL");

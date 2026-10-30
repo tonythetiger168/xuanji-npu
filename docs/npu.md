@@ -45,6 +45,18 @@ CI 以 95% 作為效能回歸門檻 (`dv/scripts/npu_cfg.sh`)。
 
 (單一波次的數字不變: 第一個命令的開銷沒有前一個命令可以重疊。)
 
+X1-Max (N=32, NCU=24, NB=32; `npu_cfg max`; v6.3.12 量測, 同一 TB):
+
+| K | 單一波次 | 連續 8 輪 |
+|---|---|---|
+| 64 | 23.7% | 34.8% |
+| 256 | 53.7% | 87.0% |
+| 958 (slot 上限) | 78.5% | 93.6% |
+
+N=32 的小 K 受 C 寫回限制: 一個 tile 的 C 是 64 個 line (4 KiB), K=64 時與 A + B 的輸入量相同, 寫回器每列寫 2 個
+line, 24 個 CU 共用 32 個 bank 的單一寫入埠 — 寫回時間比計算長, 重疊遮不住。功能: `npu_core_tb` (seed 1, 450 個命令)
+errors = 0。Max 的 coverage 收斂 (#28) 尚未在 v6.3.12 重跑。
+
 **尚未具備** (列為下一步, 不對外宣稱): BF16 / FP8、稀疏、卷積 / attention 專用資料流、SoC 的 APB 互連與 NoC / DRAM 連接
 (NPU Subsystem 在 SoC 頂層的命令與外部記憶體埠目前接死)、編譯器 / runtime。
 CPU 的設定 / 命令介面已有: APB4 暫存器 `npu_ss_regs` + 包裝 `orca_npu_ss_apb` (暫存器表與驗證見 `docs/apb.md`)。
@@ -89,13 +101,13 @@ bash dv/scripts/run_npu_ss_mutation.sh <nano|x1|pro|all>                # 檢查
 | covergroup | 命令類型 × `wt`、分派時未完成數、每種來源組合下的選擇、佇列深度、DMA 長度、在途數 / FIFO 深度 |
 | 範圍 | 量測 tile 自身 (`orca_npu_ss`、`npu_ss_dma`、`clock_gate`); npu_core 子樹由上面的 NPU flow 收斂 |
 
-### NPU Subsystem 結果 (每款 6 seed × 30 batch + 2 次隨機上電 + DMA 吞吐量量測; 豁免 0 項; v6.3.11 重新收斂)
+### NPU Subsystem 結果 (每款 6 seed × 30 batch + 2 次隨機上電 + DMA 吞吐量量測; 豁免 0 項; v6.3.12 重新收斂)
 
 | 組態 | DMA OUT | line | branch | expr | toggle | covergroup | SVA cover | mutation |
 |---|---|---|---|---|---|---|---|---|
-| X1-Nano | 16 | 100% (15) | 100% (76) | 100% (157) | 100% (39 032) | 100% (110) | 100% (40) | 35 / 35 |
-| X1 | 32 | 100% (15) | 100% (76) | 100% (157) | 100% (55 424) | 100% (158) | 100% (40) | 35 / 35 |
-| X1-Pro | 64 | 100% (15) | 100% (76) | 100% (157) | 100% (88 202) | 100% (254) | 100% (40) | 35 / 35 |
+| X1-Nano | 16 | 100% (15) | 100% (76) | 100% (157) | 100% (39 032) | 100% (110) | 100% (44) | (v6.3.12 重跑中) |
+| X1 | 32 | 100% (15) | 100% (76) | 100% (157) | 100% (55 426) | 100% (158) | 100% (44) | (重跑中) |
+| X1-Pro | 64 | 100% (15) | 100% (76) | 100% (157) | 100% (88 204) | 100% (254) | 100% (44) | (重跑中) |
 
 mutation (`run_npu_ss_mutation.sh`, 20 batch + 隨機上電一次; 2D DMA 加入前量測): 三款 35 / 35。加入向量引擎 (#19) 後原本
 有兩個 pattern 失效、數個存活, 修正: L2 仲裁器 (`npu_l2_arb2`) 加只看埠的 SVA (下游請求保持、round-robin 公平) — 原本
@@ -110,11 +122,13 @@ DMA 讀取吞吐量 (LD 2048 line, 外部埠全速; 寫入 ST 在所有情況為
 | 讀取延遲 L | X1-Nano (OUT 16) | X1 (OUT 32) | X1-Pro (OUT 64) |
 |---|---|---|---|
 | 0 | 0.996 | 0.996 | 0.996 |
-| OUT − 3 | 0.990 (L=13) | 0.982 (L=29) | 0.967 (L=61) |
-| 2 × OUT | 0.455 (L=32) | 0.474 (L=64) | 0.481 (L=128) |
-| 100 | 0.155 | 0.309 | 0.609 |
+| OUT − 3 | 0.990 (L=13) | 0.982 (L=29) | 0.946 (L=61) |
+| 2 × OUT | 0.455 (L=32) | 0.472 (L=64) | 0.451 (L=128) |
+| 100 | 0.151 | 0.300 | 0.593 |
 
-量測值符合 min(1, OUT / (L + 3)); DRAM 級延遲 (約 100 拍) 下要接近滿速需要更大的 OUT 或多個 DMA 通道。
+量測值接近 min(1, OUT / (L + 3)) (OUT 大時略低: Pro L=61 為 0.946)。v6.3.12 重新量測; 與 v6.3.11 文件中的數字
+(Pro 0.967 / 0.481 / 0.609 等) 的差異來自 2D DMA 之後的 RTL — 以命令重疊前的 RTL (同一 TB) 量測 Pro L=61 / 100 同為
+0.946 / 0.593, 命令重疊不影響 DMA。 DRAM 級延遲 (約 100 拍) 下要接近滿速需要更大的 OUT 或多個 DMA 通道。
 
 ### NPU Subsystem 驗證中找到的問題
 
@@ -128,6 +142,9 @@ DMA 讀取吞吐量 (LD 2048 line, 外部埠全速; 寫入 ST 在所有情況為
 | mutation: 固定優先權的完成合併在 X1-Nano 存活 (「最多被搶先 2 次」太寬) → 加入確切 round-robin assertion `a_rr` | 檢查器 |
 | DMA 時脈關閉時發生非同步 reset, 以閘控時脈取樣的 SVA 誤報 → DMA SVA 改用 tile 的未閘控時脈 | 檢查器 |
 | TB: 結束時 `wait (!busy)` 不受 watchdog 保護、48 bit 計數器基準值以有號數比較 | TB |
+| **v6.3.12 命令重疊後 npu_core 容量變成 CQD + 4·NCU + 1 (每個 CU 持有 3 個命令 + 1 個待回報), 但 tile 的未完成數 `oc` 的寬度 / 上限仍依舊容量 (X1: 上限 12、4 bit, 實際可到 24 → 環繞, 等待旗標失效)** → `CCAP` 依新容量; 形式證明沒抓到, 因為 npu_core 替身的契約仍是舊容量 (替身契約必須隨被替換模組的介面一起改) | 模擬 SVA `a_oc_bound` (X1 隨機測試) |
+| v6.3.12: `fill_all` 以 `oc` 到達上限判斷「所有槽都滿」, 命令重疊後 GEMM 可能都還在 CU 內計算 (沒有完成在等) → 四方競爭的 bin 沒有出現 | coverage (`cg_cpl.cp_sel.all`) → 另等 GEMM 的完成 |
+| mutation `arb_nolock` (host L2 埠仲裁器等待中換主端) 在 X1 / Nano 存活: 需要「一個主端等 grant 時另一個開始請求, 且 round-robin 偏向後者」 → 加入埠層級 cover `c_rd_lock_*` / `c_wr_lock_*` (coverage 要求 100%) 與 directed `arb_lock` (以 L2 light sleep 喚醒製造等待); 另加寫入方向的 `arb_nolock_w` | mutation |
 
 ## 形式驗證 (SymbiYosys)
 
@@ -146,7 +163,7 @@ bash dv/scripts/run_formal_mutation.sh   # 形式 mutation: 植入錯誤的 RTL 
 | `npu_l2_xbar` | NM = 4, NW = 3, NB = 2, DEPTH = 2, LDW = 8 (新增參數 LDW, 預設 512); light sleep LS_IDLE = 3、LS_WAKE = 2 | grant 必有請求、每個 bank 每拍最多一讀一寫 grant、醒著時**確切 round-robin** 且 work-conserving (檢查器從 gnt 埠記錄得主)、等待 ≤ NM − 1 + LS_WAKE + 1 拍; light sleep: 檢查器由請求埠重算每個 bank 的睡眠 / 喚醒狀態, `bank_ls` 相符、睡眠 / 喚醒中不給 grant; **資料**: 任選一個 line (anyconst), 讀到的必是最後寫入的資料 | k-induction 證明通過 (深度 10); 拿掉輔助不變式的 ABC BMC 30 拍通過; cover 5 / 5 可達; 形式 mutation 13 / 13 無法證明 (含 light sleep 5) |
 | `npu_core` (控制) | QD = 4, NCU = 2; CU / xbar / ICG 以契約替身取代 (`formal/npu_core/stubs.sv`; CU 的契約以 assume 寫在 npu_core 的 FORMAL 區塊) | 命令守恆 (接受 − 輸出 = 未完成 = 佇列 + 各 CU 持有 + 待回報槽 + 輸出暫存) 且上限 QD + 4·NCU + 1 為緊; 輸出的 id 必是尚未完成的命令 (不捏造、不重複; host 契約: id 不與未完成者重複); 檢查器從埠記錄每個 CU 持有的 tag 佇列, 待回報槽的 tag = CU 完成握手帶回的 tag; 分派最多一個 CU、只給可接受命令的 CU、優先完全閒置者中編號最小者、否則可接受者中編號最小者、可分派時必分派; done_ready = 待回報槽空; 輸出等待時保持; **完成仲裁公平**: 待回報期間被略過 ≤ NCU − 1 次; busy / cmd_ready | k-induction 證明通過 (深度 4, 約 17 分鐘); cover 6 / 6 可達; 形式 mutation 11 / 11 無法證明 |
 
-替身只遵守介面契約 (npu_core: 容量 CQD + NCU + 1、只在有未回報命令時回報、等待時保持; DMA: idle 才接受、忙碌中某拍 done;
+替身只遵守介面契約 (npu_core: 容量 CQD + 4·NCU + 1 (v6.3.12)、只在有未回報命令時回報、等待時保持; DMA: idle 才接受、忙碌中某拍 done;
 CU (v6.3.12): 最多持有 3 個命令、閒置時可接受、busy = 持有命令、done 依受理順序帶回 tag 並保持到 done_ready; xbar: 只 grant 有請求者)。被替身取代的區塊本身都另有證明或模擬驗證:
 DMA、xbar、npu_core 見上表; CU (`npu_gemm_cu`) 與 `npu_mma` 的運算由 NPU flow (CRV + coverage 100% + mutation) 驗證。
 時脈閘控在 `npu_core` 證明中以直通替身表示, 其安全性由模擬 SVA (未閘控時脈取樣) 與 `orca_npu_ss` 的 DMA 閘控性質涵蓋。
@@ -267,15 +284,18 @@ bash dv/scripts/run_npu_mutation.sh <nano|x1|pro|all>                # 檢查器
 | 報告 | `dv/scripts/cov_report.py --by-module` | 模組層級合併 (同一模組在不同 TB / instance 的同一點合併, generate 範圍仍分開; covergroup bin 原樣保留) |
 | 豁免 | `dv/npu/waivers*.txt` | 共用 0 項; 組態專屬 (參數造成的結構常數): Nano 3 項、X1 0 項、Pro 1 項 |
 
-### 結果 (每款 4 seed × 200 命令 + perf + long)
+### 結果 (每款 4 seed × 200 命令 + 2 次隨機上電 + perf + long; v6.3.12 命令重疊後重新收斂)
 
 | 組態 | line | branch | expr | toggle | covergroup | SVA cover | 豁免 | mutation |
 |---|---|---|---|---|---|---|---|---|
-| X1-Nano | 100% (34) | 100% (86) | 100% (164) | 100% (25 814) | 100% (133) | 100% (30) | 3 [C] | 33 / 33 |
-| X1 | 100% (37) | 100% (88) | 100% (252) | 100% (50 522) | 100% (143) | 100% (32) | 0 | 34 / 34 |
-| X1-Pro | 100% (36) | 100% (86) | 100% (510) | 100% (112 726) | 100% (159) | 100% (32) | 1 [C] | 33 / 33 |
+| X1-Nano | 100% (49) | 100% (106) | 100% (228) | 100% (32 690) | 100% (142) | 100% (45) | 3 [C] | 51 / 51 |
+| X1 | 100% (52) | 100% (108) | 100% (328) | 100% (67 894) | 100% (155) | 100% (47) | 0 | 53 / 53 |
+| X1-Pro | 100% (51) | 100% (106) | 100% (650) | 100% (163 308) | 100% (175) | 100% (47) | 1 [C] (3 個 toggle 點) | 52 / 52 |
 
-mutant 數因組態而異: NCU=1 時「多 CU 同拍計數」不適用, N=16 時「C 列放錯位置」不適用 (每列一個 line)。
+mutant 數因組態而異: NCU=1 時「多 CU 同拍計數」與「不優先閒置 CU」不適用 (等價), N=16 時「C 列放錯位置」不適用 (每列一個 line)。
+v6.3.12 新增 tile 管線化 (`res_no_last`、`no_last_stall`、`fl_no_skew`、`first_stuck`)、命令重疊 (`cu_pend_tag`、`cu_take_early`、
+`cu_done_noack`、`cu_lr`、`cu_take_cmd`、`cu_busy_pend`) 與 npu_core 握手 (`core_dack`、`core_idle_1st`) 的 mutant;
+`core_icg_rst` 是等價 mutant 已移除 (理由見腳本)。
 
 L2 SRAM 陣列 (`u_l2.mem`) 超過 toggle 寬度上限, 不量 toggle (儲存陣列, 以資料比對驗證), 報告中明確列出。
 
@@ -289,6 +309,8 @@ L2 SRAM 陣列 (`u_l2.mem`) 超過 toggle 寬度上限, 不量 toggle (儲存陣
 | **CU 的 done 脈衝當拍仍被視為空閒: 同拍分派新命令, 其 id 蓋掉尚未回報的完成 (舊命令永遠不回報)** | burst 測試 (佇列有等待命令時才會發生) → `a_no_disp_done` |
 | round-robin 遮罩、狀態編碼中的恆定位元 | coverage → 改寫 RTL (不豁免) |
 | mutation 測試的漏洞: xbar 讀 / 寫改成固定優先權時, 16 bank 的 Pro 很少發生 bank 衝突而存活 | 加入 host bank hammer 與 directed 寫入公平性測試 |
+| v6.3.12: CU SVA `a_no_rd_wr` (CU 不會同拍讀與寫) 是舊版「命令完全串行」的性質; 命令重疊後讀下一個 tile 與寫回前一個本來就同拍 → 改為 cover `c_rd_wr` | 新 RTL 第一次模擬 |
+| v6.3.12: 效能量測的 consumer 每個完成都以 host 埠讀回 C, 且隨機長時間不收完成 → 連續命令量測被 TB 自己卡住 (Pro K=64 只量到 25%) → 量測時只記錄 id, 結束後才比對 | 效能量測 |
 
 ### 驗證環境本身的問題 (記錄供參考)
 
@@ -297,3 +319,11 @@ L2 SRAM 陣列 (`u_l2.mem`) 超過 toggle 寬度上限, 不量 toggle (儲存陣
 - SVA 若以閘控時脈取樣, 非同步 reset 落在兩個取樣沿之間時 `$past` 會跨過 reset → 加入 `rst_seen` 停用。
 - `initial` 內帶初值的區域變數是 static, 在讀取 plusargs 之前就求值。
 - mutant 讓完成 id 錯誤時 TB 會永遠等待: 加入 watchdog (以命令送出 / 完成為進度)。
+- v6.3.12 再犯: CU TB 主迴圈內 `int k = pick_k(t);` 是 static, 只求值一次 (所有命令 K 相同, 重疊從未發生) → 宣告與賦值分開;
+  TB 另要求「重疊 / 同時持有 3 個命令」的次數 > 0 才算 PASS。
+- Verilator 的 expression coverage 不計 `always_ff` 內 `for` 迴圈 (迴圈變數索引) 的運算式 (恆為 0 次) → 改寫成 generate。
+- Verilator 中 rst_n 從 0 開始時沒有 negedge 事件: 非同步 reset 只在 reset 期間有時脈沿時生效, 所以「ICG 在 reset 期間
+  不開」的 mutant 是否被抓到取決於隨機上電狀態 (硬體上非同步 reset 不需要時脈, 是等價 mutant) → CU 的 `core_icg_rst` 移除。
+- Verilator 會展開常數上界的迴圈, 並把 timing 程序呼叫的函式在每個呼叫點內嵌: NPU SS TB 新加的 `arb_lock` (2 × 2 × 6 次的
+  常數迴圈) 讓參考模型 `ref_exec` 被內嵌上百份, X1 主 initial 的 coroutine 單一 C++ 檔 85 MB、編譯超過 30 分鐘 → 迴圈上界改用
+  執行期變數 (含 `ref_exec` 內的 N×N 迴圈)、`fill_all` 只留一個呼叫點 → 6.6 MB (`no_inline_task` 不支援引用模組變數的函式)。

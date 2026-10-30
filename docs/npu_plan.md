@@ -33,7 +33,7 @@
 | 頻寬 | 每個命令從 L2 / 外部記憶體讀寫完整張量 | 無 line-buffer / tile 融合 (多層 conv 中間特徵圖留在 SRAM)、無特徵圖壓縮 |
 | 影像子系統 | ISP / JPEG / H.264 / H.265 在 IMS (`docs/ims_interface.md`), 以記憶體交換 | 無 codec / ISP → NPU 的串流輸入 (YUV) |
 | 記憶體 | 共享 L2 | 無計算單元本地 scratchpad, A / B 無法跨命令重用 |
-| 小 K 效率 | K=64 時 Pro 46% | 啟動與排空未與下一個命令重疊 |
+| 小 K 效率 | 單一波次 K=64 時 Pro 46%; 連續命令 (v6.3.12 命令重疊) Pro 91.7% | Max (N=32) 小 K 受 C 寫回限制 (K=64 連續命令 34.8%) |
 | 稀疏 | 無 | 無 2:4 結構化稀疏、無 embedding 引擎 |
 | 資料搬移 | 單一循序 DMA | 無 2D/3D stride、gather/scatter、搬移時解壓縮 |
 | 陣列 | N ≤ 16 | 40 TOPS 以上需 N=32 或更多 CU |
@@ -53,6 +53,8 @@
 4. 計算單元本地 scratchpad (L2 改為第二層), A / B 跨命令重用。
 5. 多維 DMA: 2D / 3D stride (tiling、im2col)、gather / scatter (MoE)、搬移時解量化 / 解壓縮 (INT4 權重、KV)。
 6. 命令重疊: CU 輸出 C 時預取下一命令的 A / B; 目標 Pro K=64 利用率 46% → 75% 以上 (`npu_core_tb +perf_k`)。
+   **完成 (v6.3.12)**: npu_mma tile 管線化 + CU 輸入端 / 寫回器分開 (最多持有 3 個命令) + npu_core tag / done 握手;
+   連續命令 Pro K=64 = 91.7% (32 輪), 83.4% (8 輪); 同一 TB 量測 v6.3.11 為 48.0%。
 
 ### 階段 2V — 影像資料流 (對標 Chips&Media WAVE-N; 併入 #33 之後的 #41–#44)
 7V. 影像運算子: conv (直接卷積與 im2col 兩種, 3×3 / 1×1 / stride 2)、depthwise conv (向量核或獨立小引擎)、
@@ -90,7 +92,7 @@
 | 1 | 共用 FP + SFU 函式庫 (NPU 與 SIS 共用) | #21 | 完成 |
 | 2 | 向量核 + FP16 / BF16 + MX 格式 | #19 | 單元與引擎已驗證; 剩各組態回歸與文件 |
 | 3 | X1-Max (N=32) | #28 | 剩文件 (`docs/npu.md`) |
-| 4 | 本地 scratchpad + 多維 DMA (含 conv / im2col、pixel shuffle 重排) + 命令重疊 | #33 | 下一步 |
+| 4 | 本地 scratchpad + 多維 DMA (含 conv / im2col、pixel shuffle 重排) + 命令重疊 | #33 | 2D DMA、命令重疊完成; 剩 scratchpad、gather / scatter、3D |
 | 5 | 影像運算子 (conv / depthwise) + line-buffer / tile 融合 | #41 | |
 | 6 | 特徵圖壓縮 (DMA 內壓縮 / 解壓縮) | #42 | |
 | 7 | Vision 產品組態 (Nano-Vision / X1-Vision) | #43 | |

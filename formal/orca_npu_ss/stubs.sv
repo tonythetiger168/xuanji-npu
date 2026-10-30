@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // orca_npu_ss 形式驗證用的子模組替身 (只遵守介面契約, 其餘輸出任意):
-//   npu_core: 已接受未回報的命令數 p <= CQD + NCU + 1 (真實容量); cpl_valid 只在 p > 0 時出現,
+//   npu_core: 已接受未回報的命令數 p <= CQD + 4·NCU + 1 (真實容量: 每個 CU 最多 3 個命令 + 1 個待回報); cpl_valid 只在 p > 0 時出現,
 //             等待 cpl_ready 期間保持 (id 不變); cmd_ready 任意但 p 滿時為 0; busy = (p != 0)。
 //             npu_core 本身由 run_npu_cov / run_npu_mutation 驗證。
 //   npu_ss_dma: 只在 idle 接受命令; done 在忙碌中任意一拍出現, 之後回到 idle (DMA 本身已形式證明)。
@@ -23,7 +23,7 @@ module npu_core #(parameter int N = 8, NCU = 4, NB = 4, DEPTH = 1024, QD = 4) (
   input  logic perf_wr, input logic [47:0] perf_wdata_busy, perf_wdata_steps,
   output logic [47:0] perf_busy, perf_steps
 );
-  localparam int CAP = QD + NCU + 1;
+  localparam int CAP = QD + 4 * NCU + 1;
   (* anyseq *) logic rdy_any, cv_any, rg_any, wg_any;
   (* anyseq *) logic [7:0] id_any;
   logic [7:0] p;

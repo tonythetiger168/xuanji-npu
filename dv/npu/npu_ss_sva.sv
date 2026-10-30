@@ -83,7 +83,7 @@ module npu_ss_sva #(parameter int QD = 8, parameter int NCU = 4) (
   input logic clk, rst_n, test_en,
   input logic cmd_valid, cmd_ready, cpl_valid, cpl_ready, busy, irq,
   input logic [7:0] cpl_id,
-  input logic [$clog2(4 + NCU + 4 + 1)-1:0] oc,
+  input logic [$clog2(4 + 4 * NCU + 4 + 1)-1:0] oc,
   input logic [$clog2(QD):0] q_cnt,
   input logic q_hv, go, q_pop, g_core, g_dma, g_vec, g_nop, d_take, v_take, h_nop, c_cmd_ready, d_cmd_ready, v_cmd_ready,
   input logic head_wt,
@@ -96,8 +96,8 @@ module npu_ss_sva #(parameter int QD = 8, parameter int NCU = 4) (
 );
   default clocking cb @(posedge clk); endclocking
   default disable iff (!rst_n);
-  // npu_core 內最多: 佇列 4 + 每個 CU 1 (執行中或待回報) + 輸出暫存 1; 另加 DMA 1 + NOP 1 + VEC 1
-  localparam int OC_MAX = 4 + NCU + 1 + 3;
+  // npu_core 內最多: 佇列 4 + 每個 CU 4 (持有 3 個命令 + 1 個待回報; v6.3.12) + 輸出暫存 1; 另加 DMA 1 + NOP 1 + VEC 1
+  localparam int OC_MAX = 4 + 4 * NCU + 1 + 3;
 
   a_q_bound:    assert property (q_cnt <= ($clog2(QD)+1)'(QD));
   a_cmd_ready:  assert property (cmd_ready == (q_cnt != ($clog2(QD)+1)'(QD)));
