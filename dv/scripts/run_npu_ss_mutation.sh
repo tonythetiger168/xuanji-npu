@@ -30,7 +30,7 @@ PY
   nt=$((nt + 1))
   verilator --binary --timing -j "${JOBS:-4}" --assert -Wno-fatal -Wno-lint -Wno-style \
     -GN=$N -GNCU=$NCU -GNB=$NB -GDEPTH=$DEPTH -GOUT=$TILE_OUT --Mdir "$M/$n.obj" -Irtl/common -Irtl/fp \
-    rtl/common/orca_pkg.sv rtl/common/clock_gate.sv rtl/npu/npu_mma.sv dv/npu/npu_mma_sva.sv $FP $arb \
+    rtl/common/orca_pkg.sv rtl/common/clock_gate.sv rtl/npu/npu_mma.sv dv/npu/npu_mma_sva.sv $FP $arb dv/npu/npu_l2_arb2_sva.sv \
     rtl/npu/npu_gemm_cu.sv dv/npu/npu_gemm_cu_sva.sv rtl/npu/npu_l2_xbar.sv dv/npu/npu_l2_xbar_sva.sv \
     rtl/npu/npu_core.sv dv/npu/npu_core_sva.sv $dma $tile dv/npu/npu_ss_sva.sv dv/npu/npu_ss_tb.sv \
     --top-module npu_ss_tb > "$M/$n.build" 2>&1 || { echo "$n: BUILD FAIL"; rm -rf "$M/$n.obj"; surv=1; return; }
@@ -51,9 +51,9 @@ mut wt_ignored   $TILE "wire go     = q_hv && (!head.wt || oc == '0);" "wire go 
 mut oc_no_dec    $TILE "oc <= oc + OCW'(q_pop) - OCW'(load);" "oc <= oc + OCW'(q_pop);"                                 # 完成不扣帳 (wt 永遠等待)
 mut oc_early     $TILE "oc <= oc + OCW'(q_pop) - OCW'(load);" "oc <= oc + OCW'(q_pop) - OCW'(load || d_done);"          # DMA 完成時提早扣帳
 mut dma_slot     $TILE "head.op == NPU_OP_DMA_ST) && !dma_cv;" "head.op == NPU_OP_DMA_ST);"                             # DMA 完成槽未空就分派
-mut k0_to_core   $TILE "(head.op == NPU_OP_GEMM && head.k == '0)" "1'b0"                                               # K = 0 送進 npu_core
+mut k0_to_core   $TILE "((head.op == NPU_OP_GEMM || head.op == NPU_OP_VEC) && head.k == '0)" "(head.op == NPU_OP_VEC && head.k == '0)"                                               # K = 0 送進 npu_core
 mut cpl_no_hold  $TILE "wire load = (src_v != '0) && (!cpl_valid || cpl_ready);" "wire load = (src_v != '0);"         # 完成輸出不保持
-mut cpl_fixed    $TILE "last      <= sel[0] ? 2'd0 : sel[1] ? 2'd1 : 2'd2;" "last      <= 2'd2;"                       # 完成合併固定優先權
+mut cpl_fixed    $TILE "last      <= sel[0] ? 2'd0 : sel[1] ? 2'd1 : sel[2] ? 2'd2 : 2'd3;" "last      <= 2'd3;"                       # 完成合併固定優先權
 mut dma_id       $TILE "if (d_take) dma_id <= head.id;" "if (g_dma) dma_id <= head.id;"                                # DMA 忙碌時 id 被覆蓋
 mut q_full       $TILE "assign cmd_ready = (q_cnt != (QW+1)'(QD));" "assign cmd_ready = 1'b1;"                         # 佇列滿仍收命令
 mut dma_gate     $TILE "assign d_en = d_busy || g_dma;" "assign d_en = d_busy;"                                        # 閘控未涵蓋分派拍
@@ -79,7 +79,7 @@ mut vec_id       $TILE "      if (v_take) vec_id <= head.id;" "      if (g_vec) 
 mut vec_err_gate $TILE "assign vec_err = v_done && v_derr;" "assign vec_err = v_derr;"                                                  # vec_err 不只在完成拍
 mut vec_sel      $TILE "cpl_id    <= sel[0] ? c_cpl_id : sel[1] ? dma_id : sel[2] ? nop_id : vec_id;" "cpl_id    <= sel[0] ? c_cpl_id : sel[1] ? dma_id : nop_id;"   # VEC 完成回報錯的 id
 mut rr4          $TILE "automatic int s = (int'(last) + 1 + i) % 4;" "automatic int s = (int'(last) + 1 + i) % 3;"                          # round-robin 漏掉 VEC
-mut busy_vec     $TILE "assign busy = q_hv || (oc != '0) || cpl_valid || c_busy || d_busy || v_busy;" "assign busy = q_hv || (oc != '0) || cpl_valid || c_busy || d_busy;"
+# (busy 拿掉 v_busy 是等價 mutant: 形式證明的不變式 oc = core 內 + DMA + NOP + (v_busy || vec_cv), v_busy ⇒ oc != 0 ⇒ busy)
 mut arb_nolock   $ARB "wire  r_sel  = r_lock ? r_own : r_pick;" "wire  r_sel  = r_pick;"                                               # 等待中換主端 (違反保持)
 mut arb_gnt_both $ARB "assign rd_gnt    = {m_rd_gnt && r_sel, m_rd_gnt && !r_sel} & rd_req;" "assign rd_gnt    = {m_rd_gnt, m_rd_gnt} & rd_req;"   # grant 給兩個
 mut arb_wdata    $ARB "assign m_wr_data = wr_data[w_sel];" "assign m_wr_data = wr_data[0];"                                          # 寫資料取錯主端

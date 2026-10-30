@@ -238,17 +238,23 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
     npu_vec_pkg::npu_vec_ins_t p [$];
     int m, np;
     logic [25:0] src, dst, pl;
-    bit fill;
+    bit fill, burst, rburst;
     m = rnd(30) ? ur(9, 24) : ur(1, 8); src = pick_l2(m); fill = rnd(30);
+    burst  = rnd(25);                                     // 連續 ST (同一暫存器寫 m 個 line): 與 DMA 搶 L2 寫入埠
+    rburst = !burst && rnd(30);                           // 連續 LD (m 個 line), 最後一個 ST: 與 DMA ST 搶 L2 讀取埠
+    if (rburst) fill = 0;
     do dst = pick_l2(m); while (!disjoint(l2i(dst), m, l2i(src), m) && rnd(70));   // 多半不重疊 (重疊也合法)
     for (int i = 0; i < m; i++) begin
       npu_vec_pkg::npu_vec_ins_t x;
       x = '0;
-      if (fill) begin x.op = npu_vec_pkg::VOP_SPLAT; x.vd = 3'(i); x.imm = $urandom(); end
-      else begin x.op = npu_vec_pkg::VOP_LD; x.vd = 3'(i); x.line = src + 26'(i); end
-      p.push_back(x);
+      if (!burst || i == 0) begin
+        if (fill) begin x.op = npu_vec_pkg::VOP_SPLAT; x.vd = 3'(i); x.imm = $urandom(); end
+        else begin x.op = npu_vec_pkg::VOP_LD; x.vd = 3'(i); x.line = src + 26'(i); end
+        p.push_back(x);
+      end
       if (rnd(4)) begin x = '0; x.op = npu_vec_pkg::vop_e'(ur(11, 15)); p.push_back(x); end   // 非法指令
-      x = '0; x.op = npu_vec_pkg::VOP_ST; x.va = 3'(i); x.line = dst + 26'(i);
+      if (rburst && i != m - 1) continue;
+      x = '0; x.op = npu_vec_pkg::VOP_ST; x.va = burst ? 3'd0 : 3'(i); x.line = dst + 26'(i);
       p.push_back(x);
     end
     np = (p.size() + 3) / 4;
