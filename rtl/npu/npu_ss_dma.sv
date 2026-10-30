@@ -26,7 +26,7 @@ module npu_ss_dma
   input  logic [25:0] cmd_l2,
   input  logic [15:0] cmd_n,
   input  logic [15:0] cmd_cols,         // 2D: 每列 line 數 (0 = 1D)
-  input  logic [31:0] cmd_stride,       // 2D: 列距 (line)
+  input  logic [25:0] cmd_stride,       // 2D: 列距 (line)
   output logic        done,
   output logic        busy,
   // NPU L2 (npu_core host 埠)
@@ -59,7 +59,8 @@ module npu_ss_dma
   logic [25:0] l2;
   logic [15:0] n, iss, wr;                // iss: 已發出讀取的 line 數; wr: 已寫出的 line 數
   logic [15:0] cols, col;                 // 2D: 每列 line 數 / 外部端目前列內位置
-  logic [31:0] stride, erow;              // 2D: 列距 / 外部端目前列的起點
+  logic [25:0] stride;                    // 2D: 列距
+  logic [31:0] erow;                      // 2D: 外部端目前列的起點
   logic [DW-1:0] fifo [OUT];
   logic [OW-1:0] f_rd, f_wr;
   logic [OW:0]   f_cnt;
@@ -110,7 +111,7 @@ module npu_ss_dma
         if (iss_ok) iss <= iss + 1'b1;
         if (pop)    wr  <= wr + 1'b1;
         if (e_step) begin
-          if (e_wrap) begin col <= '0; erow <= erow + stride; end
+          if (e_wrap) begin col <= '0; erow <= erow + 32'(stride); end
           else col <= col + 1'b1;
         end
       end
@@ -171,7 +172,8 @@ module npu_ss_dma
   end
   // 位址: 檢查器從命令埠記下參數, 從外部端的握手 (LD: 讀 grant; ST: 寫 grant) 自己推進 2D 位置, 從 L2 端的握手
   // 計數; 送出的位址必須相符
-  logic [31:0] f_ext0, f_stride, f_erow;
+  logic [31:0] f_ext0, f_erow;
+  logic [25:0] f_stride;
   logic [15:0] f_cols, f_ecol, f_lcnt;
   logic [25:0] f_l20;
   logic        f_st;
@@ -184,7 +186,7 @@ module npu_ss_dma
       f_l20 <= cmd_l2; f_lcnt <= '0; f_st <= cmd_st;
     end else begin
       if (f_ehs) begin
-        if (f_cols != '0 && f_ecol == f_cols - 1'b1) begin f_ecol <= '0; f_erow <= f_erow + f_stride; end
+        if (f_cols != '0 && f_ecol == f_cols - 1'b1) begin f_ecol <= '0; f_erow <= f_erow + 32'(f_stride); end
         else f_ecol <= f_ecol + 1'b1;
       end
       if (f_lhs) f_lcnt <= f_lcnt + 1'b1;
@@ -202,7 +204,7 @@ module npu_ss_dma
 `endif
   end
   always @(*) if (rst_n) begin
-    cover (act && !st && done && n == 16'd6 && cols == 16'd2 && stride == 32'd5);
+    cover (act && !st && done && n == 16'd6 && cols == 16'd2 && stride == 26'd5);
     cover (act && st && done && n == 16'd5 && cols == 16'd2);
     cover (act && !st && done && n == 16'd6);
     cover (act && st && done && n == 16'd6);

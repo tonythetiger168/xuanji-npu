@@ -54,7 +54,7 @@ mut npu_ss_dma $D outst_over  "wire can_iss = act && (iss != n) && (outst != (OW
 mut npu_ss_dma $D no_rd_qual  "wire iss_ok = st ? (h_rd_req && h_rd_gnt) : (m_rd_req && m_rd_gnt);" "wire iss_ok = st ? (h_rd_req && h_rd_gnt) : m_rd_gnt;"
 mut npu_ss_dma $D waddr_iss   "wire e_step = st ? pop : iss_ok;" "wire e_step = iss_ok;"
 mut npu_ss_dma $D wrap_off    "wire e_wrap = (cols != '0) && (col == cols - 1'b1);" "wire e_wrap = (cols != '0) && (col == cols);"
-mut npu_ss_dma $D stride_cols "if (e_wrap) begin col <= '0; erow <= erow + stride; end" "if (e_wrap) begin col <= '0; erow <= erow + 32'(cols); end"
+mut npu_ss_dma $D stride_cols "if (e_wrap) begin col <= '0; erow <= erow + 32'(stride); end" "if (e_wrap) begin col <= '0; erow <= erow + 32'(cols); end"
 mut npu_ss_dma $D fifo_ptr    "if (pop)  f_rd <= f_rd + 1'b1;" "if (pop && !push)  f_rd <= f_rd + 1'b1;"
 mut npu_ss_dma $D pushd_wrong "wire [DW-1:0] push_d = st ? h_rd_data : m_rd_rdata;" "wire [DW-1:0] push_d = st ? h_rd_data : h_rd_data;"
 mut npu_ss_dma $D wr_no_hold  "assign m_wr_req  = act && f_nempty && st;" "assign m_wr_req  = act && f_nempty && st && !iss[0];"

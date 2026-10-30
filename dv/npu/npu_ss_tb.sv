@@ -197,7 +197,7 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
   endfunction
   function automatic void dma_2d(ref npu_tile_cmd_t c);
     if (rnd(40)) begin            // 2D: 列距大於 / 等於 / 小於 (重疊) / 0 (同一列重複) 每列 line 數, 或較大
-      c.b = 26'(rnd(10) ? ur(1, 2) : ur(1, 12));
+      c.b = 26'(rnd(10) ? ur(1, 2) : rnd(8) ? ur(32768, 65535) : ur(1, 12));   // 很寬的列: n < cols, 只有一列
       case (ur(0, 4))
         0: c.c = 26'(int'(c.b[15:0]));
         1: c.c = 26'(int'(c.b[15:0]) + ur(1, 40));

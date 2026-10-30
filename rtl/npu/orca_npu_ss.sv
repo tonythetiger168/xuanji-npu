@@ -132,7 +132,7 @@ module orca_npu_ss
   npu_ss_dma #(.OUT(OUT)) u_dma (
     .clk(d_gclk), .rst_n(rst_n),
     .cmd_valid(g_dma), .cmd_ready(d_cmd_ready), .cmd_st(head.op == NPU_OP_DMA_ST),
-    .cmd_ext(head.ext), .cmd_l2(head.a), .cmd_n(head.k), .cmd_cols(head.b[15:0]), .cmd_stride(32'(head.c)),
+    .cmd_ext(head.ext), .cmd_l2(head.a), .cmd_n(head.k), .cmd_cols(head.b[15:0]), .cmd_stride(head.c),
     .done(d_done), .busy(d_busy),
     .h_rd_req(d_rd_req), .h_rd_line(d_rd_line), .h_rd_gnt(d_rd_gnt), .h_rd_data(a_rd_data),
     .h_wr_req(d_wr_req), .h_wr_line(d_wr_line), .h_wr_data(d_wr_data), .h_wr_gnt(d_wr_gnt),
