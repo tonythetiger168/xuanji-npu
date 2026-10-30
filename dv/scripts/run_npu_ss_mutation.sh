@@ -5,7 +5,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . dv/scripts/npu_cfg.sh
-CFG=${1:-x1}; NBT=${2:-12}
+CFG=${1:-x1}; NBT=${2:-20}
 if [ "$CFG" = all ]; then
   rc=0; for c in nano x1 pro; do bash "$0" $c "$NBT" || rc=1; done; exit $rc
 fi
