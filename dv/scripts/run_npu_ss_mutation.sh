@@ -83,6 +83,7 @@ mut vec_sel      $TILE "cpl_id    <= sel[0] ? c_cpl_id : sel[1] ? dma_id : sel[2
 mut rr4          $TILE "automatic int s = (int'(last) + 1 + i) % 4;" "automatic int s = (int'(last) + 1 + i) % 3;"                          # round-robin 漏掉 VEC
 # (busy 拿掉 v_busy 是等價 mutant: 形式證明的不變式 oc = core 內 + DMA + NOP + (v_busy || vec_cv), v_busy ⇒ oc != 0 ⇒ busy)
 mut arb_nolock   $ARB "wire  r_sel  = r_lock ? r_own : r_pick;" "wire  r_sel  = r_pick;"                                               # 等待中換主端 (違反保持)
+mut arb_nolock_w $ARB "wire  w_sel  = w_lock ? w_own : w_pick;" "wire  w_sel  = w_pick;"                                               # 寫入等待中換主端
 mut arb_gnt_both $ARB "assign rd_gnt    = {m_rd_gnt && r_sel, m_rd_gnt && !r_sel} & rd_req;" "assign rd_gnt    = {m_rd_gnt, m_rd_gnt} & rd_req;"   # grant 給兩個
 mut arb_wdata    $ARB "assign m_wr_data = wr_data[w_sel];" "assign m_wr_data = wr_data[0];"                                          # 寫資料取錯主端
 mut arb_fixed    $ARB "wire  w_pick = (wr_req == 2'b11) ? !w_last : wr_req[1];" "wire  w_pick = wr_req[1];"                            # 固定優先權

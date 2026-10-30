@@ -27,6 +27,20 @@ module npu_l2_arb2_sva #(parameter int DW = 512) (
     c_rd_ov:   cover property (rov && rd_gnt[i]);   // 等待中被搶先一次後拿到 grant
     c_wr_ov:   cover property (wov && wr_gnt[i]);
   end
+  // 鎖定的必要情境: 主端 i 單獨請求且未拿到 grant, 下一拍另一個主端也請求, 而上次拿到 grant 的是 i
+  // (沒有鎖定時 round-robin 會在等待中改選另一個)。f_rl / f_wl 由檢查器從埠記錄。
+  logic f_rl, f_wl;
+  always_ff @(posedge clk or negedge rst_n)
+    if (!rst_n) begin f_rl <= 1'b1; f_wl <= 1'b1; end
+    else begin
+      if (rd_gnt != '0) f_rl <= rd_gnt[1];
+      if (wr_gnt != '0) f_wl <= wr_gnt[1];
+    end
+  // (分開寫, 不放在 generate 迴圈: coverage 會把迴圈內的 cover 合併成一個點)
+  c_rd_lock_0: cover property (rd_req == 2'b01 && !m_rd_gnt ##1 rd_req == 2'b11 && f_rl == 1'b0);
+  c_rd_lock_1: cover property (rd_req == 2'b10 && !m_rd_gnt ##1 rd_req == 2'b11 && f_rl == 1'b1);
+  c_wr_lock_0: cover property (wr_req == 2'b01 && !m_wr_gnt ##1 wr_req == 2'b11 && f_wl == 1'b0);
+  c_wr_lock_1: cover property (wr_req == 2'b10 && !m_wr_gnt ##1 wr_req == 2'b11 && f_wl == 1'b1);
   c_rd_both: cover property (rd_req == 2'b11);
   c_wr_both: cover property (wr_req == 2'b11);
 endmodule

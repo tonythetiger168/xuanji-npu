@@ -11,6 +11,8 @@
 //   效能計數器寫入: 每個 batch 前隨機寫入 (含接近 2^48 的值, 驗證進位與環繞), 檢查之後的增量。
 //   +perf: 效能量測 — 預先載入 2×NCU 個長命令 (K 取 slot 能容納的最大值) 後一次送出,
 //          量測 MAC 利用率 = perf_steps / (perf_busy × NCU), 須 >= +min_util (百分比, 預設 0)。
+//          +perf_rounds=R: 同一組 NCU 個命令 (新的 id) 連續送 R 輪, 量測命令重疊下的穩態利用率
+//          (同一命令同時在兩個 CU 執行時寫入相同的 C, 結果仍可比對)。
 // plusargs: +seed=N  +cmds=N (預設 200)  +perf [+perf_k=K]  +min_util=P  +long
 //=============================================================================
 module npu_core_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB = 4, parameter int DEPTH = 1024);
@@ -51,6 +53,7 @@ module npu_core_tb #(parameter int N = 8, parameter int NCU = 4, parameter int N
   bit rst_fired;
   int min_util = 0;
   int cpl_bp = 0;                       // cpl_ready 回壓機率 (%)
+  bit perf_mode = 0;                    // 效能量測中: 完成檢查不做 bank hammer
 
   function automatic int ur(int lo, int hi); return lo + int'($urandom_range(hi - lo, 0)); endfunction
   function automatic logic [7:0] pick(int mode);
@@ -152,7 +155,7 @@ module npu_core_tb #(parameter int N = 8, parameter int NCU = 4, parameter int N
     if (!inflight.exists(id)) begin $display("ERROR: completion for unknown / duplicate id %0d", id); n_err++; return; end
     r = inflight[id];
     // bank hammer: 偶爾連續多拍讀同一個 line (同一 bank), 檢查其他主端不會被餓死 (有界等待 / round-robin)
-    if (ur(0, 3) == 0) repeat (ur(4, 40)) host_read(r.c, ln);
+    if (!perf_mode && ur(0, 3) == 0) repeat (ur(4, 40)) host_read(r.c, ln);
     for (int l = 0; l < CL; l++) begin
       host_read(r.c + 26'(l), ln);
       for (int e = 0; e < 16 && l * 16 + e < N * N; e++)
@@ -189,7 +192,19 @@ module npu_core_tb #(parameter int N = 8, parameter int NCU = 4, parameter int N
   endtask
   task automatic consumer(int n);
     int got = 0;
+    logic [7:0] later [$];                    // 效能量測: 完成時只記錄 id, 結束後才讀回 C 比對 (不佔 L2 / 不回壓)
     process::self().srandom(seed * 7919 + n_batch * 31 + 2);
+    if (perf_mode) begin
+      cpl_ready = 1'b1;
+      while (got < n) begin
+        #4;
+        if (cpl_valid) begin later.push_back(cpl_id); got++; end
+        @(posedge clk); #1;
+      end
+      cpl_ready = 1'b0;
+      foreach (later[i]) check_cpl(later[i]);
+      return;
+    end
     while (got < n) begin
       if (ur(0, 99) == 0) begin               // 偶爾長時間不收完成 (多個 / 全部 CU 的完成同時待回報)
         cpl_ready = 1'b0; repeat (ur(50, 2000)) @(posedge clk); #1;
@@ -328,6 +343,7 @@ module npu_core_tb #(parameter int N = 8, parameter int NCU = 4, parameter int N
   always @(posedge clk) if (rst_n) begin ls_cyc += $countones(dut.l2_ls); all_cyc++; end
   task automatic perf_run();
     rec_t r [$]; logic [7:0] ids [$];
+    int rounds = 1;
     longint ks = 0, b0, s0, l0, a0;
     real util;
     int ns = NSLOT / NCU;                                 // 每個命令佔 NSLOT/NCU 個 slot: K 可到 4000
@@ -335,15 +351,24 @@ module npu_core_tb #(parameter int N = 8, parameter int NCU = 4, parameter int N
     int pk;
     if (k > 4000) k = 4000;
     if ($value$plusargs("perf_k=%d", pk) && pk < k) k = pk;   // +perf_k=K: 量測較短 K 的利用率
-    for (int c = 0; c < NCU; c++) begin rec_t x; logic [7:0] id; prepare(k, x, id, ns); r.push_back(x); ids.push_back(id); ks += k; end
+    void'($value$plusargs("perf_rounds=%d", rounds));
+    perf_mode = 1;
+    for (int c = 0; c < NCU; c++) begin rec_t x; logic [7:0] id; prepare(k, x, id, ns); r.push_back(x); ids.push_back(id); end
+    ks = longint'(k) * NCU * rounds;
     b0 = perf_busy; s0 = perf_steps; l0 = ls_cyc; a0 = all_cyc;
     fork
-      foreach (r[c]) issue(r[c], ids[c]);
-      consumer(r.size());
+      for (int t = 0; t < rounds; t++)
+        foreach (r[c]) begin
+          logic [7:0] id;
+          if (t == 0) id = ids[c];
+          else do id = 8'($urandom()); while (inflight.exists(id) || pend_ids.exists(id));
+          issue(r[c], id);
+        end
+      consumer(r.size() * rounds);
     join
     util = 100.0 * real'(perf_steps - s0) / (real'(perf_busy - b0) * NCU);
     $display("PERF: N=%0d NCU=%0d NB=%0d K=%0d cmds=%0d busy_cycles=%0d steps=%0d MAC/cycle=%0.1f (peak %0d) utilization=%0.1f%%",
-             N, NCU, NB, k, r.size(), perf_busy - b0, perf_steps - s0,
+             N, NCU, NB, k, r.size() * rounds, perf_busy - b0, perf_steps - s0,
              real'(perf_steps - s0) * N * N / real'(perf_busy - b0), N * N * NCU, util);
     $display("PERF_LS: bank light-sleep ratio during GEMM = %0.1f%%", 100.0 * real'(ls_cyc - l0) / (real'(all_cyc - a0) * NB));
     if (perf_steps - s0 != ks) begin $display("ERROR: perf_steps %0d != sum K %0d", perf_steps - s0, ks); n_err++; end

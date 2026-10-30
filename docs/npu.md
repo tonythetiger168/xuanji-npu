@@ -19,7 +19,7 @@
 CI 以 95% 作為效能回歸門檻 (`dv/scripts/npu_cfg.sh`)。
 
 短 K 時固定開銷 (start、讀第一對 line、排空 2N−1 拍、輸出 N 列) 佔比上升, 陣列越大越明顯。
-量測 (`npu_core_tb +perf +perf_k=K`, 每個 CU 一個命令同時執行):
+單一波次 (`npu_core_tb +perf +perf_k=K`, 每個 CU 一個命令同時執行; 開銷無法被下一個命令遮蓋):
 
 | K | X1-Nano | X1 | X1-Pro |
 |---|---|---|---|
@@ -30,7 +30,20 @@ CI 以 95% 作為效能回歸門檻 (`dv/scripts/npu_cfg.sh`)。
 
 (v6.3.11 加入 L2 light sleep 後重新量測; 之前 X1 為 64.6 / 88.6 / 96.8 / 99.1%、Pro 為 46.4 / 77.8 / 93.4 / 98.2%)
 
-實際模型需要編譯器把 GEMM 切成大 K 的 tile; 改善小 K 的利用率 (例如前一個命令輸出時預取下一個命令) 是下一步。
+連續命令 (v6.3.12 命令重疊, 見「架構 / 命令重疊」): `+perf_rounds=R` 把同一組 NCU 個命令連續送 R 輪
+(完成時只記錄 id, 結束後才讀回 C 比對, 不以 host 讀取佔用 L2 或回壓完成)。前一個命令排空 / 輸出 / 寫回時下一個命令
+已在預取與餵入, 固定開銷大部分被遮蓋。同一個 TB 量測 v6.3.11 RTL (不重疊) 作為對照:
+
+| K | 輪數 R | X1-Nano | X1 | X1-Pro | v6.3.11 X1 / Pro (同 TB) |
+|---|---|---|---|---|---|
+| 64 | 8 | 93.4% | 89.8% | 83.4% | 65.9% / 47.6% |
+| 64 | 32 | 95.0% | 94.0% | **91.7%** | 66.0% / 48.0% |
+| 256 | 8 | 98.3% | 97.2% | 95.1% | 88.7% / 78.4% |
+| 256 | 32 | 98.7% | 98.4% | 97.6% | 88.9% / 78.8% |
+| 1024 | 8 | 99.6% | 99.3% | 98.7% | — |
+| 1024 | 32 | 99.7% | 99.6% | 99.3% | — |
+
+(單一波次的數字不變: 第一個命令的開銷沒有前一個命令可以重疊。)
 
 **尚未具備** (列為下一步, 不對外宣稱): BF16 / FP8、稀疏、卷積 / attention 專用資料流、SoC 的 APB 互連與 NoC / DRAM 連接
 (NPU Subsystem 在 SoC 頂層的命令與外部記憶體埠目前接死)、編譯器 / runtime。
@@ -131,16 +144,16 @@ bash dv/scripts/run_formal_mutation.sh   # 形式 mutation: 植入錯誤的 RTL 
 | `npu_ss_dma` | OUT = 4, DW = 8 (計數器為實際 16 bit) | 計數順序 (寫 ≤ 讀 ≤ n)、在途 ≤ OUT、FIFO 佔用 / 指標、done 恰在第 n 個寫入、有額度就發讀、請求等待 grant 時保持、done 為單拍; **資料完整**: 任選一個 line index (anyconst), 從輸入埠記錄的資料必須等於寫出的資料 | k-induction 證明通過 (深度 5); cover 3 / 3 可達; 形式 mutation 7 / 7 無法證明 |
 | `orca_npu_ss` (前端) | QD = 4, NCU = 2; npu_core / DMA / ICG 以契約替身取代 (`formal/orca_npu_ss/stubs.sv`) | 命令守恆 (接受 = 佇列中 + 已分派; 已分派 = 未完成 + 已載入; 已載入 = 已輸出 + 輸出暫存中)、未完成數 = core 內 + DMA + NOP 且 ≤ 上限、等待旗標 (oc = 0 才分派)、可分派時必分派、K = 0 不送 core、DMA / NOP 完成槽的 id 不被覆蓋、完成合併選一個有效來源且為**確切 round-robin** (檢查器自己記錄上次選中者)、輸出等待時保持、core 的 id 原樣輸出、busy / irq、DMA 時脈閘控安全 | k-induction 證明通過 (深度 6); cover 4 / 4 可達; 形式 mutation 14 / 14 無法證明 |
 | `npu_l2_xbar` | NM = 4, NW = 3, NB = 2, DEPTH = 2, LDW = 8 (新增參數 LDW, 預設 512); light sleep LS_IDLE = 3、LS_WAKE = 2 | grant 必有請求、每個 bank 每拍最多一讀一寫 grant、醒著時**確切 round-robin** 且 work-conserving (檢查器從 gnt 埠記錄得主)、等待 ≤ NM − 1 + LS_WAKE + 1 拍; light sleep: 檢查器由請求埠重算每個 bank 的睡眠 / 喚醒狀態, `bank_ls` 相符、睡眠 / 喚醒中不給 grant; **資料**: 任選一個 line (anyconst), 讀到的必是最後寫入的資料 | k-induction 證明通過 (深度 10); 拿掉輔助不變式的 ABC BMC 30 拍通過; cover 5 / 5 可達; 形式 mutation 13 / 13 無法證明 (含 light sleep 5) |
-| `npu_core` (控制) | QD = 4, NCU = 3; CU / xbar / ICG 以契約替身取代 (`formal/npu_core/stubs.sv`) | 命令守恆 (接受 − 輸出 = 未完成) 且上限 QD + NCU + 1 為緊; 輸出的 id 必是尚未完成的命令 (不捏造、不重複; host 契約: id 不與未完成者重複); 分派最多一個 CU、只給可用的 CU (閒置、無待回報、不在 done 那拍)、給編號最小者、可分派時必分派; 輸出等待時保持; **完成仲裁公平**: 待回報期間被略過 ≤ NCU − 1 次; busy / cmd_ready | k-induction 證明通過 (深度 4, 約 9 分鐘); cover 4 / 4 可達; 形式 mutation 9 / 9 無法證明 |
+| `npu_core` (控制) | QD = 4, NCU = 2; CU / xbar / ICG 以契約替身取代 (`formal/npu_core/stubs.sv`; CU 的契約以 assume 寫在 npu_core 的 FORMAL 區塊) | 命令守恆 (接受 − 輸出 = 未完成 = 佇列 + 各 CU 持有 + 待回報槽 + 輸出暫存) 且上限 QD + 4·NCU + 1 為緊; 輸出的 id 必是尚未完成的命令 (不捏造、不重複; host 契約: id 不與未完成者重複); 檢查器從埠記錄每個 CU 持有的 tag 佇列, 待回報槽的 tag = CU 完成握手帶回的 tag; 分派最多一個 CU、只給可接受命令的 CU、優先完全閒置者中編號最小者、否則可接受者中編號最小者、可分派時必分派; done_ready = 待回報槽空; 輸出等待時保持; **完成仲裁公平**: 待回報期間被略過 ≤ NCU − 1 次; busy / cmd_ready | k-induction 證明通過 (深度 4, 約 17 分鐘); cover 6 / 6 可達; 形式 mutation 11 / 11 無法證明 |
 
 替身只遵守介面契約 (npu_core: 容量 CQD + NCU + 1、只在有未回報命令時回報、等待時保持; DMA: idle 才接受、忙碌中某拍 done;
-CU: idle 才接受、done 與回到 idle 同拍; xbar: 只 grant 有請求者)。被替身取代的區塊本身都另有證明或模擬驗證:
+CU (v6.3.12): 最多持有 3 個命令、閒置時可接受、busy = 持有命令、done 依受理順序帶回 tag 並保持到 done_ready; xbar: 只 grant 有請求者)。被替身取代的區塊本身都另有證明或模擬驗證:
 DMA、xbar、npu_core 見上表; CU (`npu_gemm_cu`) 與 `npu_mma` 的運算由 NPU flow (CRV + coverage 100% + mutation) 驗證。
 時脈閘控在 `npu_core` 證明中以直通替身表示, 其安全性由模擬 SVA (未閘控時脈取樣) 與 `orca_npu_ss` 的 DMA 閘控性質涵蓋。
 
 DW / LDW = 8 的資料完整性推廣到 512: DMA 與 xbar 不運算資料, 只依位置搬移, 每個 bit 獨立。
 
-形式 mutation 合計 43 / 43 無法證明 (DMA 7、前端 14、xbar 13、npu_core 9)。只有證明實際失敗 (FAIL / UNKNOWN) 才算抓到;
+形式 mutation 中 npu_core 為 11 / 11 (v6.3.12 命令重疊後重寫; 其他區塊見上表)。只有證明實際失敗 (FAIL / UNKNOWN) 才算抓到;
 逾時或工具錯誤記為 INCONCLUSIVE 並使流程失敗。xbar 原本的 `gnt_no_req` 是等價 mutant (grant 得主必是請求者, 拿掉 req 條件不改行為),
 已換成 `gnt_all`。
 
@@ -158,19 +171,22 @@ DW / LDW = 8 的資料完整性推廣到 512: DMA 與 xbar 不運算資料, 只�
 - 公平性性質的歸納需要輔助不變式 (已略過次數 + 與上次得主的循環距離 ≤ NCU)。
 - 512 bit 資料讓 xbar 證明數分鐘不收斂 → 新增 LDW 參數以 8 bit 證明。
 - 形式 mutation 腳本原本把「不是 PASS」都算抓到 (逾時也算) → 只有 FAIL / UNKNOWN 算。
+- v6.3.12 npu_core: CU 可持有 3 個命令後, 未完成上限變成 QD + 4·NCU + 1; NCU = 3 時需要 5 bit id 空間, 計數與兩兩相異
+  (pigeonhole 型) 的歸納 z3 40 分鐘、ABC PDR frame 4 需 534 s 都不收斂 → 證明改用 NCU = 2 (上限 13, 4 bit id 空間;
+  id 寬度由參數推得); 函式 `f_ok` 原本讀取模組訊號 `f_os` (重犯上面那一條) → 改為引數傳入。
 
 ## 架構
 
 ```
-host 命令 ──► 命令佇列 (QD=4) ──► 分派 (編號最小的空閒 CU) ──► CU 0 .. NCU-1 ──► 完成佇列 ──► host
+host 命令 ──► 命令佇列 (QD=4) ──► 分派 (優先閒置 CU, 其次可重疊的 CU) ──► CU 0 .. NCU-1 ──► 完成佇列 ──► host
                                                                     │ 讀 A/B、寫 C
 host L2 埠 ─────────────────────────────────────────────► npu_l2_xbar (NB bank, 每 bank 1R1W, round-robin)
 ```
 
 | 模組 | 檔案 | 說明 |
 |---|---|---|
-| npu_mma | `rtl/npu/npu_mma.sv` | N×N output-stationary systolic array, INT8 (A / B 各自可選有號 / 無號) × INT8 → INT32 |
-| npu_gemm_cu | `rtl/npu/npu_gemm_cu.sv` | 一個命令 = 從 L2 讀 A / B → npu_mma → 寫回 C; 2 項 line buffer 預取 |
+| npu_mma | `rtl/npu/npu_mma.sv` | N×N output-stationary systolic array, INT8 (A / B 各自可選有號 / 無號) × INT8 → INT32; tile 管線化 (v6.3.12) |
+| npu_gemm_cu | `rtl/npu/npu_gemm_cu.sv` | 一個命令 = 從 L2 讀 A / B → npu_mma → 寫回 C; 2 項 line buffer 預取; 命令重疊, 最多持有 3 個命令 (v6.3.12) |
 | npu_l2_xbar | `rtl/npu/npu_l2_xbar.sv` | NB bank (line 交錯) 的共用 L2 + crossbar, 讀 / 寫各自 round-robin |
 | npu_core | `rtl/npu/npu_core.sv` | 命令佇列、分派、完成佇列 (輸出暫存)、效能計數器 (可寫入)、CU 時脈閘控 |
 | 產品參數 | `rtl/npu/npu_products.sv`, `dv/scripts/npu_cfg.sh` | 三款組態 |
@@ -190,6 +206,21 @@ K = 1..65535。完成順序不保證 (以 id 對應); host 不得在命令執行
 第 i 列的 A 經 i 級 skew 延遲線從左邊進入, 第 j 欄的 B 經 j 級延遲線從上方進入, 兩者在
 t = k + i + j 同時抵達 PE[i][j]。因為同時抵達, 每個 PE 只需要一個 valid token (SVA `a_tok_diag` 檢查此前提)。
 空拍不產生 token。流程: start → K 次輸入握手 → 排空 2N−1 拍 → 逐列輸出 (out_valid / out_ready)。
+
+tile 管線化 (v6.3.12): 輸入端 (start / 輸入握手) 與輸出端 (排空 / 輸出) 是兩個 FSM。token 帶旗標
+{first, last, a 有號, b 有號} 經過 skew 與陣列: first 讓 PE 以本步乘積取代累加值 (不需要全陣列清除),
+last 讓 PE 把累加結果存入結果暫存 `res` (輸出從 `res` 讀, 不受下一個 tile 影響)。最後一步餵入後輸入端立刻閒置
+(`in_idle`), 下一個 tile 可在前一個排空 / 輸出時開始; 唯一的限制是下一個 tile 的最後一步要等前一個輸出完
+(否則 `res` 會被覆蓋) — 此時 `in_ready` 對 `in_last` 拉低。SVA: 同一步 k 的旗標在陣列中一致 (`a_fl_diag`)、
+輸出期間陣列內沒有屬於本 tile 的 last token (`a_drained`)、輸出期間 `res` 不變 (`a_res_hold`)。
+
+### 命令重疊 (npu_gemm_cu / npu_core, v6.3.12)
+
+CU 的輸入端 (取線器 + 餵入器) 與寫回器分開: 最後一個 k 步餵入後, CU 立刻可接受下一個命令並開始預取, 寫回器同時把
+前一個 tile 的 C 寫回。命令的 {C line, tag} 依序經過三段: 輸入端 → 等待輸出 → 寫回器, 所以一個 CU 最多持有 3 個命令,
+依受理順序完成。命令的 id 當作 tag 隨命令進入 CU, 完成時以 `done` (保持到 `done_ready`) + `done_tag` 帶回;
+npu_core 的待回報槽空時才接受 (`done_ready = !cpl_pend`), 所以兩個完成不會互相覆蓋。分派優先給完全閒置的 CU,
+沒有時才給輸入端閒置、前一個命令仍在輸出的 CU (否則所有命令都會重疊到 CU 0)。npu_core 的外部介面不變。
 
 ### 預取 (npu_gemm_cu)
 

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Xuanji (原 ORCA v6.3) - NPU 子系統 (v6.3.8)
+// Xuanji (原 ORCA v6.3) - NPU 子系統 (v6.3.12)
 `include "orca_pkg.sv"
 
 // npu_core: NCU 個 GEMM 計算單元 (各含 N×N npu_mma) + NB bank 的共用 L2 + 命令佇列 / 分派 / 完成佇列。
@@ -11,9 +11,11 @@
 //
 // host 介面:
 //   命令: cmd_valid / cmd_ready + {id, A / B / C line 位址, K, 有號性} (語意見 npu_gemm_cu), 先進 QD 項佇列,
-//         依序分派給編號最小的閒置 CU; 不同命令可同時在不同 CU 執行, 完成順序不保證。
+//         依序分派: 優先給編號最小的完全閒置 CU, 沒有時給編號最小的可接受命令 CU (輸入端閒置, 前一個命令
+//         還在輸出 / 寫回: 命令重疊, v6.3.12); 不同命令可同時在不同 CU 執行, 完成順序不保證。
+//         命令的 id 當作 tag 隨命令進入 CU, 完成時由 CU 帶回 (一個 CU 最多持有 3 個, 依序完成)。
 //   完成: cpl_valid / cpl_ready + cpl_id (輸出暫存, 等待 ready 期間保持); 每個 CU 一個待回報槽,
-//         多個 CU 同時完成時 round-robin 進入輸出暫存。CU 的完成移入輸出暫存前不會再分派新命令給它。
+//         CU 的 done 保持到槽空 (done_ready); 多個槽同時待回報時 round-robin 進入輸出暫存。
 //   L2:   host 為 xbar 的最後一個主端 (載入 A / B、讀回 C); host 不得在命令執行期間存取其 A / B / C 區域。
 //   效能計數: perf_busy (任一 CU 忙碌的拍數)、perf_steps (所有 CU 餵入的 k 步總和; MAC 數 = steps × N²);
 //            perf_wr 時兩者載入 perf_wdata_* (該拍不計數)。
@@ -84,13 +86,16 @@ module npu_core
 
   // ---------------- 分派 ----------------
   // 隊首命令分派給編號最小的空閒 CU (取最低位: free & -free)
-  logic [NCU-1:0] cu_ready, cu_done, cu_feed, cu_v, cu_free, cpl_pend, first_free;
-  logic [NCU-1:0][7:0] cu_tag;
+  logic [NCU-1:0] cu_ready, cu_busy, cu_done, cu_dack, cu_feed, cu_v, cu_free, cu_idle, cu_cand, cpl_pend, first_free;
+  logic [NCU-1:0][7:0] cu_dtag, cpl_tag;
   logic           sel_v;
-  // done 脈衝當拍也不可分派: 待回報槽在下一拍才設定, 若同拍分派, 新命令的 tag 會蓋掉尚未回報的 id
-  assign cu_free    = cu_ready & ~cpl_pend & ~cu_done;
-  assign first_free = cu_free & (~cu_free + 1'b1);
+  // 可接受命令的 CU (cu_free) 中優先選完全閒置者 (cu_idle), 讓工作分散到各 CU 而不是全部重疊在 CU 0
+  assign cu_free    = cu_ready;
+  assign cu_idle    = cu_ready & ~cu_busy;
+  assign cu_cand    = (cu_idle != '0) ? cu_idle : cu_free;
+  assign first_free = cu_cand & (~cu_cand + 1'b1);
   assign sel_v      = (cu_free != '0);
+  assign cu_dack    = ~cpl_pend;               // 待回報槽空時接受 CU 的完成
   assign cu_v       = q_head_v ? first_free : '0;
   wire q_pop = q_head_v && sel_v;
 
@@ -116,8 +121,8 @@ module npu_core
   logic [NW-1:0][511:0] wr_data;
   logic [NCU-1:0]       cu_en, cu_rd;             // cu_rd: CU 任一讀取埠有請求
   for (genvar i = 0; i < NCU; i++) begin : g_cu
-    // CU 時脈致能: 忙碌、本拍分派 (CU 在 idle 取樣命令)、或 done 脈衝尚待清除
-    assign cu_en[i] = !cu_ready[i] || cu_v[i] || cu_done[i];
+    // CU 時脈致能: 持有命令 (含 done 等待握手) 或本拍分派 (CU 在輸入端閒置時取樣命令)
+    assign cu_en[i] = cu_busy[i] || cu_v[i];
     logic gclk;
     clock_gate u_icg (.clk(clk), .en(cu_en[i] || !rst_n), .test_en(test_en), .clk_out(gclk));
     logic [RP-1:0]        c_rq, c_rg;
@@ -133,8 +138,8 @@ module npu_core
       .clk(gclk), .rst_n(rst_n), .test_en(test_en),
       .cmd_valid(cu_v[i]), .cmd_ready(cu_ready[i]),
       .cmd_a_line(head.a), .cmd_b_line(head.b), .cmd_c_line(head.c), .cmd_k(head.k),
-      .cmd_a_signed(head.sa), .cmd_b_signed(head.sb),
-      .done(cu_done[i]), .feeding(cu_feed[i]),
+      .cmd_a_signed(head.sa), .cmd_b_signed(head.sb), .cmd_tag(head.id),
+      .done(cu_done[i]), .done_ready(cu_dack[i]), .done_tag(cu_dtag[i]), .busy(cu_busy[i]), .feeding(cu_feed[i]),
       .rd_req(c_rq), .rd_line(c_rl), .rd_gnt(c_rg), .rd_data(c_rd),
       .wr_req(wr_req[i]), .wr_line(wr_line[i]), .wr_data(wr_data[i]), .wr_gnt(wr_gnt[i]));
   end
@@ -177,106 +182,154 @@ module npu_core
   logic [7:0] cpl_tag_sel;
   always_comb begin
     cpl_tag_sel = '0;
-    for (int i = 0; i < NCU; i++) cpl_tag_sel |= cpl_oh[i] ? cu_tag[i] : 8'h00;
+    for (int i = 0; i < NCU; i++) cpl_tag_sel |= cpl_oh[i] ? cpl_tag[i] : 8'h00;
   end
 
+  // 待回報槽的 tag: 只在完成握手拍更新 (每個 CU 一個 always_ff; 寫在迴圈裡時 Verilator 的 expression coverage 不計數)
+  for (genvar i = 0; i < NCU; i++) begin : g_ctag
+    always_ff @(posedge clk or negedge rst_n)
+      if (!rst_n) cpl_tag[i] <= '0;
+      else if (cu_done[i] && !cpl_pend[i]) cpl_tag[i] <= cu_dtag[i];
+  end
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
-      cpl_pend <= '0; cu_tag <= '0; cpl_valid <= 1'b0; cpl_id <= '0;
+      cpl_pend <= '0; cpl_valid <= 1'b0; cpl_id <= '0;
       perf_busy <= '0; perf_steps <= '0;
     end else begin
-      for (int i = 0; i < NCU; i++) if (cu_v[i]) cu_tag[i] <= head.id;
-      cpl_pend <= (cpl_pend & ~(cpl_load ? cpl_oh : '0)) | cu_done;
+      // 完成握手 = done && 待回報槽空 (cu_dack = ~cpl_pend; 直接寫 ~cpl_pend, 不出現 cpl_pend = 0 且 dack = 0 的組合)
+      cpl_pend <= (cpl_pend & ~(cpl_load ? cpl_oh : '0)) | (cu_done & ~cpl_pend);
       if (cpl_load) begin cpl_valid <= 1'b1; cpl_id <= cpl_tag_sel; end
       else if (cpl_ready) cpl_valid <= 1'b0;
       if (perf_wr) begin
         perf_busy <= perf_wdata_busy; perf_steps <= perf_wdata_steps;
       end else begin
-        if (!(&cu_ready)) perf_busy <= perf_busy + 1'b1;
+        if (cu_busy != '0) perf_busy <= perf_busy + 1'b1;
         perf_steps <= perf_steps + 48'($countones(cu_feed));
       end
     end
   end
-  assign busy = !(&cu_ready) || (|cpl_pend) || cpl_valid || q_head_v;
+  assign busy = (|cu_busy) || (|cpl_pend) || cpl_valid || q_head_v;
 
 `ifdef FORMAL
-  // ---------------- 形式驗證 (formal/npu_core: CU / xbar / ICG 為 stubs.sv 的契約替身; 模擬時不編入) ----------------
-  // host 契約: id 不與尚未完成的命令重複 (檢查器用 4 bit id 空間; 未完成最多 QD + NCU + 1 個 < 16)
+  // ---------------- 形式驗證 (formal/npu_core: CU / xbar / ICG 為 stubs.sv 的替身; 模擬時不編入) ----------------
+  // CU 的介面契約在此以 assume 表達 (stub 的輸出全部任意); 檢查器從埠記錄每個 CU 持有的 tag 佇列 f_ct / f_cn
+  // (分派握手 push、完成握手 pop), 不引用 CU 內部。
+  // host 契約: id 不與尚未完成的命令重複; 檢查器用 FIW bit id 空間 (未完成最多 QD + 4·NCU + 1 個 < 2^FIW;
+  // 空間越大證明越難 — 計數與兩兩不同是 pigeonhole 型的推理)
+  localparam int FIW = $clog2(QD + 4 * NCU + 2);
   initial assume (!rst_n);
   logic [7:0]  f_acc, f_out;
-  logic [15:0] f_os;                       // 已接受、尚未輸出的 id (由埠記錄)
-  always @(*) if (rst_n && cmd_valid) assume (cmd_id[7:4] == 4'h0 && !f_os[cmd_id[3:0]]);
-  // CU 介面契約 (npu_gemm_cu: done 與回到 G_IDLE 同拍): done 那拍 cmd_ready = 1
-  always @(*) if (rst_n) for (int i = 0; i < NCU; i++) begin assume (!cu_done[i] || cu_ready[i]); end
+  logic [(1<<FIW)-1:0] f_os;               // 已接受、尚未輸出的 id (由埠記錄)
+  logic [NCU-1:0][2:0][7:0] f_ct;          // CU i 持有的命令 tag (依受理順序)
+  logic [NCU-1:0][1:0]      f_cn;          // CU i 持有的命令數 (0..3)
+  // (Yosys 不正確處理函式內讀取的模組訊號: f_os 以引數傳入)
+  function automatic logic f_ok(logic [(1<<FIW)-1:0] os, logic [7:0] id); return (id >> FIW) == '0 && os[FIW'(id)]; endfunction
+  always @(*) if (rst_n && cmd_valid) assume ((cmd_id >> FIW) == '0 && !f_os[FIW'(cmd_id)]);
   always @(posedge clk or negedge rst_n)
-    if (!rst_n) begin f_acc <= '0; f_out <= '0; f_os <= '0; end
+    if (!rst_n) begin f_acc <= '0; f_out <= '0; f_os <= '0; f_ct <= '0; f_cn <= '0; end
     else begin
       f_acc <= f_acc + 8'(q_push);
       f_out <= f_out + 8'(cpl_valid && cpl_ready);
-      f_os  <= (f_os & ~((cpl_valid && cpl_ready) ? 16'(1) << cpl_id[3:0] : 16'h0))
-                     | (q_push ? 16'(1) << cmd_id[3:0] : 16'h0);
+      f_os  <= (f_os & ~((cpl_valid && cpl_ready) ? (1<<FIW)'(1) << FIW'(cpl_id) : '0))
+                     | (q_push ? (1<<FIW)'(1) << FIW'(cmd_id) : '0);
+      for (int i = 0; i < NCU; i++) begin
+        automatic logic [2:0][7:0] t = f_ct[i];
+        automatic logic [1:0] n = f_cn[i];
+        if (cu_done[i] && cu_dack[i]) begin t = {8'h00, t[2:1]}; n = n - 1'b1; end
+        if (cu_v[i] && cu_ready[i]) begin t[n] = head.id; n = n + 1'b1; end
+        f_ct[i] <= t; f_cn[i] <= n;
+      end
     end
-  // 未完成項目: 佇列中 + CU 執行中 (含 done 那拍) + 待回報槽 + 輸出暫存
-  logic [NCU-1:0] f_cl;                    // CU 持有一個未完成命令
-  logic [7:0]     f_live;
+  // CU 介面契約 (npu_gemm_cu, 由其 SVA 在模擬中檢查): 最多持有 3 個命令; 閒置時可接受; busy = 持有命令;
+  // done 依受理順序帶回 tag 且保持到 done_ready
+  logic f_past;
+  initial f_past = 1'b0;
+  always @(posedge clk) f_past <= 1'b1;
+  always @(*) if (rst_n) for (int i = 0; i < NCU; i++) begin
+    assume (cu_busy[i] == (f_cn[i] != 2'd0));
+    if (f_cn[i] == 2'd0) begin assume (cu_ready[i]); end
+    if (cu_ready[i]) begin assume (f_cn[i] != 2'd3); end
+    if (cu_done[i]) begin assume (f_cn[i] != 2'd0 && cu_dtag[i] == f_ct[i][0]); end
+  end
+  always @(posedge clk) if (f_past && rst_n && $past(rst_n)) for (int i = 0; i < NCU; i++) begin
+    if ($past(cu_done[i] && !cu_dack[i])) begin assume (cu_done[i] && cu_dtag[i] == $past(cu_dtag[i])); end
+  end
+  // 未完成項目: 佇列中 + CU 持有 + 待回報槽 + 輸出暫存
+  logic [7:0] f_live;
   always @(*) begin
     f_live = 8'(q_cnt) + 8'(cpl_valid);
-    for (int i = 0; i < NCU; i++) begin
-      f_cl[i] = !cu_ready[i] || cu_done[i] || cpl_pend[i];
-      f_live  = f_live + 8'(f_cl[i]);
-    end
+    for (int i = 0; i < NCU; i++) f_live = f_live + 8'(f_cn[i]) + 8'(cpl_pend[i]);
   end
   always @(*) if (rst_n) begin
     // 命令守恆 (接受 - 輸出 = 未完成) 與上限
     assert (8'(f_acc - f_out) == f_live);
-    assert (int'(f_live) <= QD + NCU + 1);
+    assert (int'(f_live) <= QD + 4 * NCU + 1);
     assert (q_cnt <= (QW+1)'(QD));
     assert (QW'(q_wr - q_rd) == QW'(q_cnt));
     assert ($countones(f_os) == int'(f_live));
     // 輸出的 id 必須是未完成的命令 (不捏造、不重複)
-    if (cpl_valid) begin assert (f_os[cpl_id[3:0]] && cpl_id[7:4] == 4'h0); end
+    if (cpl_valid) begin assert (f_ok(f_os, cpl_id)); end
     // 所有未完成項目的 id 都在 f_os 中且兩兩不同 (歸納輔助; 與上面的計數合起來 = 不遺失)
     for (int s = 0; s < QD; s++)
       if (s < int'(q_cnt)) begin
         // 索引先存進 QW 位元變數才會模 QD 環繞 (寫在索引運算式裡, 轉換後會被 32 位元語境放寬而越界)
         automatic logic [QW-1:0] ix = q_rd + QW'(unsigned'(s));
-        assert (f_os[q[ix].id[3:0]] && q[ix].id[7:4] == 4'h0);
+        assert (f_ok(f_os, q[ix].id));
         if (cpl_valid) begin assert (q[ix].id != cpl_id); end
         for (int t = s + 1; t < QD; t++)
           if (t < int'(q_cnt)) begin
             automatic logic [QW-1:0] jx = q_rd + QW'(unsigned'(t));
             assert (q[ix].id != q[jx].id);
           end
-        for (int i = 0; i < NCU; i++) if (f_cl[i]) begin assert (q[ix].id != cu_tag[i]); end
+        for (int i = 0; i < NCU; i++) begin
+          if (cpl_pend[i]) begin assert (q[ix].id != cpl_tag[i]); end
+          for (int a = 0; a < 3; a++) if (a < int'(f_cn[i])) begin assert (q[ix].id != f_ct[i][a]); end
+        end
       end
     for (int i = 0; i < NCU; i++) begin
-      // CU 狀態互斥: 執行中 (含 done 那拍) 與待回報至多一個
-      assert (!(cpl_pend[i] && (!cu_ready[i] || cu_done[i])));
-      if (f_cl[i]) begin
-        assert (f_os[cu_tag[i][3:0]] && cu_tag[i][7:4] == 4'h0);
-        if (cpl_valid) begin assert (cu_tag[i] != cpl_id); end
-        for (int j = i + 1; j < NCU; j++) if (f_cl[j]) begin assert (cu_tag[i] != cu_tag[j]); end
+      if (cpl_pend[i]) begin
+        assert (f_ok(f_os, cpl_tag[i]));
+        if (cpl_valid) begin assert (cpl_tag[i] != cpl_id); end
+        for (int j = 0; j < NCU; j++) begin
+          if (j > i && cpl_pend[j]) begin assert (cpl_tag[i] != cpl_tag[j]); end
+          for (int a = 0; a < 3; a++) if (a < int'(f_cn[j])) begin assert (cpl_tag[i] != f_ct[j][a]); end
+        end
       end
+      for (int a = 0; a < 3; a++)
+        if (a < int'(f_cn[i])) begin
+          assert (f_ok(f_os, f_ct[i][a]));
+          if (cpl_valid) begin assert (f_ct[i][a] != cpl_id); end
+          for (int b = a + 1; b < 3; b++) if (b < int'(f_cn[i])) begin assert (f_ct[i][a] != f_ct[i][b]); end
+          for (int j = i + 1; j < NCU; j++)
+            for (int b = 0; b < 3; b++) if (b < int'(f_cn[j])) begin assert (f_ct[i][a] != f_ct[j][b]); end
+        end
     end
-    // 分派: 最多一個 CU、只給可用的 CU (閒置、沒有待回報、不在 done 那拍)、給編號最小者; 有命令且有可用 CU 必分派
+    // 分派: 最多一個 CU、只給可接受命令的 CU、有完全閒置者時給其中編號最小者, 否則給可接受者中編號最小者;
+    // 有命令且有可接受的 CU 必分派
     assert ($onehot0(cu_v));
     for (int i = 0; i < NCU; i++)
       if (cu_v[i]) begin
-        assert (cu_ready[i] && !cu_done[i] && !cpl_pend[i] && q_head_v);
-        for (int j = 0; j < i; j++) begin assert (!(cu_ready[j] && !cu_done[j] && !cpl_pend[j])); end
+        assert (cu_ready[i] && q_head_v);
+        if ((cu_ready & ~cu_busy) != '0) begin
+          assert (!cu_busy[i]);
+          for (int j = 0; j < i; j++) begin assert (!(cu_ready[j] && !cu_busy[j])); end
+        end else begin
+          for (int j = 0; j < i; j++) begin assert (!cu_ready[j]); end
+        end
       end
     for (int i = 0; i < NCU; i++)
-      if (q_head_v && cu_ready[i] && !cu_done[i] && !cpl_pend[i]) begin assert (cu_v != '0); end
-    // 完成: 有待回報且輸出暫存空時必載入; busy / cmd_ready 正確
+      if (q_head_v && cu_ready[i]) begin assert (cu_v != '0); end
+    // 完成: CU 的完成在待回報槽空時被接受; 有待回報且輸出暫存空時必載入; busy / cmd_ready 正確
+    assert (cu_dack == ~cpl_pend);
     if (cpl_pend != '0 && !cpl_valid) begin assert (cpl_load); end
-    assert (busy == (q_cnt != '0 || cpl_valid || cpl_pend != '0 || !(&cu_ready)));
+    assert (busy == (q_cnt != '0 || cpl_valid || cpl_pend != '0 || cu_busy != '0));
     assert (cmd_ready == (q_cnt != (QW+1)'(QD)));
   end
-  logic f_past;
-  initial f_past = 1'b0;
-  always @(posedge clk) f_past <= 1'b1;
   always @(posedge clk) if (f_past && rst_n && $past(rst_n)) begin
     if ($past(cpl_valid && !cpl_ready)) begin assert (cpl_valid && cpl_id == $past(cpl_id)); end
+    // 待回報槽的 tag = CU 完成握手時帶回的 tag
+    for (int i = 0; i < NCU; i++)
+      if ($past(cu_done[i] && cu_dack[i])) begin assert (cpl_pend[i] && cpl_tag[i] == $past(cu_dtag[i])); end
   end
   // 完成仲裁公平: 某槽待回報期間, 輸出暫存載入其他槽的次數 <= NCU - 1 (round-robin)
   logic [NCU-1:0][3:0] f_sk;
@@ -299,10 +352,12 @@ module npu_core
     end
   end
   always @(*) if (rst_n) begin
-    cover (int'(f_live) == QD + NCU + 1);                    // 上限可達 (緊)
+    cover (int'(f_live) == QD + 4 * NCU + 1);                // 上限可達 (緊)
     cover (cpl_pend[0] && int'(f_sk[0]) == NCU - 1);           // 最長等待可達
     cover (cpl_pend == '1 && cpl_valid && !cpl_ready);
     cover (cmd_valid && !cmd_ready);
+    cover ((cu_v & cu_busy) != '0);                            // 分派給仍在輸出的 CU
+    cover (cu_done[0] && !cu_dack[0]);                         // 完成等待待回報槽
   end
 `endif
 endmodule : npu_core

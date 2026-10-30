@@ -9,6 +9,7 @@ M=build/formal_mut; rm -rf $M; mkdir -p $M
 nk=0; nt=0; surv=0
 mut() {   # block rtl name old new
   local b=$1 f=$2 n=$1.$3                 # 名稱加區塊前綴 (不同區塊可用同名 mutant, 工作目錄不互相覆蓋)
+  [ -n "${ONLY:-}" ] && [ "$b" != "$ONLY" ] && return   # ONLY=<區塊>: 只跑該區塊的 mutant
   python3 - "$4" "$5" "$M/$n.sv" "$f" <<'PY' || { echo "$n: pattern not found"; surv=1; return; }
 import sys
 o, nw, out, f = sys.argv[1:5]
@@ -86,15 +87,17 @@ mut npu_l2_xbar $X ls_rdy      "assign b_rdy[b]   = !ls[b] && wk[b] == '0;" "ass
 mut npu_l2_xbar $X ls_early    "else if (idle[b] == IW'(LS_IDLE - 1)) begin" "else if (idle[b] == IW'(LS_IDLE - 2)) begin"
 mut npu_l2_xbar $X rr_rot2     "m = MW'((int'(rr) + 1 + f) % NM);" "m = MW'((int'(rr) + f) % NM);"
 C=rtl/npu/npu_core.sv
-mut npu_core $C done_dispatch "assign cu_free    = cu_ready & ~cpl_pend & ~cu_done;" "assign cu_free    = cu_ready & ~cpl_pend;"
-mut npu_core $C pend_dispatch "assign cu_free    = cu_ready & ~cpl_pend & ~cu_done;" "assign cu_free    = cu_ready & ~cu_done;"
-mut npu_core $C multi_disp    "assign first_free = cu_free & (~cu_free + 1'b1);" "assign first_free = cu_free;"
+mut npu_core $C idle_first    "assign cu_cand    = (cu_idle != '0) ? cu_idle : cu_free;" "assign cu_cand    = cu_free;"
+mut npu_core $C not_ready     "assign cu_free    = cu_ready;" "assign cu_free    = cu_ready | cu_done;"
+mut npu_core $C multi_disp    "assign first_free = cu_cand & (~cu_cand + 1'b1);" "assign first_free = cu_cand;"
 mut npu_core $C q_full        "assign cmd_ready = (q_cnt != (QW+1)'(QD));" "assign cmd_ready = 1'b1;"
 mut npu_core $C cpl_no_hold   "wire cpl_load = (cpl_pend != '0) && (!cpl_valid || cpl_ready);" "wire cpl_load = (cpl_pend != '0);"
-mut npu_core $C tag_from_port "for (int i = 0; i < NCU; i++) if (cu_v[i]) cu_tag[i] <= head.id;" "for (int i = 0; i < NCU; i++) if (cu_v[i]) cu_tag[i] <= cmd_id;"
-mut npu_core $C pend_noclear  "cpl_pend <= (cpl_pend & ~(cpl_load ? cpl_oh : '0)) | cu_done;" "cpl_pend <= cpl_pend | cu_done;"
+mut npu_core $C dack_always   "assign cu_dack    = ~cpl_pend;" "assign cu_dack    = '1;"
+mut npu_core $C tag_from_head "else if (cu_done[i] && !cpl_pend[i]) cpl_tag[i] <= cu_dtag[i];" "else if (cu_done[i] && !cpl_pend[i]) cpl_tag[i] <= head.id;"
+mut npu_core $C pend_noclear  "cpl_pend <= (cpl_pend & ~(cpl_load ? cpl_oh : '0)) | (cu_done & ~cpl_pend);" "cpl_pend <= cpl_pend | (cu_done & ~cpl_pend);"
 mut npu_core $C rr_frozen     "else if (cpl_load) cpl_last <= cpl_oh;" "else if (1'b0) cpl_last <= cpl_oh;"
-mut npu_core $C busy_no_cpl   "assign busy = !(&cu_ready) || (|cpl_pend) || cpl_valid || q_head_v;" "assign busy = !(&cu_ready) || (|cpl_pend) || q_head_v;"
+mut npu_core $C busy_no_cpl   "assign busy = (|cu_busy) || (|cpl_pend) || cpl_valid || q_head_v;" "assign busy = (|cu_busy) || (|cpl_pend) || q_head_v;"
+mut npu_core $C busy_no_cu    "assign busy = (|cu_busy) || (|cpl_pend) || cpl_valid || q_head_v;" "assign busy = (|cpl_pend) || cpl_valid || q_head_v;"
 V=rtl/npu/npu_vec.sv
 mut npu_vec $V rdy_no_gnt   "assign ins_ready = is_ld ? rd_gnt" "assign ins_ready = is_ld ? 1'b1"
 mut npu_vec $V st_writes    " && ins.op != VOP_ST;" ";"

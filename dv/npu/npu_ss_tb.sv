@@ -575,6 +575,50 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
     n_cmds += prog.size();
   endtask
 
+  // directed: host L2 埠仲裁器的鎖定 (npu_l2_arb2)。先讓主端 X 單獨讀 L2 (使 round-robin 的上次選中者為 X), L2 閒置
+  // 100 拍 (bank 進入 light sleep), 再送 X 的命令, 隔 gap 個 NOP 後送另一個主端 Y 的命令: X 的第一個讀取等 bank 喚醒
+  // (LS_WAKE 拍沒有 grant), Y 在這段期間開始請求時 round-robin 偏向 Y, 必須靠鎖定保持 X (SVA c_rd_lock_* / a_rd_hold)。
+  // 讀 (kind 0): X / Y = DMA_ST / VEC (取程式) 兩種順序; 寫 (kind 1): DMA_LD / VEC (ST 寫回) 兩種順序; gap = 0..5
+  task automatic arb_lock();
+    logic [511:0] d;
+    npu_vec_pkg::npu_vec_ins_t x;
+    npu_tile_cmd_t c;
+    n_batch++;
+    p_cmd = 100; p_cpl = 100; p_rgnt = 100; p_wgnt = 100; p_rv = 100; fix_lat = -1; rlat = 2; test_en = 0;
+    // VEC 程式 (line 16): SPLAT v0, ST v0 → line 24
+    d = '0;
+    x = '0; x.op = npu_vec_pkg::VOP_SPLAT; x.vd = 3'd0; x.imm = $urandom(); d[0 +: 77] = x;
+    x = '0; x.op = npu_vec_pkg::VOP_ST; x.va = 3'd0; x.line = 26'd24; d[128 +: 77] = x;
+    l2_bd_wr(l2i(26'd16), d); rl2[l2i(26'd16)] = d;
+    for (int kind = 0; kind < 2; kind++)
+    for (int ord = 0; ord < 2; ord++)
+      for (int gap = 0; gap <= 5; gap++) begin
+        prog.delete(); prog_pos.delete(); cpl_pos.delete(); pidx = 0; ncpl = 0;
+        for (int t = 0; t < 3 + gap; t++) begin
+          c = '0; c.id = 8'(210 + t);
+          if (t == 1 + gap + 1 || t < 2) begin                  // t = 0, 1: 主端 X; t = gap + 2: 主端 Y
+            if ((t < 2) == (ord == 0)) begin
+              c.op = (kind == 0) ? NPU_OP_DMA_ST : NPU_OP_DMA_LD; c.k = 16'(ur(2, 6)); c.a = 26'(ur(0, 8) + 32 * kind); c.ext = pick_ext();
+            end
+            else begin c.op = NPU_OP_VEC; c.k = 16'd2; c.a = 26'd16; c.ext = $urandom(); c.b = 26'($urandom()); c.c = 26'($urandom()); end
+          end else c.op = NPU_OP_NOP;
+          prog_pos[210 + t] = prog.size(); prog.push_back(c); ref_exec(c);
+          if (t == 0) begin                                    // 只送第一個, 完成後閒置 100 拍
+            in_batch = 1;
+            while (ncpl != 1) @(posedge clk);
+            in_batch = 0;
+            repeat (100) @(posedge clk);
+          end
+        end
+        in_batch = 1;
+        while (ncpl != prog.size()) @(posedge clk);
+        in_batch = 0;
+        for (int w = 0; busy && w < 1000; w++) @(posedge clk);
+        check_state();
+        n_cmds += prog.size();
+      end
+  endtask
+
   int unsigned seed, nb, nc;
   initial begin
     if (!$value$plusargs("seed=%d", seed)) seed = 1;
@@ -588,7 +632,7 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
     rst_n <= 1'b1;
     repeat (2) @(posedge clk);
     if ($value$plusargs("perf_dma=%d", fix_lat)) perf_dma();
-    else for (int b = 0; b < int'(nb); b++) if (b % 10 == 3) begin fill_all((b / 10 + int'(seed)) % 5); if (b == 13) fill_all(5); if (b == 3) fill_all(6); end else batch((b % 5 == 0) ? 1 + ur(0, 3) : ur(nc / 2, nc), b == 1 && !$test$plusargs("no_big"));
+    else for (int b = 0; b < int'(nb); b++) if (b == 2) arb_lock(); else if (b % 10 == 3) begin fill_all((b / 10 + int'(seed)) % 5); if (b == 13) fill_all(5); if (b == 3) fill_all(6); end else batch((b % 5 == 0) ? 1 + ur(0, 3) : ur(nc / 2, nc), b == 1 && !$test$plusargs("no_big"));
     $display("NPUSS: N=%0d NCU=%0d NB=%0d seed=%0d batches=%0d cmds=%0d resets=%0d errors=%0d",
              N, NCU, NB, seed, n_batch, n_cmds, n_rst, n_err);
     if (n_err == 0) $display("TB PASS"); else $display("TB FAIL");

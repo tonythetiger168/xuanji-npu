@@ -56,24 +56,35 @@ PY
 mut gate_no_own   $MMA "assign row_act[r] = a_tok_edge[r] || (|tok_q[r]);" "assign row_act[r] = a_tok_edge[r] || (|tok_q[r][N-2:0]);"  # 閘控未涵蓋最右 PE 的殘留 token
 mut gate_no_edge  $MMA "assign row_act[r] = a_tok_edge[r] || (|tok_q[r]);" "assign row_act[r] = (|tok_q[r]);"     # 閘控未涵蓋左邊緣進入的 token
 mut drain_short   $MMA "localparam int DRAIN = 2 * N - 1;" "localparam int DRAIN = 2 * N - 3;"             # 排空不足
-mut no_sext_a     $MMA "wire signed [8:0]  ax = {sgn_a & a_in[7], a_in};" "wire signed [8:0]  ax = {1'b0, a_in};"
-mut no_sext_b     $MMA "wire signed [8:0]  bx = {sgn_b & b_in[7], b_in};" "wire signed [8:0]  bx = {b_in[7], b_in};"
-mut no_clr        $MMA "if (clr)       acc[r][c] <= '0;" "if (1'b0)       acc[r][c] <= '0;"                # 新 tile 不清累加器
-mut row_no_ready  $MMA "if (st == S_OUT && out_ready) out_row" "if (st == S_OUT) out_row"                     # 忽略回壓
+mut no_sext_a     $MMA "wire signed [8:0]  ax = {f_in.sa & a_in[7], a_in};" "wire signed [8:0]  ax = {1'b0, a_in};"
+mut no_sext_b     $MMA "wire signed [8:0]  bx = {f_in.sb & b_in[7], b_in};" "wire signed [8:0]  bx = {b_in[7], b_in};"
+mut no_clr        $MMA "(f_in.f ? 32'd0 : acc[r][c])" "(acc[r][c])"                                     # 新 tile 不清累加器
+mut row_no_ready  $MMA "if (ost == O_OUT && out_ready) out_row" "if (ost == O_OUT) out_row"                   # 忽略回壓
 mut skew_b        $MMA "assign b_edge[i] = b_sr[i-1];" "assign b_edge[i] = (i > 1) ? b_sr[i-2] : b_vec[i];" # B skew 少一拍
-mut sign_latch    $MMA "if (clr) begin sgn_a <= a_signed; sgn_b <= b_signed; end" "begin sgn_a <= a_signed; sgn_b <= b_signed; end"
-mut data_no_tok   $MMA "if (t_in) begin a_q[r][c] <= a_in; b_q[r][c] <= b_in; end" "if (t_in) a_q[r][c] <= a_in;" # B 資料不前進
-mut acc_trunc     $MMA "acc[r][c] + 32'(prod)" "acc[r][c] + 32'(prod[15:0])"                                  # 乘積截斷
-mut start_busy    $MMA "S_IDLE:  if (start) st_n = S_RUN;" "S_IDLE:  if (start) st_n = S_RUN;
-      S_OUT:   if (start) st_n = S_RUN;"                                                                   # 輸出中接受 start
-mut last_early    $MMA "S_RUN:   if (fire_in && in_last) st_n = S_DRAIN;" "S_RUN:   if (in_last) st_n = S_DRAIN;"  # in_last 未握手即結束
+mut sign_latch    $MMA "sa: sgn_a, sb: sgn_b" "sa: a_signed, sb: sgn_b"                                         # 有號性未在 start 鎖存
+mut data_no_tok   $MMA "if (t_in) begin                        // 資料只在有 token 時更新
+            a_q[r][c] <= a_in; b_q[r][c] <= b_in;" "if (t_in) begin
+            a_q[r][c] <= a_in;"                                                                               # B 資料不前進
+mut acc_trunc     $MMA "acc[r][c]) + 32'(prod)" "acc[r][c]) + 32'(prod[15:0])"                                  # 乘積截斷
+mut start_busy    $MMA "if (go) begin ist <= I_RUN;" "if (start) begin ist <= I_RUN;"                           # 輸入端忙碌時接受 start
+mut last_early    $MMA "O_IDLE:  if (fire_last) ost <= O_DRAIN;" "O_IDLE:  if (in_valid && in_last) ost <= O_DRAIN;"  # in_last 未握手即排空
+mut res_no_last   $MMA "if (f_in.l) res[r][c] <= sum;" "res[r][c] <= sum;"                                      # 結果暫存被下一個 tile 覆蓋
+mut no_last_stall $MMA "assign in_ready  = (ist == I_RUN) && !(in_last && ost != O_IDLE);" "assign in_ready  = (ist == I_RUN);"  # 前一個 tile 未輸出完就收最後一步
+mut fl_no_skew    $MMA "fl_q[r][c] <= f_in;" "fl_q[r][c] <= fl_in;"                                              # 旗標未隨 token 傳遞
+mut first_stuck   $MMA "        first <= 1'b0;" "        first <= first;"                                        # 每一步都清累加器
 # (列 ICG 拿掉 !rst_n 是等價 mutant: reset 期間 row_act = 0 表示本列 token 已全 0, 資料暫存只在有 token 時使用, 累加器由
-#  start 的 clr 清除; 仍保留 !rst_n 以符合共用規則。CU 層級的 ICG 拿掉 !rst_n 則會被抓到, 見 core_icg_rst)
+#  token 的 first 旗標清除; 仍保留 !rst_n 以符合共用規則。CU 層級的 ICG 同理, 見 npu_core 段落)
 # ---- npu_gemm_cu ----
 mut cu_aptr_stuck $CU "a_ptr <= a_ptr + 1'b1; fa <= fa - 1'b1; end" "a_ptr <= a_ptr; fa <= fa - 1'b1; end"   # A line 指標不前進
 mut cu_pop_early  $CU "wire pop  = feed && (step == SW'(SPL - 1) || mma_in_last);" "wire pop  = feed && (step == SW'(SPL - 2) || mma_in_last);"  # 提早換 line
 mut cu_no_wgnt    $CU "if (wr_gnt) c_ptr <= c_ptr + 1'b1;" "c_ptr <= c_ptr + 1'b1;"                          # C 指標不等寫入 grant
-mut cu_wr_early   $CU "if (wr_end) begin" "if (wr_end || wr_req) begin"                                     # 未拿到寫入 grant 就結束該列
+mut cu_wr_early   $CU "if (wr_end) wst <=" "if (wr_end || wr_req) wst <="                                      # 未拿到寫入 grant 就結束該列
+mut cu_pend_tag   $CU "c_pend <= c_cmd; t_pend <= t_cmd;" "c_pend <= c_cmd; t_pend <= cmd_tag;"                  # tag 取自埠上 (下一個命令) 而非本命令
+mut cu_take_early $CU "(wst == W_DONE && done_ready)" "(wst == W_DONE)"                                       # 完成未握手就換下一個 tile
+mut cu_done_noack $CU "W_DONE: if (done_ready) wst <= W_IDLE;" "W_DONE: wst <= W_IDLE;"                           # 完成不等握手
+mut cu_lr         $CU "lr <= (mma_out_row == RW'(N - 1));" "lr <= (mma_out_row == RW'(N - 2));"                   # 提早完成
+mut cu_take_cmd   $CU "if (take) begin c_ptr <= c_pend;" "if (take) begin c_ptr <= c_cmd;"                        # 寫回器取錯 C 位址
+mut cu_busy_pend  $CU "assign busy      = (fst != F_IDLE) || pend || (wst != W_IDLE);" "assign busy      = (fst != F_IDLE) || (wst != W_IDLE);"  # busy 漏掉等待輸出
 mut cu_last       $CU "assign mma_in_last   = (k_left == 16'd1);" "assign mma_in_last   = (k_left == 16'd2);"  # 少一個 k 步
 mut cu_fleft      $CU "fa <= FW'((32'(cmd_k) + SPL - 1) / SPL);" "fa <= FW'((32'(cmd_k) + SPL - 1) / SPL + 1);"   # A 多讀一個 line (帳目錯)
 mut cu_bsel       $CU "assign b_vec         = buf_b[rptr][step * N * 8 +: N * 8];" "assign b_vec         = buf_b[wb][step * N * 8 +: N * 8];"  # 讀錯緩衝槽
@@ -102,12 +113,15 @@ mut xb_ls_rdidle  $XB "else if (rd_rq[b] || wr_rq[b]) idle[b] <= '0;" "else if (
 mut xb_ls_rdy     $XB "assign b_rdy[b]   = !ls[b] && wk[b] == '0;" "assign b_rdy[b]   = wk[b] == '0;"   # 睡眠中仍給 grant
 mut xb_ls_early   $XB "else if (idle[b] == IW'(LS_IDLE - 1)) begin" "else if (idle[b] == IW'(LS_IDLE - 2)) begin"  # 提早睡
 # ---- npu_core ----
-mut core_icg_rst   $CORE ".en(cu_en[i] || !rst_n)" ".en(cu_en[i])"                                         # reset 期間 CU 時脈關閉
-mut core_done_disp $CORE "assign cu_free    = cu_ready & ~cpl_pend & ~cu_done;" "assign cu_free    = cu_ready & ~cpl_pend;"  # done 當拍分派 (已修正的 bug)
+# (CU 的 ICG 拿掉 !rst_n 在硬體上是等價 mutant: CU / npu_mma 的每個 flop 都是非同步 reset, reset 不需要時脈。
+#  v6.3.12 之前會被抓到, 是因為 Verilator 中 rst_n 從 0 開始時沒有 negedge 事件, 非同步 reset 只在 reset 期間有時脈沿時
+#  才生效 — 隨機上電狀態下結果看運氣 (Nano 存活、X1 / Pro 抓到)。仍保留 !rst_n 以符合共用規則, mutant 移除)
 mut core_cpl_hold  $CORE "wire cpl_load = (cpl_pend != '0) && (!cpl_valid || cpl_ready);" "wire cpl_load = (cpl_pend != '0);"  # 完成輸出不保持
-mut core_gate      $CORE "assign cu_en[i] = !cu_ready[i] || cu_v[i] || cu_done[i];" "assign cu_en[i] = !cu_ready[i] || cu_v[i];"  # 閘控未涵蓋 done 脈衝
+mut core_gate      $CORE "assign cu_en[i] = cu_busy[i] || cu_v[i];" "assign cu_en[i] = cu_busy[i];"              # 閘控未涵蓋分派拍
+mut core_dack      $CORE "assign cu_dack    = ~cpl_pend;" "assign cu_dack    = '1;"                              # 待回報槽未空就接受完成 (遺失)
+[ $NCU -gt 1 ] && mut core_idle_1st  $CORE "assign cu_cand    = (cu_idle != '0) ? cu_idle : cu_free;" "assign cu_cand    = cu_free;"  # 不優先閒置 CU (NCU = 1 時等價)
 mut core_q_full    $CORE "assign cmd_ready = (q_cnt != (QW+1)'(QD));" "assign cmd_ready = 1'b1;"                # 佇列滿仍收命令
-mut core_tag       $CORE "if (cu_v[i]) cu_tag[i] <= head.id;" "if (cu_v[i]) cu_tag[i] <= head.id ^ 8'h01;"     # 完成 id 錯
+mut core_tag       $CORE "cpl_tag[i] <= cu_dtag[i];" "cpl_tag[i] <= cu_dtag[i] ^ 8'h01;"                       # 完成 id 錯
 mut core_perf_wr   $CORE "perf_busy <= perf_wdata_busy; perf_steps <= perf_wdata_steps;" "perf_busy <= perf_wdata_busy; perf_steps <= perf_steps;"  # 計數器寫入無效
 [ $NCU -gt 1 ] && mut core_perf_multi $CORE "perf_steps <= perf_steps + 48'(\$countones(cu_feed));" "perf_steps <= perf_steps + 48'(|cu_feed);"  # 多 CU 同拍只計一次 (NCU=1 等價, 不適用)
 echo "=== $CFG: $nk / $nt mutants killed"
