@@ -432,6 +432,14 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
         prog.push_back(c1); prog_pos[int'(c1.id)] = i + 1;
         ref_exec(c1);
         i++;
+        if (i + 1 < ncmd && rnd(50)) begin          // 緊接一個 DMA_ST (wt = 0): 與 VEC 同時讀 host L2 埠 (仲裁器的爭用)
+          npu_tile_cmd_t c2;
+          c2 = '0; c2.id = ids[i + 1]; c2.op = NPU_OP_DMA_ST; c2.k = 16'(ur(8, 48)); c2.a = pick_l2(int'(c2.k)); c2.ext = pick_ext();
+          c2 = mk_cmd(c2, 0);
+          prog.push_back(c2); prog_pos[int'(c2.id)] = i + 1;
+          ref_exec(c2);
+          i++;
+        end
         continue;
       end
       begin

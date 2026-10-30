@@ -80,13 +80,17 @@ bash dv/scripts/run_npu_ss_mutation.sh <nano|x1|pro|all>                # 檢查
 
 | 組態 | DMA OUT | line | branch | expr | toggle | covergroup | SVA cover | mutation |
 |---|---|---|---|---|---|---|---|---|
-| X1-Nano | 16 | 100% (15) | 100% (70) | 100% (152) | 100% (38 700) | 100% (110) | 100% (31) | 見下 |
-| X1 | 32 | 100% (15) | 100% (70) | 100% (152) | 100% (55 092) | 100% (158) | 100% (31) | 見下 |
-| X1-Pro | 64 | 100% (15) | 100% (70) | 100% (152) | 100% (87 870) | 100% (254) | 100% (31) | 見下 |
+| X1-Nano | 16 | 100% (15) | 100% (76) | 100% (157) | 100% (39 032) | 100% (110) | 100% (40) | 35 / 35 |
+| X1 | 32 | 100% (15) | 100% (76) | 100% (157) | 100% (55 424) | 100% (158) | 100% (40) | 35 / 35 |
+| X1-Pro | 64 | 100% (15) | 100% (76) | 100% (157) | 100% (88 202) | 100% (254) | 100% (40) | 35 / 35 |
 
-mutation: 加入向量引擎 (#19) 後 `run_npu_ss_mutation.sh` 有兩個 mutant 的 pattern 失效、數個存活, 尚在修正 (#19), 不列數字;
-v6.3.11 新增的 DMA ICG reset mutant (`dma_icg_rst`) 已確認被抓到。Pro 的 completion 競爭 bin「VEC 待回報時選中 DMA」
-在隨機中沒有出現, TB 的 `fill_all` 加上只有 DMA 與 VEC 競爭的情境 (prime 5)。
+mutation (`run_npu_ss_mutation.sh`, 20 batch + 隨機上電一次; 2D DMA 加入前量測): 三款 35 / 35。加入向量引擎 (#19) 後原本
+有兩個 pattern 失效、數個存活, 修正: L2 仲裁器 (`npu_l2_arb2`) 加只看埠的 SVA (下游請求保持、round-robin 公平) — 原本
+「等待中換主端」與「固定優先權」只有形式證明抓得到; TB 的 VEC 程式加連續 ST / 連續 LD 變體, 與 DMA 爭用 host L2 埠
+(Pro 的固定優先權 mutant 在 12 batch 內沒有爭用, 預設改為 20 batch); `busy` 拿掉 `v_busy` 是等價 mutant (形式不變式
+v_busy ⇒ oc ≠ 0)。Pro 的 completion 競爭 bin「VEC 待回報時選中 DMA」在隨機中沒有出現, `fill_all` 加上只有 DMA 與 VEC
+競爭的情境 (prime 5)。2D DMA 新增的 mutant (列多一個 line、忽略列距、ST 的外部位址跟著讀端前進、位址高位遺失) 見
+`docs/npu.md`「形式驗證」與回歸紀錄。
 
 DMA 讀取吞吐量 (LD 2048 line, 外部埠全速; 寫入 ST 在所有情況為 0.998 line/拍):
 
