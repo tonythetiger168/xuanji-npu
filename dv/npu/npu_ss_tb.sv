@@ -82,8 +82,8 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
   // 參考模型: 依序執行一個命令
   function automatic void ref_exec(npu_tile_cmd_t c);
     case (c.op)
-      NPU_OP_DMA_LD: for (int i = 0; i < int'(c.k); i++) rl2[l2i(c.a + 26'(i))] = rerd(c.ext + 32'(i));
-      NPU_OP_DMA_ST: for (int i = 0; i < int'(c.k); i++) rext[c.ext + 32'(i)] = rl2[l2i(c.a + 26'(i))];
+      NPU_OP_DMA_LD: for (int i = 0; i < int'(c.k); i++) rl2[l2i(c.a + 26'(i))] = rerd(ext_of(c, i));
+      NPU_OP_DMA_ST: for (int i = 0; i < int'(c.k); i++) rext[ext_of(c, i)] = rl2[l2i(c.a + 26'(i))];
       NPU_OP_GEMM: if (c.k != 0) begin
         logic [31:0] C [];
         C = new[N * N];
@@ -117,8 +117,8 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
   function automatic fp_t footprint(npu_tile_cmd_t c);
     fp_t f;
     case (c.op)
-      NPU_OP_DMA_LD: for (int i = 0; i < int'(c.k); i++) begin f.l2w.push_back(l2i(c.a + 26'(i))); f.er.push_back(c.ext + 32'(i)); end
-      NPU_OP_DMA_ST: for (int i = 0; i < int'(c.k); i++) begin f.l2r.push_back(l2i(c.a + 26'(i))); f.ew.push_back(c.ext + 32'(i)); end
+      NPU_OP_DMA_LD: for (int i = 0; i < int'(c.k); i++) begin f.l2w.push_back(l2i(c.a + 26'(i))); f.er.push_back(ext_of(c, i)); end
+      NPU_OP_DMA_ST: for (int i = 0; i < int'(c.k); i++) begin f.l2r.push_back(l2i(c.a + 26'(i))); f.ew.push_back(ext_of(c, i)); end
       NPU_OP_GEMM: if (c.k != 0) begin
         for (int l = 0; l < (int'(c.k) + SPL - 1) / SPL; l++) begin f.l2r.push_back(l2i(c.a + 26'(l))); f.l2r.push_back(l2i(c.b + 26'(l))); end
         for (int l = 0; l < CL; l++) f.l2w.push_back(l2i(c.c + 26'(l)));
@@ -189,6 +189,28 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
     return 1;
   endfunction
   // mode: 0 = 混合; 1 = GEMM / NOP 突發 (填滿 npu_core 佇列, 各來源的完成同時待回報)
+  // DMA 2D: b[15:0] = 每列 line 數 (0 = 1D), c = 外部列距; 第 i 個 line 的外部位址
+  function automatic logic [31:0] ext_of(npu_tile_cmd_t c, int i);
+    int unsigned cols = int'(c.b[15:0]);
+    if (cols == 0) return c.ext + 32'(i);
+    return c.ext + 32'(i / cols) * 32'(c.c) + 32'(i % cols);
+  endfunction
+  function automatic void dma_2d(ref npu_tile_cmd_t c);
+    if (rnd(40)) begin            // 2D: 列距大於 / 等於 / 小於 (重疊) / 0 (同一列重複) 每列 line 數, 或較大
+      c.b = 26'(rnd(10) ? ur(1, 2) : ur(1, 12));
+      case (ur(0, 4))
+        0: c.c = 26'(int'(c.b[15:0]));
+        1: c.c = 26'(int'(c.b[15:0]) + ur(1, 40));
+        2: c.c = 26'(ur(0, int'(c.b[15:0])));
+        3: c.c = 26'(ur(0, 3));
+        default: c.c = 26'(ur(0, 4096));
+      endcase
+      if (int'(c.k) > 512) c.k = 16'(ur(1, 512));    // 範圍有限 (< 0x20_0000 line): 不碰到 VEC 程式區 0xE000_0000
+      if (c.ext >= 32'hDFE0_0000 && c.ext < 32'hE000_0000) c.ext = c.ext - 32'h0020_0000;
+    end else begin
+      c.b = rnd(50) ? '0 : 26'({10'($urandom()), 16'h0});   // 1D (b 的高位元不影響)
+    end
+  endfunction
   function automatic npu_tile_cmd_t gen_cmd(logic [7:0] id, int p_wt, int mode);
     npu_tile_cmd_t c;
     fp_t f;
@@ -202,8 +224,8 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
         do c.c = pick_l2(CL);
         while (c.k != 0 && !(disjoint(l2i(c.c), CL, l2i(c.a), al) && disjoint(l2i(c.c), CL, l2i(c.b), al)));
       end
-      7, 8, 9, 10, 11, 12: begin c.op = NPU_OP_DMA_LD; c.k = (mode == 1) ? 16'(ur(0, 3)) : pick_n(); c.a = pick_l2(int'(c.k)); c.ext = pick_ext(); end
-      13, 14, 15, 16, 17:  begin c.op = NPU_OP_DMA_ST; c.k = pick_n(); c.a = pick_l2(int'(c.k)); c.ext = pick_ext(); end
+      7, 8, 9, 10, 11, 12: begin c.op = NPU_OP_DMA_LD; c.k = (mode == 1) ? 16'(ur(0, 3)) : pick_n(); c.a = pick_l2(int'(c.k)); c.ext = pick_ext(); dma_2d(c); end
+      13, 14, 15, 16, 17:  begin c.op = NPU_OP_DMA_ST; c.k = pick_n(); c.a = pick_l2(int'(c.k)); c.ext = pick_ext(); dma_2d(c); end
       default: c.op = rnd(80) ? NPU_OP_NOP : npu_op_e'(ur(5, 7));     // 5..7 保留: 當 NOP
     endcase
     f = footprint(c);

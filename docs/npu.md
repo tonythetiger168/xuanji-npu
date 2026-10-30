@@ -51,7 +51,7 @@ npu_core 加上命令前端與 DMA, 成為可以直接下命令的子系統 (由
 | 命令 | 動作 |
 |---|---|
 | `GEMM` | C = A × B (INT8 → INT32, 資料已在 L2); K = 0 時只回報完成 |
-| `DMA_LD` / `DMA_ST` | 外部記憶體 → L2 / L2 → 外部記憶體, k 個 line (k = 0 時立即完成); 位址模數環繞 |
+| `DMA_LD` / `DMA_ST` | 外部記憶體 → L2 / L2 → 外部記憶體, k 個 line (k = 0 時立即完成); 位址模數環繞。2D (v6.3.11): b[15:0] = 每列 line 數 (0 = 1D), c = 外部列距 (line) — 第 i 個 line 的外部位址 = ext + (i / cols) × c + i % cols, L2 端連續 |
 | `VEC` (op 4) | 執行 L2 line `a` 起的 `k` 個向量指令 (每 line 4 個; `docs/npu_vec.md`); k = 0 時只回報完成; 遇到非法指令時 `vec_err` 一拍 |
 | `NOP` (op 3; 保留的 op 5–7 同 NOP) | 只回報完成 |
 

@@ -9,6 +9,9 @@
 //   外部寫埠: m_wr_req 保持到 m_wr_gnt, 寫在 gnt 拍完成。L2 埠語意同 npu_core host 埠 (讀資料與 gnt 同拍)。
 //   在途上限 OUT: 已發出讀取但尚未寫出的 line 數 <= OUT, 由 OUT 項 FIFO 承接 (讀回應不需回壓)。
 //   位址: 外部 line 位址 32 bit、L2 line 位址 26 bit, 皆以模數環繞。
+//   2D (v6.3.11, #33): cmd_cols != 0 時外部端為 2D — 每列 cmd_cols 個 line, 列與列相隔 cmd_stride 個 line;
+//   第 i 個 line 的外部位址 = ext + (i / cols) × stride + i % cols, L2 端仍連續 (l2 + i)。cmd_cols = 0 為 1D
+//   (外部連續, 與 v6.3.10 相同)。n 不必是 cols 的倍數 (最後一列不滿)。LD 時外部是讀端, ST 時是寫端。
 module npu_ss_dma
   import orca_pkg::*;
 #(
@@ -22,6 +25,8 @@ module npu_ss_dma
   input  logic [31:0] cmd_ext,
   input  logic [25:0] cmd_l2,
   input  logic [15:0] cmd_n,
+  input  logic [15:0] cmd_cols,         // 2D: 每列 line 數 (0 = 1D)
+  input  logic [31:0] cmd_stride,       // 2D: 列距 (line)
   output logic        done,
   output logic        busy,
   // NPU L2 (npu_core host 埠)
@@ -53,6 +58,8 @@ module npu_ss_dma
   logic [31:0] ext;
   logic [25:0] l2;
   logic [15:0] n, iss, wr;                // iss: 已發出讀取的 line 數; wr: 已寫出的 line 數
+  logic [15:0] cols, col;                 // 2D: 每列 line 數 / 外部端目前列內位置
+  logic [31:0] stride, erow;              // 2D: 列距 / 外部端目前列的起點
   logic [DW-1:0] fifo [OUT];
   logic [OW-1:0] f_rd, f_wr;
   logic [OW:0]   f_cnt;
@@ -68,7 +75,8 @@ module npu_ss_dma
 
   // 讀端: LD 讀外部, ST 讀 L2
   assign m_rd_req  = can_iss && !st;
-  assign m_rd_addr = ext + 32'(iss);
+  wire [31:0] e_addr = erow + 32'(col);   // 外部端 (LD: 讀, ST: 寫) 目前的 line 位址
+  assign m_rd_addr = e_addr;
   assign h_rd_req  = can_iss && st;
   assign h_rd_line = l2 + 26'(iss);
   // 寫端: FIFO 頭 → LD 寫 L2, ST 寫外部
@@ -76,7 +84,7 @@ module npu_ss_dma
   assign h_wr_line = l2 + 26'(wr);
   assign h_wr_data = fifo[f_rd];
   assign m_wr_req  = act && f_nempty && st;
-  assign m_wr_addr = ext + 32'(wr);
+  assign m_wr_addr = e_addr;
   assign m_wr_data = fifo[f_rd];
 
   // grant 只在本端有請求時有效 (外部埠的 gnt 可能與 req 無關)
@@ -84,19 +92,27 @@ module npu_ss_dma
   wire push   = st ? (h_rd_req && h_rd_gnt) : m_rd_rvalid;
   wire pop    = st ? (m_wr_req && m_wr_gnt) : (h_wr_req && h_wr_gnt);
   wire [DW-1:0] push_d = st ? h_rd_data : m_rd_rdata;
+  wire e_step = st ? pop : iss_ok;        // 外部端前進一個 line
+  wire e_wrap = (cols != '0) && (col == cols - 1'b1);
 
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
       act <= 1'b0; st <= 1'b0; ext <= '0; l2 <= '0; n <= '0; iss <= '0; wr <= '0;
+      cols <= '0; col <= '0; stride <= '0; erow <= '0;
       f_rd <= '0; f_wr <= '0; f_cnt <= '0;
     end else begin
       if (cmd_valid && cmd_ready) begin
         act <= 1'b1; st <= cmd_st; ext <= cmd_ext; l2 <= cmd_l2; n <= cmd_n; iss <= '0; wr <= '0;
+        cols <= cmd_cols; stride <= cmd_stride; col <= '0; erow <= cmd_ext;
       end else if (done) begin
         act <= 1'b0;
       end else begin
         if (iss_ok) iss <= iss + 1'b1;
         if (pop)    wr  <= wr + 1'b1;
+        if (e_step) begin
+          if (e_wrap) begin col <= '0; erow <= erow + stride; end
+          else col <= col + 1'b1;
+        end
       end
       if (push) f_wr <= f_wr + 1'b1;
       if (pop)  f_rd <= f_rd + 1'b1;
@@ -153,7 +169,41 @@ module npu_ss_dma
     if ($past(h_wr_req && !h_wr_gnt)) assert (h_wr_req && h_wr_line == $past(h_wr_line) && h_wr_data == $past(h_wr_data));
     if ($past(done)) assert (!done);
   end
+  // 位址: 檢查器從命令埠記下參數, 從外部端的握手 (LD: 讀 grant; ST: 寫 grant) 自己推進 2D 位置, 從 L2 端的握手
+  // 計數; 送出的位址必須相符
+  logic [31:0] f_ext0, f_stride, f_erow;
+  logic [15:0] f_cols, f_ecol, f_lcnt;
+  logic [25:0] f_l20;
+  logic        f_st;
+  wire f_ehs = f_st ? (m_wr_req && m_wr_gnt) : (m_rd_req && m_rd_gnt);
+  wire f_lhs = f_st ? (h_rd_req && h_rd_gnt) : (h_wr_req && h_wr_gnt);
+  always @(posedge clk or negedge rst_n)
+    if (!rst_n) begin f_ecol <= '0; f_erow <= '0; f_lcnt <= '0; f_cols <= '0; f_stride <= '0; f_ext0 <= '0; f_l20 <= '0; f_st <= 1'b0; end
+    else if (cmd_valid && cmd_ready) begin
+      f_ext0 <= cmd_ext; f_erow <= cmd_ext; f_ecol <= '0; f_cols <= cmd_cols; f_stride <= cmd_stride;
+      f_l20 <= cmd_l2; f_lcnt <= '0; f_st <= cmd_st;
+    end else begin
+      if (f_ehs) begin
+        if (f_cols != '0 && f_ecol == f_cols - 1'b1) begin f_ecol <= '0; f_erow <= f_erow + f_stride; end
+        else f_ecol <= f_ecol + 1'b1;
+      end
+      if (f_lhs) f_lcnt <= f_lcnt + 1'b1;
+    end
+  always @(*) if (rst_n && act) begin
+    assert (f_st == st);
+    if (m_rd_req) begin assert (m_rd_addr == f_erow + 32'(f_ecol)); end
+    if (m_wr_req) begin assert (m_wr_addr == f_erow + 32'(f_ecol)); end
+    if (h_rd_req) begin assert (h_rd_line == f_l20 + 26'(f_lcnt)); end
+    if (h_wr_req) begin assert (h_wr_line == f_l20 + 26'(f_lcnt)); end
+`ifndef FORMAL_NO_HELPER
+    // 歸納輔助 (引用內部狀態)
+    assert (cols == f_cols && stride == f_stride && col == f_ecol && erow == f_erow && l2 == f_l20);
+    assert (f_lcnt == (st ? iss : wr) && (f_cols == '0 || f_ecol < f_cols));
+`endif
+  end
   always @(*) if (rst_n) begin
+    cover (act && !st && done && n == 16'd6 && cols == 16'd2 && stride == 32'd5);
+    cover (act && st && done && n == 16'd5 && cols == 16'd2);
     cover (act && !st && done && n == 16'd6);
     cover (act && st && done && n == 16'd6);
     cover (act && iss - wr == 16'(OUT) && iss != n);

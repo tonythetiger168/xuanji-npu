@@ -5,7 +5,8 @@
 module npu_ss_dma_sva #(parameter int OUT = 8) (
   input logic clk, rst_n,
   input logic cmd_valid, cmd_ready, done, act, st,
-  input logic [15:0] cmd_n, n, iss, wr,
+  input logic [15:0] cmd_n, n, iss, wr, cols, col,
+  input logic [31:0] stride,
   input logic [$clog2(OUT):0] f_cnt,
   input logic h_rd_req, h_rd_gnt, h_wr_req, h_wr_gnt, m_rd_req, m_rd_gnt, m_rd_rvalid, m_wr_req, m_wr_gnt,
   input logic [25:0] h_rd_line, h_wr_line,
@@ -37,6 +38,13 @@ module npu_ss_dma_sva #(parameter int OUT = 8) (
   a_ready:      assert property (cmd_ready == !act);
 
   c_ld:         cover property (act && !st && done && n > 16'(OUT));
+  // 2D (外部端每列 cols 個 line): LD / ST 跨過列邊界、最後一列不滿、列距 0 / 小於列寬 (重疊)
+  c_2d_ld:      cover property (act && !st && done && cols != '0 && n > cols);
+  c_2d_st:      cover property (act && st && done && cols != '0 && n > cols);
+  c_2d_part:    cover property (act && done && cols > 16'd1 && (n % cols) != '0 && n > cols);
+  c_2d_s0:      cover property (act && done && cols != '0 && stride == '0 && n > cols);
+  c_2d_ovl:     cover property (act && done && cols > 16'd1 && stride != '0 && stride < 32'(cols) && n > cols);
+  a_2d_col:     assert property (!act || cols == '0 || col < cols);
   c_st:         cover property (act && st && done && n > 16'(OUT));
   c_n0:         cover property (cmd_valid && cmd_ready && cmd_n == '0);
   c_full:       cover property (act && (iss - wr) == 16'(OUT) && iss != n);
@@ -63,7 +71,8 @@ endmodule
 // 以 tile 的未閘控時脈取樣 (DMA 時脈關閉期間發生的非同步 reset 仍會中止進行中的 |=> 檢查)
 bind orca_npu_ss npu_ss_dma_sva #(.OUT(OUT)) u_dma_sva (
   .clk, .rst_n, .cmd_valid(u_dma.cmd_valid), .cmd_ready(u_dma.cmd_ready), .done(u_dma.done), .act(u_dma.act), .st(u_dma.st),
-  .cmd_n(u_dma.cmd_n), .n(u_dma.n), .iss(u_dma.iss), .wr(u_dma.wr), .f_cnt(u_dma.f_cnt),
+  .cmd_n(u_dma.cmd_n), .n(u_dma.n), .iss(u_dma.iss), .wr(u_dma.wr), .cols(u_dma.cols), .col(u_dma.col), .stride(u_dma.stride),
+  .f_cnt(u_dma.f_cnt),
   .h_rd_req(u_dma.h_rd_req), .h_rd_gnt(u_dma.h_rd_gnt), .h_wr_req(u_dma.h_wr_req), .h_wr_gnt(u_dma.h_wr_gnt),
   .m_rd_req(u_dma.m_rd_req), .m_rd_gnt(u_dma.m_rd_gnt), .m_rd_rvalid(u_dma.m_rd_rvalid),
   .m_wr_req(u_dma.m_wr_req), .m_wr_gnt(u_dma.m_wr_gnt),

@@ -24,12 +24,15 @@ PY
   cp formal/$b/$b.sby $M/$n/
   (cd $M/$n && timeout 1800 sby -f $b.sby prove > sby.log 2>&1)
   # 只有證明真的失敗 (FAIL: 反例 / UNKNOWN: 歸納找到反例) 才算抓到; 逾時或工具錯誤不算
-  if grep -qE "DONE \((FAIL|UNKNOWN)" $M/$n/sby.log && [[ "$b" =~ ^(orca_pmu|npu_l2_xbar)$ ]]; then
-    # orca_pmu / npu_l2_xbar 的歸納需要引用內部狀態的輔助不變式: 另以 BMC (深度 30, 拿掉輔助不變式) 確認
+  if grep -qE "DONE \((FAIL|UNKNOWN)" $M/$n/sby.log && [[ "$b" =~ ^(orca_pmu|npu_l2_xbar|npu_ss_dma)$ ]]; then
+    # orca_pmu / npu_l2_xbar / npu_ss_dma 的歸納需要引用內部狀態的輔助不變式: 另以 BMC (深度 30, 拿掉輔助不變式) 確認
     # mutant 違反的是埠層級的性質 (真的反例), 而不只是輔助不變式
     sv2v -DFORMAL -DFORMAL_TOP_$b -DFORMAL_NO_HELPER -E Assert -Irtl/common rtl/common/orca_pkg.sv $extra $M/$n.sv > $M/$n/$b.v
     sed 's/^prove: mode prove/prove: mode bmc/; s/^prove: depth [0-9]*/prove: depth 30/' formal/$b/$b.sby > $M/$n/$b.sby
-    [ "$b" = npu_l2_xbar ] && sed -i 's/^smtbmc z3/abc bmc3/' $M/$n/$b.sby   # 含 SRAM 陣列: z3 BMC 30 拍太慢, 改用 ABC bmc3
+    [[ "$b" =~ ^(npu_l2_xbar|npu_ss_dma)$ ]] && sed -i "s/^smtbmc z3/abc bmc3/" $M/$n/$b.sby   # 陣列 / 寬計數器: z3 BMC 30 拍太慢, 改用 ABC bmc3
+    # npu_ss_dma (32 bit 位址、16 bit 計數器) 無輔助不變式時 BMC 每拍成本急增 (第 10 拍約 20 分鐘): 只做 8 拍 —
+    # 每個 DMA mutant 在 cols = 1、n 小的命令下幾拍內就違反埠層級的位址 / 資料性質
+    [ "$b" = npu_ss_dma ] && sed -i "s/^prove: depth 30/prove: depth 8/" $M/$n/$b.sby
     (cd $M/$n && timeout 1800 sby -f $b.sby prove > bmc.log 2>&1)
     # ABC 回報 FAIL (反例) 時 sby 可能無法產生波形而報 ERROR, 以 engine 的結果為準
     if grep -qE "DONE \(FAIL|returned FAIL" $M/$n/bmc.log; then nk=$((nk + 1)); echo "$n: killed (BMC counterexample, port-level property)"
@@ -49,7 +52,9 @@ D=rtl/npu/npu_ss_dma.sv
 mut npu_ss_dma $D done_early  "assign done      = act && (wr == n);" "assign done      = act && (iss == n);"
 mut npu_ss_dma $D outst_over  "wire can_iss = act && (iss != n) && (outst != (OW+1)'(OUT));" "wire can_iss = act && (iss != n);"
 mut npu_ss_dma $D no_rd_qual  "wire iss_ok = st ? (h_rd_req && h_rd_gnt) : (m_rd_req && m_rd_gnt);" "wire iss_ok = st ? (h_rd_req && h_rd_gnt) : m_rd_gnt;"
-mut npu_ss_dma $D waddr_iss   "assign m_wr_addr = ext + 32'(wr);" "assign m_wr_addr = ext + 32'(iss);"
+mut npu_ss_dma $D waddr_iss   "wire e_step = st ? pop : iss_ok;" "wire e_step = iss_ok;"
+mut npu_ss_dma $D wrap_off    "wire e_wrap = (cols != '0) && (col == cols - 1'b1);" "wire e_wrap = (cols != '0) && (col == cols);"
+mut npu_ss_dma $D stride_cols "if (e_wrap) begin col <= '0; erow <= erow + stride; end" "if (e_wrap) begin col <= '0; erow <= erow + 32'(cols); end"
 mut npu_ss_dma $D fifo_ptr    "if (pop)  f_rd <= f_rd + 1'b1;" "if (pop && !push)  f_rd <= f_rd + 1'b1;"
 mut npu_ss_dma $D pushd_wrong "wire [DW-1:0] push_d = st ? h_rd_data : m_rd_rdata;" "wire [DW-1:0] push_d = st ? h_rd_data : h_rd_data;"
 mut npu_ss_dma $D wr_no_hold  "assign m_wr_req  = act && f_nempty && st;" "assign m_wr_req  = act && f_nempty && st && !iss[0];"
