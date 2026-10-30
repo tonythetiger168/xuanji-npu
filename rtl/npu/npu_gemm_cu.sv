@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Xuanji (原 ORCA v6.3) - NPU GEMM 計算單元 (v6.3.8)
+// Xuanji (原 ORCA v6.3) - NPU GEMM 計算單元 (v6.3.12)
 `include "orca_pkg.sv"
 
 // npu_gemm_cu: 一個 GEMM 命令 = 從 L2 讀 A / B, 經 npu_mma 計算, 把 C 寫回 L2。
@@ -17,6 +17,10 @@
 //   RP 個 L2 讀取埠: N <= 16 時 RP = 1, A / B 輪流共用 (每 SPL 步 2 次讀取, SPL >= 4, 有餘裕), PF = 2;
 //   N = 32 時每 2 步就要 1 個 A line + 1 個 B line, 單一埠每拍都得拿到 grant 才不掉速, 任何 bank 衝突都損失
 //   頻寬 → RP = 2 (A 埠 + B 埠, 各自每 2 拍讀 1 次) 且 PF = 4 吸收衝突。
+// v6.3.12: 命令重疊。輸入端 (取線器 + 餵入器, fst) 與輸出端 (寫回器, wst) 分開: 最後一個 k 步餵入後輸入端
+//   立刻回到閒置並可接受下一個命令, 寫回器同時把前一個 tile 的 C 寫回 (npu_mma tile 管線化)。
+//   命令的 {C line, tag} 依序經過三段: 輸入端 (c_cmd) → 等待輸出 (c_pend, 最後一步餵入時移入) → 寫回器 (c_ptr),
+//   所以一個 CU 最多同時持有 3 個命令。完成: done (保持到 done_ready) + done_tag, 依接受順序。
 // 低功耗: 緩衝只在讀取 grant 拍更新; npu_mma 列級 clock gating (test_en 強制開啟)。
 module npu_gemm_cu
   import orca_pkg::*;
@@ -31,7 +35,11 @@ module npu_gemm_cu
   input  logic [25:0] cmd_a_line, cmd_b_line, cmd_c_line,   // 64 B line 位址
   input  logic [15:0] cmd_k,                 // K 步數, 須 >= 1 (SVA 假設)
   input  logic        cmd_a_signed, cmd_b_signed,
-  output logic        done,                  // 一拍脈衝: C 已全部寫回
+  input  logic [7:0]  cmd_tag,               // 命令標籤, 完成時由 done_tag 帶回
+  output logic        done,                  // 一個命令的 C 已全部寫回 (保持到 done_ready)
+  input  logic        done_ready,
+  output logic [7:0]  done_tag,
+  output logic        busy,                  // 持有任一命令 (輸入端 / 等待輸出 / 寫回 / 等待完成握手)
   output logic        feeding,               // 本拍餵入一個 k 步 (效能計數: N*N 個 MAC)
   // L2 主介面 (讀取埠 p: RP = 1 時 A / B 共用埠 0; RP = 2 時埠 0 = A, 埠 1 = B)
   output logic [RP-1:0]         rd_req,
@@ -54,10 +62,16 @@ module npu_gemm_cu
     $error("npu_gemm_cu: N 須為 4 / 8 / 16 / 32");
   end
 
-  // 編碼: G_OUT / G_WR 兩個位元都不同 (out_nxt 只在兩者間切換)
-  typedef enum logic [1:0] { G_IDLE = 2'd0, G_OUT = 2'd1, G_WR = 2'd2, G_RUN = 2'd3 } gst_t;
-  gst_t st;
+  // 輸入端: F_IDLE / F_RUN; 寫回器: 編碼使 W_OUT / W_WR 兩個位元都不同 (out_nxt 只在兩者間切換)
+  typedef enum logic { F_IDLE = 1'b0, F_RUN = 1'b1 } fst_t;
+  typedef enum logic [1:0] { W_IDLE = 2'd0, W_OUT = 2'd1, W_WR = 2'd2, W_DONE = 2'd3 } wst_t;
+  fst_t fst;
+  wst_t wst;
   logic [25:0] a_ptr, b_ptr, c_ptr;
+  logic [25:0] c_cmd, c_pend;                // 輸入端 / 等待輸出的 C line
+  logic [7:0]  t_cmd, t_pend, t_w;           // 輸入端 / 等待輸出 / 寫回器的 tag
+  logic        pend;                         // 有一個已餵完、尚未開始寫回的 tile
+  logic        lr;                           // 寫回器目前的 line 含最後一列
   logic [15:0] k_left;                       // 尚未餵入的 k 步數
   localparam int FW = $clog2((65535 + SPL - 1) / SPL + 1);
   logic [FW-1:0] fa, fb;                     // A / B 尚未讀取的 line 數 (最多 ceil(65535/SPL))
@@ -73,30 +87,33 @@ module npu_gemm_cu
   logic         wr_end;                      // 本拍的寫回 grant 完成一整列 (N <= 16: 每次寫回; N = 32: 寫後半)
 
   // ---------------- npu_mma ----------------
-  logic mma_start, mma_busy, mma_in_valid, mma_in_ready, mma_in_last, mma_out_valid, mma_out_ready;
+  logic mma_start, mma_busy, mma_in_idle, mma_in_valid, mma_in_ready, mma_in_last, mma_out_valid, mma_out_ready;
   logic [N-1:0][7:0] a_vec, b_vec;
   logic [RW-1:0] mma_out_row;
   logic [N-1:0][31:0] mma_out_vec;
 
-  assign mma_start     = (st == G_IDLE) && cmd_valid;
+  assign mma_start     = (fst == F_IDLE) && cmd_valid;
   assign have          = (a_cnt != '0) && (b_cnt != '0);
-  assign mma_in_valid  = (st == G_RUN) && have;
+  assign mma_in_valid  = (fst == F_RUN) && have;
   assign mma_in_last   = (k_left == 16'd1);
   assign a_vec         = buf_a[rptr][step * N * 8 +: N * 8];
   assign b_vec         = buf_b[rptr][step * N * 8 +: N * 8];
-  assign mma_out_ready = (st == G_OUT);
+  assign mma_out_ready = (wst == W_OUT);
 
   npu_mma #(.N(N)) u_mma (
     .clk(clk), .rst_n(rst_n), .test_en(test_en),
-    .start(mma_start), .a_signed(cmd_a_signed), .b_signed(cmd_b_signed), .busy(mma_busy),
+    .start(mma_start), .a_signed(cmd_a_signed), .b_signed(cmd_b_signed), .busy(mma_busy), .in_idle(mma_in_idle),
     .in_valid(mma_in_valid), .in_ready(mma_in_ready), .in_last(mma_in_last),
     .a_vec(a_vec), .b_vec(b_vec),
     .out_valid(mma_out_valid), .out_ready(mma_out_ready), .out_row(mma_out_row), .out_vec(mma_out_vec));
 
   // ---------------- L2 存取 ----------------
-  assign cmd_ready = (st == G_IDLE);
+  assign cmd_ready = (fst == F_IDLE);
+  assign busy      = (fst != F_IDLE) || pend || (wst != W_IDLE);
+  assign done      = (wst == W_DONE);
+  assign done_tag  = t_w;
   // 取線軌請求: 還有 line 要讀且該軌緩衝有空槽
-  wire run = (st == G_RUN);
+  wire run = (fst == F_RUN);
   if (RP == 2) begin : g_rp2
     // A 埠 / B 埠各自獨立
     assign a_req = run && (fa != '0) && (a_cnt != (PW+1)'(PF));
@@ -116,37 +133,41 @@ module npu_gemm_cu
     assign a_dat = rd_data[0]; assign b_dat = rd_data[0];
     always_ff @(posedge clk or negedge rst_n)
       if (!rst_n) f_b <= 1'b0;
-      else if (st == G_IDLE && cmd_valid) f_b <= 1'b0;
+      else if (mma_start) f_b <= 1'b0;
       else if (rd_gnt[0]) f_b <= ~f_b;
   end
-  assign wr_req    = (st == G_WR);
+  assign wr_req    = (wst == W_WR);
   assign wr_line   = c_ptr;
   assign wr_data   = wr_d;
 
-  wire feed = mma_in_valid;                  // npu_mma 在 RUN 恆 in_ready (SVA a_feed_ready)
+  // npu_mma 在輸入 RUN 時就緒, 除了最後一步要等前一個 tile 輸出完 (a_feed_ready)
+  wire feed = mma_in_valid && mma_in_ready;
+  wire feed_last = feed && mma_in_last;
   assign feeding = feed;
   wire pop  = feed && (step == SW'(SPL - 1) || mma_in_last);
   wire push = b_gnt;                         // 一項的 B 到齊 (RP = 1 時即完成一項)
   wire out_fire = mma_out_valid && mma_out_ready;
+  // 寫回器取得下一個 tile: 有等待輸出的 tile 且寫回器閒置或本拍完成握手
+  wire take = pend && (wst == W_IDLE || (wst == W_DONE && done_ready));
 
   // C line 組裝: 每列寫入 line 中的位置; 湊滿 RPL 列後寫回
-  gst_t out_nxt;
+  wst_t out_nxt;
   if (CPR > 1) begin : g_cw
     // N = 32: 一列 C = 2 個 line; 前半存在 c_line, 後半存在 c_hi, 依序寫回 (c_hi 只有此組態才有)
     logic [511:0] c_hi;
     logic         c_half;                    // 0: 寫前半, 1: 寫後半
     // mma_out_vec 是 [N-1:0][31:0] 二維 packed: 索引選的是元素 (每個 32 bit), 不是位元
     assign c_line_n = mma_out_vec[N/2-1:0];
-    assign out_nxt  = G_WR;
+    assign out_nxt  = W_WR;
     assign wr_d     = c_half ? c_hi : c_line;
     assign wr_end   = wr_gnt && c_half;
     always_ff @(posedge clk or negedge rst_n)
       if (!rst_n) begin c_hi <= '0; c_half <= 1'b0; end
       else if (out_fire) begin c_hi <= mma_out_vec[N-1:N/2]; c_half <= 1'b0; end   // 只在輸出拍更新
-      else if (st == G_WR && wr_gnt) c_half <= ~c_half;
+      else if (wst == W_WR && wr_gnt) c_half <= ~c_half;
   end else if (RPL == 1) begin : g_c1
     assign c_line_n = mma_out_vec;
-    assign out_nxt  = G_WR;
+    assign out_nxt  = W_WR;
     assign wr_d     = c_line;
     assign wr_end   = wr_gnt;
   end else begin : g_cn
@@ -156,18 +177,17 @@ module npu_gemm_cu
       c_line_n = c_line;
       c_line_n[slot * N * 32 +: N * 32] = mma_out_vec;
     end
-    assign out_nxt = (slot == CW'(RPL - 1)) ? G_WR : G_OUT;
+    assign out_nxt = (slot == CW'(RPL - 1)) ? W_WR : W_OUT;
     assign wr_d     = c_line;
     assign wr_end   = wr_gnt;
   end
 
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
-      st <= G_IDLE; a_ptr <= '0; b_ptr <= '0; c_ptr <= '0; k_left <= '0; fa <= '0; fb <= '0;
+      fst <= F_IDLE; wst <= W_IDLE; a_ptr <= '0; b_ptr <= '0; c_ptr <= '0; k_left <= '0; fa <= '0; fb <= '0;
       step <= '0; buf_a <= '0; buf_b <= '0; wa <= '0; wb <= '0; rptr <= '0; a_cnt <= '0; b_cnt <= '0;
-      c_line <= '0; done <= 1'b0;
+      c_line <= '0; c_cmd <= '0; c_pend <= '0; t_cmd <= '0; t_pend <= '0; t_w <= '0; pend <= 1'b0; lr <= 1'b0;
     end else begin
-      done <= 1'b0;
       // 取線器 (緩衝只在 grant 拍寫入)
       if (a_gnt) begin buf_a[wa] <= a_dat; wa <= wa + 1'b1; a_ptr <= a_ptr + 1'b1; fa <= fa - 1'b1; end
       if (b_gnt) begin buf_b[wb] <= b_dat; wb <= wb + 1'b1; b_ptr <= b_ptr + 1'b1; fb <= fb - 1'b1; end
@@ -179,22 +199,29 @@ module npu_gemm_cu
       if (pop) rptr <= rptr + 1'b1;
       a_cnt <= a_cnt + (PW+1)'(a_gnt) - (PW+1)'(pop);
       b_cnt <= b_cnt + (PW+1)'(b_gnt) - (PW+1)'(pop);
-      unique case (st)
-        G_IDLE: if (cmd_valid) begin
-          a_ptr <= cmd_a_line; b_ptr <= cmd_b_line; c_ptr <= cmd_c_line;
+      // 輸入端
+      unique case (fst)
+        F_IDLE: if (cmd_valid) begin
+          a_ptr <= cmd_a_line; b_ptr <= cmd_b_line; c_cmd <= cmd_c_line; t_cmd <= cmd_tag;
           k_left <= cmd_k; fa <= FW'((32'(cmd_k) + SPL - 1) / SPL); fb <= FW'((32'(cmd_k) + SPL - 1) / SPL);
           step <= '0; wa <= '0; wb <= '0; rptr <= '0; a_cnt <= '0; b_cnt <= '0;
-          st <= G_RUN;
+          fst <= F_RUN;
         end
-        G_RUN: if (feed && mma_in_last) st <= G_OUT;
-        G_OUT: if (out_fire) begin c_line <= c_line_n; st <= out_nxt; end
-        G_WR: begin
+        F_RUN: if (feed_last) fst <= F_IDLE;
+      endcase
+      // 等待輸出: 最後一步餵入時移入 (此時 npu_mma 輸出端閒置 → 前一個 tile 已被寫回器取走, pend = 0)
+      if (feed_last) begin c_pend <= c_cmd; t_pend <= t_cmd; pend <= 1'b1; end
+      else if (take) pend <= 1'b0;
+      // 寫回器
+      if (take) begin c_ptr <= c_pend; t_w <= t_pend; wst <= W_OUT; end
+      else unique case (wst)
+        W_IDLE: ;
+        W_OUT: if (out_fire) begin c_line <= c_line_n; lr <= (mma_out_row == RW'(N - 1)); wst <= out_nxt; end
+        W_WR: begin
           if (wr_gnt) c_ptr <= c_ptr + 1'b1;
-          if (wr_end) begin                                         // N = 32: 前半寫完留在 G_WR 寫後半
-            if (!mma_busy) begin st <= G_IDLE; done <= 1'b1; end    // 最後一列已輸出, npu_mma 回到 idle
-            else st <= G_OUT;
-          end
+          if (wr_end) wst <= lr ? W_DONE : W_OUT;                   // N = 32: 前半寫完留在 W_WR 寫後半
         end
+        W_DONE: if (done_ready) wst <= W_IDLE;
       endcase
     end
   end

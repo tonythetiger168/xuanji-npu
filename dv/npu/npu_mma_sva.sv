@@ -1,22 +1,27 @@
 // SPDX-License-Identifier: Apache-2.0
 // npu_mma 的 SVA: 介面協定、資料流不變式 (token 成對到達 / 排空足夠 / 閘控安全) 與功能 coverage。
+// v6.3.12 tile 管線化: 輸入端 (ist) 與輸出端 (ost) 分開; 結果在 res (last token 時存入)。
 // 以 bind 掛到 DUT (見檔尾), .* 連接 DUT 內部同名訊號。
 module npu_mma_sva #(parameter int N = 8) (
   input logic clk, rst_n, test_en,
-  input logic start, a_signed, b_signed, busy,
+  input logic start, a_signed, b_signed, busy, in_idle,
   input logic in_valid, in_ready, in_last,
   input logic [N-1:0][7:0] a_vec, b_vec,
   input logic out_valid, out_ready,
   input logic [$clog2(N)-1:0] out_row,
   input logic [N-1:0][31:0] out_vec,
-  input logic [1:0] st,
-  input logic clr, fire_in, sgn_a, sgn_b,
+  input logic ist,
+  input logic [1:0] ost,
+  input logic go, fire_in, fire_last, sgn_a, sgn_b,
   input logic [N-1:0] a_tok_edge, b_tok_edge, row_act,
   input logic [N-1:0][N-1:0] tok_q,
-  input logic [N-1:0][N-1:0][31:0] acc
+  input logic [N-1:0][N-1:0][3:0] fl_q,
+  input logic [N-1:0][3:0] fl_edge,
+  input logic [N-1:0][N-1:0][31:0] res
 );
   localparam int RW = $clog2(N);
-  localparam logic [1:0] S_IDLE = 2'd0, S_RUN = 2'd1, S_DRAIN = 2'd2, S_OUT = 2'd3;
+  localparam logic I_IDLE = 1'b0, I_RUN = 1'b1;
+  localparam logic [1:0] O_IDLE = 2'd0, O_DRAIN = 2'd1, O_OUT = 2'd2;
 
   default clocking cb @(posedge clk); endclocking
   // clk 可能是閘控時脈: 非同步 reset 若落在兩個取樣沿之間, 取樣時 rst_n 已回到 1, 但 $past 跨過了 reset。
@@ -26,14 +31,16 @@ module npu_mma_sva #(parameter int N = 8) (
   default disable iff (!rst_n || rst_seen);
 
   // ---------------- 協定 / 控制 ----------------
-  a_busy:          assert property (busy == (st != S_IDLE));
-  a_ready_in_run:  assert property (in_ready == (st == S_RUN));
-  a_out_valid:     assert property (out_valid == (st == S_OUT));
+  a_busy:          assert property (busy == (ist != I_IDLE || ost != O_IDLE) && in_idle == (ist == I_IDLE));
+  a_ost_legal:     assert property (ost != 2'd3);
+  // 輸入端在 RUN 時就緒, 除非這一步是 last 而上一個 tile 還沒輸出完
+  a_ready_in_run:  assert property (in_ready == (ist == I_RUN && !(in_last && ost != O_IDLE)));
+  a_out_valid:     assert property (out_valid == (ost == O_OUT));
   a_out_hold:      assert property (out_valid && !out_ready |=> out_valid && $stable(out_row) && $stable(out_vec));
   a_out_row_seq:   assert property (out_valid && out_ready && out_row != RW'(N - 1) |=> out_valid && out_row == $past(out_row) + 1'b1);
-  a_out_last_row:  assert property (out_valid && out_ready && out_row == RW'(N - 1) |=> st == S_IDLE);
-  a_out_first_row: assert property (st != S_OUT ##1 st == S_OUT |-> out_row == '0);
-  a_start_ignored: assert property (busy && start |=> $stable(sgn_a) && $stable(sgn_b));
+  a_out_last_row:  assert property (out_valid && out_ready && out_row == RW'(N - 1) |=> ost == O_IDLE);
+  a_out_first_row: assert property (ost != O_OUT ##1 ost == O_OUT |-> out_row == '0);
+  a_start_ignored: assert property (!in_idle && start |=> $stable(sgn_a) && $stable(sgn_b));
   a_known:         assert property (!$isunknown({busy, in_ready, out_valid, out_row}));
   a_known_out:     assert property (out_valid |-> !$isunknown(out_vec));
 
@@ -45,44 +52,56 @@ module npu_mma_sva #(parameter int N = 8) (
     for (genvar c = 0; c < N; c++) begin : g_dc
       if (r > 0 && c > 0) begin : g_in
         a_tok_diag: assert property (tok_q[r][c-1] == tok_q[r-1][c]);
+        a_fl_diag:  assert property (tok_q[r][c-1] |-> fl_q[r][c-1] == fl_q[r-1][c]);   // 同一步 k 的旗標相同
       end else if (r > 0) begin : g_l
         a_tok_diag: assert property (a_tok_edge[r] == tok_q[r-1][0]);
+        a_fl_diag:  assert property (a_tok_edge[r] |-> fl_edge[r] == fl_q[r-1][0]);
       end else if (c > 0) begin : g_t
         a_tok_diag: assert property (tok_q[0][c-1] == b_tok_edge[c]);
       end
     end
   end
-  // 排空長度足夠: 進入輸出 / 閒置時陣列內已無 token (否則結果尚未累加完)
-  a_drained:       assert property (st inside {S_IDLE, S_OUT} |-> tok_q == '0 && a_tok_edge == '0);
-  // 只有 RUN 會產生 token
-  a_tok_src:       assert property (fire_in |-> st == S_RUN);
-  // 輸出期間累加器不變
-  a_acc_hold:      assert property (st == S_OUT && $past(st) == S_OUT |-> $stable(acc));
+  // 排空長度足夠: 輸出端進入輸出時, 陣列內沒有帶 last 旗標的 token (本 tile 的最後一步已全部累加完;
+  // 其他 token 屬於下一個 tile)
+  for (genvar r = 0; r < N; r++) begin : g_dr
+    for (genvar c = 0; c < N; c++) begin : g_dc
+      a_drained: assert property (ost == O_OUT |-> !(tok_q[r][c] && fl_q[r][c][2]));
+    end
+  end
+  // 只有 RUN 會產生 token; 輸出端只因 last 握手離開閒置; last 握手時輸出端必閒置 (res 不被覆蓋)
+  a_tok_src:       assert property (fire_in |-> ist == I_RUN);
+  a_last_free:     assert property (fire_last |-> ost == O_IDLE);
+  a_ost_start:     assert property (ost == O_IDLE ##1 ost != O_IDLE |-> $past(fire_last));
+  // 輸出期間結果暫存不變
+  a_res_hold:      assert property (ost == O_OUT && $past(ost) == O_OUT |-> $stable(res));
   // 閘控安全: 列時脈關閉時, 該列沒有任何 token 要處理 (關閉時鐘不會吃掉運算)
   for (genvar r = 0; r < N; r++) begin : g_r
-    a_gate_safe:   assert property (!row_act[r] && !clr |-> tok_q[r] == '0 && a_tok_edge[r] == 1'b0 &&
+    a_gate_safe:   assert property (!row_act[r] |-> tok_q[r] == '0 && a_tok_edge[r] == 1'b0 &&
                                     (r == 0 ? b_tok_edge == '0 : tok_q[(r == 0) ? 0 : r - 1] == '0));
   end
 
   // ---------------- cover ----------------
-  c_bubble:        cover property (st == S_RUN && !in_valid);
-  c_gate_all_off:  cover property (st == S_RUN && row_act == '0 && !test_en);
+  c_bubble:        cover property (ist == I_RUN && !in_valid);
+  c_gate_all_off:  cover property (ist == I_RUN && row_act == '0 && !test_en);
   c_gate_partial:  cover property (row_act != '0 && row_act != '1);
   c_gate_all_on:   cover property (row_act == '1);
-  c_start_busy:    cover property (busy && start);
+  c_start_busy:    cover property (!in_idle && start);
+  c_overlap_drn:   cover property (fire_in && ost == O_DRAIN);       // 下一個 tile 在前一個排空時輸入
+  c_overlap_out:   cover property (fire_in && ost == O_OUT);         // 下一個 tile 在前一個輸出時輸入
+  c_last_stall:    cover property (ist == I_RUN && in_valid && in_last && ost != O_IDLE);
   c_valid_no_rdy:  cover property (in_valid && !in_ready);
   c_out_stall:     cover property (out_valid && !out_ready);
-  c_k1:            cover property (clr ##1 fire_in && in_last);
-  c_back_to_back:  cover property (out_valid && out_ready && out_row == RW'(N - 1) ##1 start);
-  c_reset_in_run:  cover property (@(posedge clk) disable iff (1'b0) st == S_RUN ##1 !rst_n);
-  c_reset_in_drn:  cover property (@(posedge clk) disable iff (1'b0) st == S_DRAIN ##1 !rst_n);
-  c_reset_in_out:  cover property (@(posedge clk) disable iff (1'b0) st == S_OUT ##1 !rst_n);
+  c_k1:            cover property (go ##1 fire_in && in_last);
+  c_back_to_back:  cover property (fire_last ##1 go);                 // 前一個 tile 最後一步的下一拍就 start
+  c_reset_in_run:  cover property (@(posedge clk) disable iff (1'b0) ist == I_RUN ##1 !rst_n);
+  c_reset_in_drn:  cover property (@(posedge clk) disable iff (1'b0) ost == O_DRAIN ##1 !rst_n);
+  c_reset_in_out:  cover property (@(posedge clk) disable iff (1'b0) ost == O_OUT ##1 !rst_n);
 
   // ---------------- 功能 coverage ----------------
   int unsigned kcnt;   // 本 tile 已接受的 k 步數
   always_ff @(posedge clk or negedge rst_n)
     if (!rst_n) kcnt <= 0;
-    else if (clr) kcnt <= 0;
+    else if (go) kcnt <= 0;
     else if (fire_in) kcnt <= kcnt + 1;
 
   covergroup cg_tile @(posedge clk iff (rst_n && fire_in && in_last));
