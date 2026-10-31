@@ -23,7 +23,7 @@ SRC="-Irtl/common -Irtl/fp rtl/common/orca_pkg.sv rtl/common/clock_gate.sv rtl/n
   rtl/npu/npu_gemm_cu.sv dv/npu/npu_gemm_cu_sva.sv rtl/npu/npu_l2_xbar.sv dv/npu/npu_l2_xbar_sva.sv
   rtl/npu/npu_core.sv dv/npu/npu_core_sva.sv rtl/npu/npu_ss_dma.sv rtl/npu/orca_npu_ss.sv
   dv/npu/npu_ss_sva.sv dv/npu/npu_ss_tb.sv"
-verilator --binary --timing -j "${JOBS:-4}" --assert --coverage --coverage-max-width 32768 \
+verilator --binary --timing -j "${JOBS:-4}" --output-groups 64 --assert --coverage --coverage-max-width 32768 \
   -Wno-fatal -Wno-lint -Wno-style --Mdir "$B/tb" -GN=$N -GNCU=$NCU -GNB=$NB -GDEPTH=$DEPTH -GOUT=$TILE_OUT $SRC \
   --top-module npu_ss_tb > "$B/build.log" 2>&1 || { tail -20 "$B/build.log"; echo "BUILD FAIL"; exit 1; }
 python3 dv/scripts/wide_signals.py "$B/tb" 32768 npu_ss_tb__DOT__dut__DOT__ | tee "$B/toggle_excluded.txt"

@@ -55,7 +55,7 @@ X1-Max (N=32, NCU=24, NB=32; `npu_cfg max`; v6.3.12 量測, 同一 TB):
 
 N=32 的小 K 受 C 寫回限制: 一個 tile 的 C 是 64 個 line (4 KiB), K=64 時與 A + B 的輸入量相同, 寫回器每列寫 2 個
 line, 24 個 CU 共用 32 個 bank 的單一寫入埠 — 寫回時間比計算長, 重疊遮不住。功能: `npu_core_tb` (seed 1, 450 個命令)
-errors = 0。Max 的 coverage 收斂 (#28) 尚未在 v6.3.12 重跑。
+errors = 0。Max 的 coverage 收斂 (#28) 尚未在 v6.3.12 重跑 (建置記憶體問題見「驗證環境本身的問題」)。
 
 **尚未具備** (列為下一步, 不對外宣稱): BF16 / FP8、稀疏、卷積 / attention 專用資料流、SoC 的 APB 互連與 NoC / DRAM 連接
 (NPU Subsystem 在 SoC 頂層的命令與外部記憶體埠目前接死)、編譯器 / runtime。
@@ -328,3 +328,5 @@ L2 SRAM 陣列 (`u_l2.mem`) 超過 toggle 寬度上限, 不量 toggle (儲存陣
 - Verilator 會展開常數上界的迴圈, 並把 timing 程序呼叫的函式在每個呼叫點內嵌: NPU SS TB 新加的 `arb_lock` (2 × 2 × 6 次的
   常數迴圈) 讓參考模型 `ref_exec` 被內嵌上百份, X1 主 initial 的 coroutine 單一 C++ 檔 85 MB、編譯超過 30 分鐘 → 迴圈上界改用
   執行期變數 (含 `ref_exec` 內的 N×N 迴圈)、`fill_all` 只留一個呼叫點 → 6.6 MB (`no_inline_task` 不支援引用模組變數的函式)。
+- Verilator 預設把產生的 C++ 併成「建置 job 數」個編譯單元: Max 的 538 MB C++ 在 JOBS=1 時變成單一編譯單元, 本機與
+  CI runner 的編譯器都被 OOM 終止 → 一律 `--output-groups 64` (-j 4 峰值約 9.4 GB, 約 20 分鐘)。

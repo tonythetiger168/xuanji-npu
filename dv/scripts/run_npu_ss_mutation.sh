@@ -1,7 +1,7 @@
 #!/bin/bash
 # NPU Subsystem 檢查器的 mutation 測試 (每個產品組態): 每個 mutant 在 orca_npu_ss / npu_ss_dma 植入一個錯誤,
 # npu_ss_tb (參考模型比對 + SVA) 必須抓到 (killed)。npu_core 子樹的 mutant 見 run_npu_mutation.sh。
-# 用法: dv/scripts/run_npu_ss_mutation.sh <nano|x1|pro|all> [batches=12]
+# 用法: dv/scripts/run_npu_ss_mutation.sh <nano|x1|pro|all> [batches=20]
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . dv/scripts/npu_cfg.sh
@@ -28,7 +28,7 @@ PY
   local tile=$TILE dma=$DMA arb=$ARB
   case $f in $TILE) tile=$M/$n.sv ;; $DMA) dma=$M/$n.sv ;; $ARB) arb=$M/$n.sv ;; esac
   nt=$((nt + 1))
-  verilator --binary --timing -j "${JOBS:-4}" --assert -Wno-fatal -Wno-lint -Wno-style \
+  verilator --binary --timing -j "${JOBS:-4}" --output-groups 64 --assert -Wno-fatal -Wno-lint -Wno-style \
     -GN=$N -GNCU=$NCU -GNB=$NB -GDEPTH=$DEPTH -GOUT=$TILE_OUT --Mdir "$M/$n.obj" -Irtl/common -Irtl/fp \
     rtl/common/orca_pkg.sv rtl/common/clock_gate.sv rtl/npu/npu_mma.sv dv/npu/npu_mma_sva.sv $FP $arb dv/npu/npu_l2_arb2_sva.sv \
     rtl/npu/npu_gemm_cu.sv dv/npu/npu_gemm_cu_sva.sv rtl/npu/npu_l2_xbar.sv dv/npu/npu_l2_xbar_sva.sv \

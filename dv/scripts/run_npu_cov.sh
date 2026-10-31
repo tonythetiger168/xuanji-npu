@@ -19,7 +19,7 @@ SRC="-Irtl/common rtl/common/orca_pkg.sv rtl/common/clock_gate.sv rtl/npu/npu_mm
 CU="rtl/npu/npu_gemm_cu.sv dv/npu/npu_gemm_cu_sva.sv"
 build() {   # top -G... -- sources...
   local top=$1; shift
-  verilator --binary --timing -j "${JOBS:-4}" --assert --coverage --coverage-max-width 32768 \
+  verilator --binary --timing -j "${JOBS:-4}" --output-groups 64 --assert --coverage --coverage-max-width 32768 \
     -Wno-fatal -Wno-lint -Wno-style --Mdir "$B/$top" $SRC "$@" --top-module $top > "$B/$top.build.log" 2>&1 \
     || { tail -20 "$B/$top.build.log"; echo "BUILD FAIL $top"; exit 1; }
 }
