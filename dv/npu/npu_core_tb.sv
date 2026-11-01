@@ -13,7 +13,7 @@
 //          量測 MAC 利用率 = perf_steps / (perf_busy × NCU), 須 >= +min_util (百分比, 預設 0)。
 //          +perf_rounds=R: 同一組 NCU 個命令 (新的 id) 連續送 R 輪, 量測命令重疊下的穩態利用率
 //          (同一命令同時在兩個 CU 執行時寫入相同的 C, 結果仍可比對)。
-// plusargs: +seed=N  +cmds=N (預設 200)  +perf [+perf_k=K]  +min_util=P  +long
+// plusargs: +seed=N  +cmds=N (預設 200)  +perf [+perf_k=K]  +min_util=P  +long  +smoke (+cmds=N 筆的單一 batch)
 //=============================================================================
 module npu_core_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB = 4, parameter int DEPTH = 1024);
   import orca_pkg::*;
@@ -384,6 +384,7 @@ module npu_core_tb #(parameter int N = 8, parameter int NCU = 4, parameter int N
     repeat (3) @(posedge clk); #1 rst_n = 1'b1;
     if ($test$plusargs("perf")) perf_run();
     else if ($test$plusargs("long")) long_run();
+    else if ($test$plusargs("smoke")) batch(ncmds, 0);   // CI smoke (大組態): 只跑一個 batch, 不跑 directed 段
     else begin
       if (NCU > 1) directed_rr();
       repeat (3) directed_wr_fair();
