@@ -211,4 +211,25 @@ module npu_ss_dma
     cover (act && iss - wr == 16'(OUT) && iss != n);
   end
 `endif
+`ifndef SYNTHESIS
+`ifndef FORMAL
+  // ---------------- SVA (模擬用; 合成與形式驗證時不編入) ----------------
+  // 形式證明把下列外部行為當成假設 (assume); 模擬時以 assertion 檢查整合環境真的遵守。
+  default clocking cb @(posedge clk); endclocking
+  default disable iff (!rst_n);
+  // 讀回應只在 LD 進行中、且有已 grant 未回應的讀時出現 (多出的 rvalid 會把雜訊推進 FIFO, 破壞下一個命令)
+  a_rvalid_ok:   assert property (m_rd_rvalid |-> act && !st && int'(wr) + int'(f_cnt) < int'(iss));
+  // 帳與 FIFO: 在途 <= OUT, FIFO 不溢位 / 不下溢
+  a_outst:       assert property (!act || (wr <= iss && iss <= n && int'(16'(iss - wr)) <= OUT));
+  a_fifo_ovf:    assert property (!(push && !pop && f_cnt == (OW+1)'(OUT)));
+  a_fifo_udf:    assert property (!(pop && f_cnt == '0));
+  // 請求保持到 grant, 位址 / 資料不變; done 為一拍脈衝; 閒置時沒有請求
+  a_mrd_hold:    assert property (m_rd_req && !m_rd_gnt |=> m_rd_req && $stable(m_rd_addr));
+  a_mwr_hold:    assert property (m_wr_req && !m_wr_gnt |=> m_wr_req && $stable(m_wr_addr) && $stable(m_wr_data));
+  a_hrd_hold:    assert property (h_rd_req && !h_rd_gnt |=> h_rd_req && $stable(h_rd_line));
+  a_hwr_hold:    assert property (h_wr_req && !h_wr_gnt |=> h_wr_req && $stable(h_wr_line) && $stable(h_wr_data));
+  a_done_pulse:  assert property (done |=> !done);
+  a_idle_quiet:  assert property (!act |-> !(m_rd_req || m_wr_req || h_rd_req || h_wr_req) && f_cnt == '0);
+`endif
+`endif
 endmodule : npu_ss_dma
