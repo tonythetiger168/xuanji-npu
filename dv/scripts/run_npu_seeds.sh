@@ -4,7 +4,7 @@
 #   WAVES=1: 失敗的 seed (最多 WAVES_MAX 個, 預設 3) 以 --trace-fst 另外編譯的版本重跑, 波形存成 $B/wave_<seed>.fst。
 #   CDV=1: 每個 seed 都以 +cdv (coverage-driven) 執行 (只對 ss 有意義)。
 # 需求: Verilator >= 5.052
-# 用法: dv/scripts/run_npu_seeds.sh <core|ss> <nano|x1|pro|max> [seeds=1000] [batches=10]
+# 用法: dv/scripts/run_npu_seeds.sh <core|ss> <nano|x1|pro|max> [seeds=1000] [batches=10]  (core: 命令數 = batches × 10)
 #   JOBS=平行執行數 (預設 nproc)
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -17,7 +17,7 @@ CU="rtl/npu/npu_gemm_cu.sv dv/npu/npu_gemm_cu_sva.sv"
 if [ "$KIND" = core ]; then
   SRC="-Irtl/common rtl/common/orca_pkg.sv rtl/common/clock_gate.sv rtl/npu/npu_mma.sv dv/npu/npu_mma_sva.sv $CU
        rtl/npu/npu_l2_xbar.sv dv/npu/npu_l2_xbar_sva.sv rtl/npu/npu_core.sv dv/npu/npu_core_sva.sv dv/npu/npu_core_tb.sv"
-  TOP=npu_core_tb; TAG=NPUCORE; ARGS="+batches=$NBT"
+  TOP=npu_core_tb; TAG=NPUCORE; ARGS="+cmds=$((NBT * 10))"   # core TB: 命令數 = batches × 10
 else
   SRC="-Irtl/common -Irtl/fp rtl/common/orca_pkg.sv rtl/common/clock_gate.sv rtl/npu/npu_mma.sv dv/npu/npu_mma_sva.sv
        rtl/fp/fp_add.sv rtl/fp/fp_mul.sv rtl/fp/fp_narrow.sv rtl/fp/fp_widen.sv rtl/fp/sfu.sv rtl/fp/fp_max.sv rtl/fp/fp_small_dec.sv
