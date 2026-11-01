@@ -16,8 +16,8 @@ verilator --binary --timing -j "${JOBS:-4}" --assert --coverage -Wno-fatal -Wno-
   rtl/fp/fp_mx_scale.sv rtl/fp/fp_from_int.sv rtl/npu/npu_vec.sv dv/vec/npu_vec_sva.sv rtl/npu/npu_vec_eng.sv \
   dv/vec/npu_vec_eng_sva.sv rtl/npu/npu_l2_arb2.sv \
   dv/npu/npu_gemm_cu_sva.sv rtl/npu/npu_l2_xbar.sv dv/npu/npu_l2_xbar_sva.sv rtl/npu/npu_core.sv dv/npu/npu_core_sva.sv \
-  rtl/npu/npu_ss_dma.sv rtl/npu/orca_npu_ss.sv dv/npu/npu_ss_sva.sv rtl/common/ret_shadow.sv rtl/npu/npu_ss_regs.sv dv/npu/npu_ss_regs_sva.sv \
-  rtl/npu/orca_npu_ss_apb.sv dv/npu/orca_npu_ss_apb_tb.sv --top-module orca_npu_ss_apb_tb > "$B/build_i.log" 2>&1 || { tail -20 "$B/build_i.log"; echo "BUILD FAIL"; exit 1; }
+  rtl/npu/npu_ss_dma.sv rtl/npu/orca_npu_ss.sv dv/npu/npu_ss_sva.sv dv/npu/npu_ss_e2e_sva.sv rtl/common/ret_shadow.sv rtl/npu/npu_ss_regs.sv dv/npu/npu_ss_regs_sva.sv \
+  rtl/npu/orca_npu_ss_apb.sv dv/npu/npu_ss_apb_sva.sv dv/npu/orca_npu_ss_apb_tb.sv --top-module orca_npu_ss_apb_tb > "$B/build_i.log" 2>&1 || { tail -20 "$B/build_i.log"; echo "BUILD FAIL"; exit 1; }
 fail=0
 run() {   # 名稱 執行檔 plusargs...
   local n=$1 x=$2; shift 2

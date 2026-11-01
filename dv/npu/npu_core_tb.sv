@@ -405,4 +405,15 @@ module npu_core_tb #(parameter int N = 8, parameter int NCU = 4, parameter int N
     if (n_err == 0) $display("TB PASS"); else $display("TB FAIL");
     $finish;
   end
+`ifdef WAVES
+  // 波形 (以 --trace-fst +define+WAVES 編譯): +dump[=檔名] 寫 FST, 預設 waves.fst
+  initial begin
+    string fn;
+    if ($test$plusargs("dump")) begin
+      if (!$value$plusargs("dump=%s", fn)) fn = "waves.fst";
+      $dumpfile(fn);
+      $dumpvars(0, npu_core_tb);
+    end
+  end
+`endif
 endmodule

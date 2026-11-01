@@ -22,7 +22,7 @@ SRC="-Irtl/common -Irtl/fp rtl/common/orca_pkg.sv rtl/common/clock_gate.sv rtl/n
   rtl/npu/npu_l2_arb2.sv dv/npu/npu_l2_arb2_sva.sv
   rtl/npu/npu_gemm_cu.sv dv/npu/npu_gemm_cu_sva.sv rtl/npu/npu_l2_xbar.sv dv/npu/npu_l2_xbar_sva.sv
   rtl/npu/npu_core.sv dv/npu/npu_core_sva.sv rtl/npu/npu_ss_dma.sv rtl/npu/orca_npu_ss.sv
-  dv/npu/npu_ss_sva.sv dv/npu/npu_ss_tb.sv"
+  dv/npu/npu_ss_sva.sv dv/npu/npu_ss_e2e_sva.sv dv/npu/npu_ss_tb.sv"
 verilator --binary --timing -j "${JOBS:-4}" --output-groups 64 --assert --coverage --coverage-max-width 32768 \
   -Wno-fatal -Wno-lint -Wno-style --Mdir "$B/tb" -GN=$N -GNCU=$NCU -GNB=$NB -GDEPTH=$DEPTH -GOUT=$TILE_OUT $SRC \
   --top-module npu_ss_tb > "$B/build.log" 2>&1 || { tail -20 "$B/build.log"; echo "BUILD FAIL"; exit 1; }
@@ -33,6 +33,14 @@ for ((s = 1; s <= NS; s++)); do
     echo "PASS s$s  $(grep -m1 '^NPUSS:' "$B/s$s.log")"
   else
     echo "FAIL s$s"; grep -m5 -E "MISMATCH|Assertion|ERROR|Error" "$B/s$s.log" || true; fail=1
+  fi
+done
+# coverage-driven: 32-bit 隨機 seed (每次執行不同; 以 CDV_SEEDS="a b" 重現), 依端到端 coverage 的未命中 bin 調整激勵直到收斂
+for cs in ${CDV_SEEDS:-$(od -An -tu4 -N8 /dev/urandom)}; do
+  if (cd "$B" && ./tb/Vnpu_ss_tb +seed=$cs +batches=$((NBT * 4)) +cdv +no_big +verilator+coverage+file+cov_cdv$cs.dat > cdv$cs.log 2>&1) && grep -q "TB PASS" "$B/cdv$cs.log"; then
+    echo "PASS cdv seed=$cs  $(grep -m1 '^CDV:' "$B/cdv$cs.log")"
+  else
+    echo "FAIL cdv seed=$cs (rerun: CDV_SEEDS=$cs)"; grep -m5 -E "MISMATCH|Assertion|ERROR|Error|hole" "$B/cdv$cs.log" || true; fail=1
   fi
 done
 for r in 1 2; do   # 上電時未 reset 的儲存為隨機值 (Verilator 隨機初值)
@@ -53,6 +61,6 @@ python3 dv/scripts/cov_report.py "$B"/cov_*.dat --by-module --rtl '^rtl/(npu/(or
   --expect rtl/npu/npu_l2_arb2.sv \
   --waivers "$W" --require 100 --list "${LIST:-40}" || fail=1
 echo "=== functional coverage (covergroup) + SVA cover (user)"
-python3 dv/scripts/cov_report.py "$B"/cov_*.dat --by-module --rtl '^dv/npu/npu_(ss|l2_arb2)_sva' --types covergroup,user \
+python3 dv/scripts/cov_report.py "$B"/cov_*.dat --by-module --rtl '^dv/npu/npu_(ss|ss_e2e|l2_arb2)_sva' --types covergroup,user \
   --waivers "$W" --require 100 --list "${LIST:-40}" || fail=1
 [ "$fail" -eq 0 ] && echo "##### $CFG PASS" || { echo "##### $CFG FAIL"; exit 1; }

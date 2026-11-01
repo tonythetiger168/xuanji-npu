@@ -32,7 +32,7 @@ PY
     -GN=$N -GNCU=$NCU -GNB=$NB -GDEPTH=$DEPTH -GOUT=$TILE_OUT --Mdir "$M/$n.obj" -Irtl/common -Irtl/fp \
     rtl/common/orca_pkg.sv rtl/common/clock_gate.sv rtl/npu/npu_mma.sv dv/npu/npu_mma_sva.sv $FP $arb dv/npu/npu_l2_arb2_sva.sv \
     rtl/npu/npu_gemm_cu.sv dv/npu/npu_gemm_cu_sva.sv rtl/npu/npu_l2_xbar.sv dv/npu/npu_l2_xbar_sva.sv \
-    rtl/npu/npu_core.sv dv/npu/npu_core_sva.sv $dma $tile dv/npu/npu_ss_sva.sv dv/npu/npu_ss_tb.sv \
+    rtl/npu/npu_core.sv dv/npu/npu_core_sva.sv $dma $tile dv/npu/npu_ss_sva.sv dv/npu/npu_ss_e2e_sva.sv dv/npu/npu_ss_tb.sv \
     --top-module npu_ss_tb > "$M/$n.build" 2>&1 || { echo "$n: BUILD FAIL"; rm -rf "$M/$n.obj"; surv=1; return; }
   timeout 1800 "$M/$n.obj/Vnpu_ss_tb" +seed=7 +batches=$NBT +no_big > "$M/$n.log" 2>&1
   # 全 0 上電通過時, 再以隨機上電狀態 (未 reset 的儲存為隨機值) 執行
