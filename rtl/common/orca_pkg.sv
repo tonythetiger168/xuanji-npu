@@ -220,6 +220,14 @@ package orca_pkg;
 
 `define EXC_NONE '0   // exception_t is packed; all-zero = no exception
 
+  // uop 攜帶的 decode 例外 (v6.3.7): decode 只產生 illegal instruction (mcause 2),
+  // tval = 32-bit 指令編碼 (SYSTEM / CSR 亦以此欄位傳遞原始編碼給 csr_unit, valid=0)。
+  // 原本攜帶完整 exception_t (code 4 + tval 64 bit), 其中 35 bit 恆定。ROB 轉成 exception_t。
+  typedef struct packed {
+    logic        valid;
+    logic [31:0] tval;
+  } uop_exc_t;
+
   // ---------------------------------------------------------------------------
   // Opcode Type (internal uop opcode, decoded from RISC-V major opcode)
   // ---------------------------------------------------------------------------
@@ -270,26 +278,108 @@ package orca_pkg;
     rob_idx_t     rob_idx;        // Assigned ROB entry
     uop_id_t      uop_id;         // Unique tag for trace/debug
     tid_t         tid;            // SMT thread ID
-    sq_idx_t      sq_idx;         // Store queue index (stores only)
-    lq_idx_t      lq_idx;         // Load queue index (loads only)
     logic         is_branch;      // Branch-type uop
     logic         is_cond;        // Conditional (direct) branch
-    logic         is_indirect;    // Indirect branch (JALR)
     logic         is_return;      // Return (pop RAS)
     logic         is_call;        // Call (push RAS)
     logic         is_load;        // Load-type
     logic         is_store;       // Store-type
     logic         is_fp;          // Uses FP register file
-    logic         is_vec;         // Uses vector register file
-    logic         is_aix;         // AIX tensor instruction
     logic         pred_taken;     // BPU prediction (1 = taken)
     xword_t       pred_target;    // BPU predicted target
     logic [2:0]   funct3;         // RISC-V funct3
     logic [6:0]   funct7;         // RISC-V funct7
-    exception_t   exc;            // Decoded exception (illegal inst, etc.)
+    logic         is_rvc;         // v6.3.5: 16-bit (RVC) 指令, 下一條 PC = pc+2
+    logic         is_word;        // v6.3.5: RV64 *W 運算 (OP-32 / OP-IMM-32), 結果 sext32
+    uop_exc_t     exc;            // Decoded exception (illegal inst) / SYSTEM 原始編碼
   } uop_t;
 
 `define UOP_NOP '0   // uop_t is packed; opcode 0 = OP_NOP
+
+  // ---------------------------------------------------------------------------
+  // 前端 uop (v6.3.7): rename 之前不帶 rename / ROB / 年齡欄位 (prs*/prd*/rob_idx/uop_id),
+  // decoder 輸出另外不帶分支預測欄位 — 原本每一級都搬完整 uop_t, 這些欄位在前端恆 0
+  // ---------------------------------------------------------------------------
+  typedef struct packed {
+    opcode_type_t  opcode;
+    xword_t        pc;
+    xword_t        imm;
+    arch_reg_idx_t rs1, rs2, rd;
+    tid_t          tid;
+    logic          is_branch, is_cond, is_return, is_call, is_load, is_store, is_fp;
+    logic [2:0]    funct3;
+    logic [6:0]    funct7;
+    logic          is_rvc, is_word;
+    uop_exc_t      exc;
+  } dec_uop_t;
+
+  typedef struct packed {          // 欄位名稱與 uop_t 相同 (rename 以同一套程式碼讀取)
+    opcode_type_t  opcode;
+    xword_t        pc;
+    xword_t        imm;
+    arch_reg_idx_t rs1, rs2, rd;
+    tid_t          tid;
+    logic          is_branch, is_cond, is_return, is_call, is_load, is_store, is_fp;
+    logic          pred_taken;
+    xword_t        pred_target;
+    logic [2:0]    funct3;
+    logic [6:0]    funct7;
+    logic          is_rvc, is_word;
+    uop_exc_t      exc;
+  } fe_uop_t;
+
+  function automatic fe_uop_t dec2fe(dec_uop_t d, logic pred_taken, xword_t pred_target);
+    fe_uop_t f;
+    f.opcode = d.opcode;
+    f.pc = d.pc;
+    f.imm = d.imm;
+    f.rs1 = d.rs1;
+    f.rs2 = d.rs2;
+    f.rd = d.rd;
+    f.tid = d.tid;
+    f.is_branch = d.is_branch;
+    f.is_cond = d.is_cond;
+    f.is_return = d.is_return;
+    f.is_call = d.is_call;
+    f.is_load = d.is_load;
+    f.is_store = d.is_store;
+    f.is_fp = d.is_fp;
+    f.funct3 = d.funct3;
+    f.funct7 = d.funct7;
+    f.is_rvc = d.is_rvc;
+    f.is_word = d.is_word;
+    f.exc = d.exc;
+    f.pred_taken = pred_taken;  f.pred_target = pred_target;
+    return f;
+  endfunction
+
+  // rename 前的 uop → 完整 uop_t (rename / ROB / 年齡欄位為 0, 由 rename / dispatch 填入)
+  function automatic uop_t fe2uop(fe_uop_t f);
+    uop_t u;
+    u = '0;
+    u.opcode = f.opcode;
+    u.pc = f.pc;
+    u.imm = f.imm;
+    u.rs1 = f.rs1;
+    u.rs2 = f.rs2;
+    u.rd = f.rd;
+    u.tid = f.tid;
+    u.is_branch = f.is_branch;
+    u.is_cond = f.is_cond;
+    u.is_return = f.is_return;
+    u.is_call = f.is_call;
+    u.is_load = f.is_load;
+    u.is_store = f.is_store;
+    u.is_fp = f.is_fp;
+    u.funct3 = f.funct3;
+    u.funct7 = f.funct7;
+    u.is_rvc = f.is_rvc;
+    u.is_word = f.is_word;
+    u.exc = f.exc;
+    u.pred_taken = f.pred_taken;
+    u.pred_target = f.pred_target;
+    return u;
+  endfunction
 
   // ---------------------------------------------------------------------------
   // Functional Unit Type (for scheduler port mapping)
@@ -373,6 +463,24 @@ package orca_pkg;
   localparam logic [7:0] AIX_OP_DMA_LD  = 8'h10;  // Host->AI DMA load
   localparam logic [7:0] AIX_OP_DMA_ST  = 8'h11;  // AI->Host DMA store
 
+  // NPU Subsystem 命令 (v6.3.9, orca_npu_ss; 語意見 docs/npu.md 「NPU Subsystem」)
+  typedef enum logic [2:0] {
+    NPU_OP_GEMM   = 3'd0,   // C[c] = A[a] × B[b], K = k (npu_core)
+    NPU_OP_DMA_LD = 3'd1,   // 外部 ext.. → L2 a.., k 個 line
+    NPU_OP_DMA_ST = 3'd2,   // L2 a.. → 外部 ext.., k 個 line
+    NPU_OP_NOP    = 3'd3,   // 只回報完成 (wt = 1 時即 fence)
+    NPU_OP_VEC    = 3'd4    // 向量程式: 從 L2 line a 起的 k 個指令 (npu_vec_eng); 5..7 保留 (當 NOP)
+  } npu_op_e;
+  typedef struct packed {
+    npu_op_e     op;
+    logic        wt;        // 等待: 先前所有命令完成後才分派
+    logic [7:0]  id;
+    logic [31:0] ext;       // 外部 line 位址 (DMA)
+    logic [25:0] a, b, c;   // L2 line 位址 (GEMM: A / B / C; DMA: a)
+    logic [15:0] k;         // GEMM: K; DMA: line 數
+    logic        sa, sb;    // GEMM: A / B 有號
+  } npu_tile_cmd_t;
+
   // ---------------------------------------------------------------------------
   // Cache Coherence States (MESI-F, used by lsu_dcache / l2cache / orca_chi_coh)
   // ---------------------------------------------------------------------------
@@ -426,19 +534,45 @@ package orca_pkg;
 // ---------------------------------------------------------------------------
   // ROB Entry (used by cmt_rob)
   // ---------------------------------------------------------------------------
+  // ROB 只需保存 retire / 例外 / 除錯會用到的 uop 欄位 (v6.3.7; 原本保存完整 uop_t,
+  // 1024 項 × 330 bit, 其中來源 / 立即值 / 預測等欄位在 retire 時都用不到)
+  typedef struct packed {
+    opcode_type_t  opcode;
+    xword_t        pc;
+    arch_reg_idx_t rd;
+    tid_t          tid;
+    logic          is_branch;
+    logic          is_fp;
+    logic          is_rvc;
+  } rob_uop_t;
+
   typedef struct packed {
     logic        valid;
     logic        complete;     // Execution finished
-    uop_t        uop;
+    rob_uop_t    uop;
     xword_t      result;       // Execution result
-    logic        branch_taken; // Actual branch direction
-    xword_t      branch_target;
+    logic        branch_taken; // v6.3.5: 分支解析為預測失敗, retire 後須 redirect
+    xword_t      branch_target;// v6.3.5: redirect 目標 (正確的下一個 PC)
     logic        exception;    // Exception pending
     exception_t  exc_code;
     phys_reg_idx_t prd;        // Physical destination (from rename)
     phys_reg_idx_t old_prd;
     tid_t        tid;
   } rob_entry_t;
+
+  // ROB retire 輸出 (v6.3.7): 已 retire 的 entry 必無例外, 例外碼 / redirect 目標在 ROB 內部處理,
+  // 不需隨 retire 輸出 (exception 欄位保留給既有 TB, 恆 0 — 見 SVA a_retire_ok)
+  typedef struct packed {
+    logic          valid;
+    logic          complete;
+    rob_uop_t      uop;
+    xword_t        result;
+    logic          branch_taken;
+    logic          exception;
+    phys_reg_idx_t prd;
+    phys_reg_idx_t old_prd;
+    tid_t          tid;
+  } rob_retire_t;
 
 
   // ---------------------------------------------------------------------------
@@ -471,6 +605,20 @@ package orca_pkg;
   parameter int MOE_MAX_EXPERTS   = 256;   // MoE 最大專家數
   parameter int CLOUD_NOC_W       = 1024;  // scale-out 鏈路寬 (1024-bit flit)
 
+  // ---------------- NPU L2 位址對應 (npu_l2_xbar 與 TB 後門共用) ----------------
+  // bank = line 低 bw 位元 XOR (列位址各 bw 位元段) — 對齊的區域 (例如每個命令一個對齊 slot) 不會全部從同一 bank
+  // 開始而在多個 CU 間形成同步衝突 (convoy); 連續 NB 個 line 仍落在 NB 個不同 bank。只摺疊列位址 [bw, bw+dw)
+  // 內的位元, 所以 line 與 line + 容量仍對應同一位置 (超出容量的位址模數環繞)。列 = line[bw +: dw] (不變)。
+  function automatic int unsigned npu_l2_bank(logic [25:0] l, int bw, int dw);
+    logic [25:0] b, m;
+    m = (26'(1) << bw) - 1'b1;
+    b = l & m;
+    for (int s = bw; s < bw + dw; s += bw) b ^= (l >> s) & m & ((26'(1) << (bw + dw - s)) - 1'b1);
+    return int'(b);
+  endfunction
+  function automatic int unsigned npu_l2_row(logic [25:0] l, int bw, int dw);
+    return int'((l >> bw) & ((26'(1) << dw) - 1'b1));
+  endfunction
 endpackage : orca_pkg
 
 

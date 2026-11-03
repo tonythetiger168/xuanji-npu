@@ -1,0 +1,4 @@
+# npu_ss_regs coverage 豁免 (dv/scripts/cov_report.py 格式: <類型> <regex> # <理由>)
+# 分類: [C] 結構常數 (設計決定)  [U] 證明不可達  [V] 工具限制
+toggle npu_ss_regs\.sv:\d+\s+pready:1->0 # [C] 零等待從端: PREADY 恆為 1 (docs/apb.md); 只有 reset 後的 0->1
+toggle npu_ss_regs\.sv:\d+\s+r_ctl\[[6-7]\]: # [C] CMD_CTL 的保留位元 [7:6] 寫入時遮成 0, 恆為 0 (docs/apb.md)

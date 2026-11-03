@@ -1,0 +1,3 @@
+# 浮點函式庫 coverage 豁免 (dv/scripts/cov_report.py 格式: <類型> <regex> # <理由>)
+# 分類: [C] 結構常數 (參數決定)  [U] 證明不可達  [V] 工具限制
+toggle fp_widen\.sv:\d+ \S* y\[([0-9]|1[0-5])\]: # [C] BF16 → FP32: 補上的 16 個低位尾數位元恆為 0 (精確擴展的定義)

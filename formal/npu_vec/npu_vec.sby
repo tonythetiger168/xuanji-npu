@@ -1,0 +1,24 @@
+# npu_vec 控制 (L2 交握 / ready / err / 暫存器檔寫入紀律): NV = 2; 浮點元件為 stubs.sv 的任意值替身
+[tasks]
+prove
+cover
+
+[options]
+prove: mode prove
+prove: depth 3
+cover: mode cover
+cover: depth 8
+
+[engines]
+smtbmc z3
+
+[script]
+read_verilog -sv -formal npu_vec.v
+chparam -set NV 2 npu_vec
+hierarchy -top npu_vec
+flatten
+opt_clean
+prep -top npu_vec
+
+[files]
+npu_vec.v

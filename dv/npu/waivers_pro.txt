@@ -1,0 +1,2 @@
+# Xuanji-X1-Pro (N=16): 結構常數
+toggle npu_gemm_cu\.sv:\d+ \S* out_nxt\[[01]\]: # [C] N=16: 每個 C line 只放 1 列 (16 x INT32 = 64 B), 每列輸出後必寫回 (out_nxt 恆為 W_WR)

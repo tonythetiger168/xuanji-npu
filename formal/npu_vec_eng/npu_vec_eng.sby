@@ -1,0 +1,23 @@
+# npu_vec_eng (取指 / 預取 / 發出 / 完成): 第 i 個發出的指令 = 程式第 i 個字、恰好 n 個後 done、讀取請求保持;
+# npu_vec 為 stubs.sv 的契約替身
+[tasks]
+prove
+cover
+
+[options]
+prove: mode prove
+prove: depth 6
+cover: mode cover
+cover: depth 20
+
+[engines]
+smtbmc z3
+
+[script]
+read_verilog -sv -formal npu_vec_eng.v
+hierarchy -top npu_vec_eng
+flatten
+prep -top npu_vec_eng
+
+[files]
+npu_vec_eng.v
