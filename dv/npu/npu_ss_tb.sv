@@ -6,12 +6,14 @@
 //   參考模型逐指令執行; 完整 ISA 在 npu_vec / npu_vec_eng 的單元驗證);
 //   以「依序執行」的參考模型 (L2 + 外部記憶體) 求得預期結果。產生器追蹤自上一個等待旗標 (wt) 以來
 //   所有命令的讀 / 寫範圍: 新命令與其衝突時必設 wt (另有隨機 wt) — 因此 DUT 的並行執行必須等同依序執行。
-//   外部記憶體模型: 讀 / 寫 grant 隨機 (與 req 無關)、讀回應依序且延遲隨機 (0..L 拍後、可間斷)。
+//   外部記憶體模型: 讀 / 寫 grant 隨機 (與 req 無關)、讀回應依序且延遲隨機 (0..L 拍後、可間斷);
+//   部分 batch 隨機出現整段停擺 (100..1500 拍無 grant / 回應)。
 //   batch 結束 (所有完成都已收到且 busy = 0) 時比對: 整個 L2 (後門) 與外部記憶體所有被寫過的 line、
 //   每個 id 恰好完成一次、wt 命令的完成必在所有先前命令之後、perf_steps = 起始值 + 所有 GEMM 的 K。
 //   每個 batch 隨機: 各埠 grant / 回壓機率、test_en、效能計數器起始值; 偶爾在 batch 中途 reset
 //   (之後以 DUT 狀態重新同步參考模型)。
 // plusargs: +seed=N  +batches=N (預設 30)  +cmds=N (每個 batch 的命令數上限, 預設 60)  +no_big (不跑長 DMA)
+//           +cdv: coverage-driven — 依 dv/npu/npu_ss_e2e_sva.sv 的未命中 bin 調整每個 batch 的激勵, 收斂後停止
 //           +perf_dma=L: DMA 吞吐量量測 (外部埠全速, 讀取延遲固定 L 拍)
 //=============================================================================
 module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB = 4, parameter int DEPTH = 1024,
@@ -20,6 +22,9 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
   localparam int QD = 8;                                  // 與 orca_npu_ss 預設一致
   localparam int LINES = NB * DEPTH, SPL = 64 / N, CL = (4 * N * N + 63) / 64;
   localparam int LB = $clog2(LINES);
+  bit cdv;                                                // +cdv (見下方 cdv_bias)
+  int focus = -1;                                         // 偏向的 op 類別 (-1: 無)
+  int focus_sel [4] = '{0, 7, 13, 19};                    // gen_cmd 的選擇值: GEMM / DMA_LD / DMA_ST / NOP
 
   logic clk = 1'b0, rst_n = 1'b0, test_en = 1'b0;
   logic cmd_valid = 1'b0, cmd_ready;
@@ -218,7 +223,7 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
     fp_t f;
     c = '0; c.id = id; c.ext = $urandom(); c.a = 26'($urandom()); c.b = 26'($urandom()); c.c = 26'($urandom());
     c.k = 16'($urandom()); c.sa = 1'($urandom()); c.sb = 1'($urandom());
-    case (mode == 1 ? (rnd(65) ? 0 : rnd(70) ? 19 : 7) : ur(0, 19))
+    case ((focus >= 0 && focus < 4 && rnd(60)) ? focus_sel[focus] : mode == 1 ? (rnd(65) ? 0 : rnd(70) ? 19 : 7) : ur(0, 19))
       0, 1, 2, 3, 4, 5, 6: begin
         int al;
         c.op = NPU_OP_GEMM; c.k = pick_k(); al = (int'(c.k) + SPL - 1) / SPL;
@@ -304,6 +309,7 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
   int cpl_pos [int];                     // id -> 完成順序
   int prog_pos [int];                    // id -> 程式中的位置
   int p_cmd = 80, p_cpl = 80, p_rgnt = 80, p_wgnt = 80, p_rv = 80, rlat = 4;
+  int p_out = 0, outage = 0;                              // 外部記憶體整段停擺: 每拍以 p_out/10000 機率開始, 長 100..1500 拍
   typedef struct { logic [511:0] d; longint t; } rsp_t;
   rsp_t rq [$];
   longint cyc = 0, last_t = 0;
@@ -315,7 +321,7 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
     cyc++;
     if (!rst_n) begin
       cmd_valid <= 1'b0; cpl_ready <= 1'b0; m_rd_gnt <= 1'b0; m_wr_gnt <= 1'b0; m_rd_rvalid <= 1'b0;
-      rq.delete();
+      rq.delete(); outage = 0;
     end else begin
       // 外部讀: grant → 依序回應 (延遲 0..rlat, 回應之間可間斷)
       if (m_rd_req && m_rd_gnt) begin
@@ -324,12 +330,15 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
         last_t = t;
         rq.push_back('{erd(m_rd_addr), t});
       end
-      if (rq.size() != 0 && rq[0].t <= cyc && rnd(p_rv)) begin m_rd_rvalid <= 1'b1; m_rd_rdata <= rq.pop_front().d; end
+      if (outage > 0) outage--;
+      else if (fix_lat < 0 && p_out != 0 && ur(0, 9999) < p_out) outage = ur(100, 1500);
+      if (outage > 0) begin m_rd_rvalid <= 1'b0; m_rd_rdata <= {16{$urandom()}}; end
+      else if (rq.size() != 0 && rq[0].t <= cyc && rnd(p_rv)) begin m_rd_rvalid <= 1'b1; m_rd_rdata <= rq.pop_front().d; end
       else begin m_rd_rvalid <= 1'b0; m_rd_rdata <= {16{$urandom()}}; end
-      m_rd_gnt <= rnd(p_rgnt);
+      m_rd_gnt <= rnd(p_rgnt) && outage == 0;
       // 外部寫: grant 拍完成
       if (m_wr_req && m_wr_gnt) emem[m_wr_addr] = m_wr_data;
-      m_wr_gnt <= rnd(p_wgnt);
+      m_wr_gnt <= rnd(p_wgnt) && outage == 0;
       // 命令
       if (cmd_valid && cmd_ready) pidx++;
       if (cmd_valid && !cmd_ready) ;                       // 保持
@@ -390,6 +399,38 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
     n_err += bad;
   endtask
 
+  // ---------------- coverage-driven 模式 (+cdv) ----------------
+  // dut.u_e2e.hit[] (dv/npu/npu_ss_e2e_sva.sv) 是端到端 coverage 的命中位元; 每個 batch 前隨機挑一個未命中的 bin,
+  // 依它調整命令組成 (focus: 偏向某一 op 類別) 與各埠壓力。全部命中後回到一般隨機。
+  int cdv_closed_at = -1;
+  function automatic int cdv_holes();
+    int n = 0;
+    for (int i = 0; i < $bits(dut.u_e2e.hit); i++) if (!dut.u_e2e.hit[i]) n++;
+    return n;
+  endfunction
+  function automatic void cdv_bias(ref int ncmd, ref int mode, ref int p_wt);
+    int holes [$];
+    int h;
+    for (int i = 0; i < $bits(dut.u_e2e.hit); i++) if (!dut.u_e2e.hit[i]) holes.push_back(i);
+    if (holes.size() == 0) return;
+    h = holes[ur(0, holes.size() - 1)];
+    mode = 0;
+    if (h < 15) begin                                      // op 類別 × 延遲
+      focus = h / 3;
+      unique case (h % 3)
+        0: begin ncmd = ur(1, 3); p_cmd = 30; p_cpl = 100; rlat = 0; p_rgnt = 100; p_wgnt = 100; p_rv = 100; p_out = 0; p_wt = 0; end
+        1: begin p_cpl = ur(40, 80); rlat = ur(1, 12); end
+        default: begin p_cpl = ur(3, 10); rlat = ur(OUT, 3 * OUT); p_rgnt = ur(5, 30); p_wgnt = ur(5, 30); p_cmd = 100; end
+      endcase
+    end else if (h < 20) begin                             // 亂序完成: 前面放長命令、不設 wt
+      focus = h - 15; p_wt = 0; p_cmd = 100; p_cpl = ur(50, 100); rlat = ur(OUT, 3 * OUT);
+    end else if (h == 20) begin ncmd = ur(1, 3); p_cmd = 20; p_cpl = 100; end
+    else if (h == 21) begin ncmd = ur(2, 6); p_cmd = 40; p_cpl = 100; end
+    else begin                                             // 深佇列 / 回壓
+      p_cmd = 100; p_cpl = ur(3, 10); p_wt = 0; ncmd = ur(nc / 2, nc);
+    end
+  endfunction
+
   task automatic batch(int ncmd, bit big = 0);
     logic [7:0] ids [256];
     longint ksum = 0;
@@ -404,11 +445,14 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
     p_rv   = ur(30, 100);
     rlat   = (ur(0, 2) == 0) ? 0 : (ur(0, 1) == 0) ? ur(1, 12) : ur(OUT, 3 * OUT);   // 長延遲: 在途額度用盡
     p_wt   = ur(0, 3) * 10;
+    p_out  = (ur(0, 4) == 0) ? ur(1, 20) : 0;                // 1/5 的 batch 有外部記憶體停擺 (DRAM refresh / NoC 壅塞)
     mode   = (ur(0, 3) == 0) ? 1 : 0;
     p_hot  = (mode == 1) ? 0 : 50;
     if (mode == 1) p_wt = 0;
     test_en = rnd(15);
-    if (big) begin p_rgnt = 100; p_wgnt = 100; p_rv = 100; end   // 長 DMA: 外部埠全速
+    focus = -1;
+    if (cdv) cdv_bias(ncmd, mode, p_wt);                         // coverage-driven: 偏向尚未命中的 bin
+    if (big) begin p_rgnt = 100; p_wgnt = 100; p_rv = 100; p_out = 0; end   // 長 DMA: 外部埠全速
     for (int i = 0; i < 8; i++) hot_l2[i] = 26'(ur(0, LINES - 1));
     for (int i = 0; i < 6; i++) hot_ext[i] = $urandom();
     // 效能計數器起始值 (含接近 2^48 的值)
@@ -427,7 +471,7 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
     acc_clear();
     vec_err_exp = 0; vec_err_got = 0;
     for (int i = 0; i < ncmd; i++) begin
-      if (!big && mode == 0 && i + 1 < ncmd && rnd(20)) begin             // DMA_LD 程式 + VEC
+      if (!big && mode == 0 && i + 1 < ncmd && rnd((focus == 4) ? 60 : 20)) begin             // DMA_LD 程式 + VEC
         npu_tile_cmd_t c0, c1;
         gen_vec(ids[i], ids[i + 1], p_wt, c0, c1);
         prog.push_back(c0); prog_pos[int'(c0.id)] = i;
@@ -638,7 +682,17 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
     repeat (3) @(posedge clk);
     rst_n <= 1'b1;
     repeat (2) @(posedge clk);
+    cdv = $test$plusargs("cdv");
     if ($value$plusargs("perf_dma=%d", fix_lat)) perf_dma();
+    else if (cdv) begin                                    // 跑到端到端 coverage 全部命中 (最多 nb 個 batch) 再多跑 5 個
+      int extra = 5;
+      for (int b = 0; b < int'(nb) && extra > 0; b++) begin
+        batch(ur(nc / 2, nc));
+        if (cdv_holes() == 0) begin if (cdv_closed_at < 0) cdv_closed_at = b + 1; extra--; end
+      end
+      $display("CDV: e2e bins %0d, holes %0d, closed after %0d batches", $bits(dut.u_e2e.hit), cdv_holes(), cdv_closed_at);
+      for (int i = 0; i < $bits(dut.u_e2e.hit); i++) if (!dut.u_e2e.hit[i]) $display("CDV: hole bin %0d", i);
+    end
     else for (int b = 0; b < int'(nb); b++) if (b == 2) arb_lock(); else if (b % 10 == 3) begin
       // fill_all 只有一個呼叫點 (每個呼叫點都會展開一份 task 與其內嵌的參考模型)
       int pl [$];
@@ -650,4 +704,15 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
     if (n_err == 0) $display("TB PASS"); else $display("TB FAIL");
     $finish;
   end
+`ifdef WAVES
+  // 波形 (以 --trace-fst +define+WAVES 編譯): +dump[=檔名] 寫 FST, 預設 waves.fst
+  initial begin
+    string fn;
+    if ($test$plusargs("dump")) begin
+      if (!$value$plusargs("dump=%s", fn)) fn = "waves.fst";
+      $dumpfile(fn);
+      $dumpvars(0, npu_ss_tb);
+    end
+  end
+`endif
 endmodule

@@ -55,7 +55,14 @@ X1-Max (N=32, NCU=24, NB=32; `npu_cfg max`; v6.3.12 量測, 同一 TB):
 
 N=32 的小 K 受 C 寫回限制: 一個 tile 的 C 是 64 個 line (4 KiB), K=64 時與 A + B 的輸入量相同, 寫回器每列寫 2 個
 line, 24 個 CU 共用 32 個 bank 的單一寫入埠 — 寫回時間比計算長, 重疊遮不住。功能: `npu_core_tb` (seed 1, 450 個命令)
-errors = 0。Max 的 coverage 收斂 (#28) 尚未在 v6.3.12 重跑 (建置記憶體問題見「驗證環境本身的問題」)。
+errors = 0。
+
+X1-Max 的 NPU coverage 收斂 (v6.3.12, 本機; `run_npu_cov.sh max 4 200` 的全部 23 個執行, 以 `RESUME=1 NOREPORT=1 ONLY=...`
+分成多個行程並行, 最後 `REPORT_ONLY=1` 合併): line 100% (51)、branch 100% (106)、expr 100% (686)、toggle 100% (623 802,
+3 個 [C] 豁免)、covergroup 100% (243, 6 個 [C] 豁免)、SVA cover 100% (50); 豁免見 `dv/npu/waivers_max.txt`。
+core TB 每個 seed (200 命令) 約 2 小時 20 分、約 3.9 GB 記憶體 (4 個同時執行會超過 15 GB 而被 OOM 終止), 所以 CI 只做
+Max 的建置 + smoke (`npu-max-smoke`), 收斂在本機分段執行。效能: K=958 單一波次 81.0% (門檻 78%)、K=64 22.1%、K=256 53.8%
+(K=1024 受 slot 上限 958 限制, 與 K=958 相同)。Max 的 mutation 尚未執行 (每個 mutant 重建約 20 分鐘)。
 
 **尚未具備** (列為下一步, 不對外宣稱): BF16 / FP8、稀疏、卷積 / attention 專用資料流、SoC 的 APB 互連與 NoC / DRAM 連接
 (NPU Subsystem 在 SoC 頂層的命令與外部記憶體埠目前接死)、編譯器 / runtime。
