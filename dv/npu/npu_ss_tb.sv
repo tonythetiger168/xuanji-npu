@@ -376,11 +376,13 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
   endfunction
   int p_dec = 50;                                         // DMA_LD 使用解碼格式的機率 (%)
   function automatic logic [1:0] pick_fmt(); return rnd(p_dec) ? 2'(ur(1, 3)) : 2'd0; endfunction
+  int unsigned n_sweep;                  // pick_n 的依序掃描位置 (seed 之後初始化)
   function automatic logic [15:0] pick_n();
     case (ur(0, 9))
       0:       return 16'd0;
       1:       return 16'd1;
-      2, 3, 4: return 16'(ur(2, OUT));
+      2:       begin n_sweep++; return 16'(2 + n_sweep % (OUT - 1)); end   // 依序掃過 2..OUT (起點隨 seed): 每種長度都出現
+      3, 4:    return 16'(ur(2, OUT));
       5, 6, 7: return 16'(ur(OUT + 1, 4 * OUT));
       default: return 16'(ur(4 * OUT + 1, 6 * OUT));
     endcase
@@ -1114,6 +1116,7 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
     void'($urandom(seed));
     salt = $urandom();
     kv_reset();
+    n_sweep = $urandom();
     for (int b = 0; b < NB; b++) for (int d = 0; d < DEPTH; d++) dut.u_core.u_l2.mem[b][d] = {16{$urandom()}};
     for (int i = 0; i < LINES; i++) rl2[i] = l2_bd(i);
     repeat (3) @(posedge clk);
