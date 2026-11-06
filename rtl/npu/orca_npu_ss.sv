@@ -335,6 +335,9 @@ module orca_npu_ss
     if ($past(cpl_valid && !cpl_ready)) assert (cpl_valid && cpl_id == $past(cpl_id));
     if ($past(load && sel[0])) assert (cpl_id == $past(c_cpl_id));
     if ($past(load && sel[1])) assert (cpl_id == $past(d_cpl_id));
+    if ($past(load && sel[2])) assert (cpl_id == $past(nop_id));
+    if ($past(load && sel[3])) assert (cpl_id == $past(vec_id));
+    if ($past(load && sel[4])) assert (cpl_id == $past(llm_id));
   end
   always @(*) if (rst_n) begin
     cover (int'(oc) == OC_MAX);
