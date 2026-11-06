@@ -100,21 +100,48 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
     return o;
   endfunction
   function automatic int dma_fmt(npu_tile_cmd_t c); return (c.op == NPU_OP_DMA_LD) ? int'(c.b[17:16]) : 0; endfunction
-  function automatic int dma_l2n(npu_tile_cmd_t c); return (dma_fmt(c) != 0) ? 2 * int'(c.k) : int'(c.k); endfunction
+  // 間接 (v6.3.13, b[18]): 位址表在 L2 line c 起 (每 line 16 項 u32), k 項, 每項 cw = (b[15:0] = 0 ? 1 : b[15:0]) 個 line
+  function automatic int dma_cw(npu_tile_cmd_t c); return (c.b[18] && c.b[15:0] != 0) ? int'(c.b[15:0]) : 1; endfunction
+  function automatic int dma_nl(npu_tile_cmd_t c); return int'(c.k) * dma_cw(c); endfunction      // 資料 line 數
+  function automatic int dma_l2n(npu_tile_cmd_t c); return (dma_fmt(c) != 0) ? 2 * dma_nl(c) : dma_nl(c); endfunction
+  function automatic logic [31:0] ind_ent(npu_tile_cmd_t c, int i);
+    return rl2[l2i(c.c + 26'(i / 16))][(i % 16) * 32 +: 32];
+  endfunction
+  // 第 i 個資料 line 的外部位址; 間接的略過項回傳 0 並設 skip
+  function automatic logic [31:0] dma_ext(npu_tile_cmd_t c, int i, output bit skip);
+    skip = 0;
+    if (!c.b[18]) return ext_of(c, i);
+    begin
+      logic [31:0] e = ind_ent(c, i / dma_cw(c));
+      if (e == 32'hFFFF_FFFF) begin skip = 1; return '0; end
+      return c.ext + e + 32'(i % dma_cw(c));
+    end
+  endfunction
 
   // 參考模型: 依序執行一個命令
   function automatic void ref_exec(npu_tile_cmd_t c);
     case (c.op)
-      NPU_OP_DMA_LD: for (int i = 0; i < int'(c.k); i++) begin
-        int f = dma_fmt(c);
-        if (f == 0) rl2[l2i(c.a + 26'(i))] = rerd(ext_of(c, i));
-        else begin
-          logic [511:0] d = rerd(ext_of(c, i));
-          rl2[l2i(c.a + 26'(2 * i))]     = ref_dec(f, d, 0);
-          rl2[l2i(c.a + 26'(2 * i + 1))] = ref_dec(f, d, 1);
+      NPU_OP_DMA_LD: begin
+        logic [511:0] d [$];                              // 先讀完所有來源 (位址表不會被本命令改寫: 產生器保證)
+        int f = dma_fmt(c), nl = dma_nl(c);
+        for (int i = 0; i < nl; i++) begin
+          bit sk;
+          logic [31:0] ea = dma_ext(c, i, sk);
+          d.push_back(sk ? '0 : rerd(ea));
+        end
+        for (int i = 0; i < nl; i++) begin
+          if (f == 0) rl2[l2i(c.a + 26'(i))] = d[i];
+          else begin
+            rl2[l2i(c.a + 26'(2 * i))]     = ref_dec(f, d[i], 0);
+            rl2[l2i(c.a + 26'(2 * i + 1))] = ref_dec(f, d[i], 1);
+          end
         end
       end
-      NPU_OP_DMA_ST: for (int i = 0; i < int'(c.k); i++) rext[ext_of(c, i)] = rl2[l2i(c.a + 26'(i))];
+      NPU_OP_DMA_ST: for (int i = 0; i < dma_nl(c); i++) begin
+        bit sk;
+        logic [31:0] ea = dma_ext(c, i, sk);
+        if (!sk) rext[ea] = rl2[l2i(c.a + 26'(i))];
+      end
       NPU_OP_GEMM: if (c.k != 0) begin
         logic [31:0] C [];
         int nn, cl;                       // 迴圈上界用執行期變數: 常數上界會在每個內嵌點展開 N×N 份
@@ -151,10 +178,18 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
     fp_t f;
     case (c.op)
       NPU_OP_DMA_LD: begin
-        for (int i = 0; i < int'(c.k); i++) f.er.push_back(ext_of(c, i));
+        for (int i = 0; i < dma_nl(c); i++) begin bit sk; logic [31:0] ea = dma_ext(c, i, sk); if (!sk) f.er.push_back(ea); end
         for (int i = 0; i < dma_l2n(c); i++) f.l2w.push_back(l2i(c.a + 26'(i)));
+        if (c.b[18]) for (int l = 0; l < (int'(c.k) + 15) / 16; l++) f.l2r.push_back(l2i(c.c + 26'(l)));
       end
-      NPU_OP_DMA_ST: for (int i = 0; i < int'(c.k); i++) begin f.l2r.push_back(l2i(c.a + 26'(i))); f.ew.push_back(ext_of(c, i)); end
+      NPU_OP_DMA_ST: begin
+        for (int i = 0; i < dma_nl(c); i++) begin
+          bit sk; logic [31:0] ea = dma_ext(c, i, sk);
+          f.l2r.push_back(l2i(c.a + 26'(i)));
+          if (!sk) f.ew.push_back(ea);
+        end
+        if (c.b[18]) for (int l = 0; l < (int'(c.k) + 15) / 16; l++) f.l2r.push_back(l2i(c.c + 26'(l)));
+      end
       NPU_OP_GEMM: if (c.k != 0) begin
         for (int l = 0; l < (int'(c.k) + SPL - 1) / SPL; l++) begin f.l2r.push_back(l2i(c.a + 26'(l))); f.l2r.push_back(l2i(c.b + 26'(l))); end
         for (int l = 0; l < CL; l++) f.l2w.push_back(l2i(c.c + 26'(l)));
@@ -264,9 +299,9 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
       end
       7, 8, 9, 10, 11, 12: begin
         c.op = NPU_OP_DMA_LD; c.k = (mode == 1) ? 16'(ur(0, 3)) : pick_n(); c.ext = pick_ext(); dma_2d(c);
-        c.b[17:16] = pick_fmt(); c.a = pick_l2(dma_l2n(c));
+        c.b[17:16] = pick_fmt(); c.b[18] = 1'b0; c.a = pick_l2(dma_l2n(c));
       end
-      13, 14, 15, 16, 17:  begin c.op = NPU_OP_DMA_ST; c.k = pick_n(); c.a = pick_l2(int'(c.k)); c.ext = pick_ext(); dma_2d(c); end
+      13, 14, 15, 16, 17:  begin c.op = NPU_OP_DMA_ST; c.k = pick_n(); c.a = pick_l2(int'(c.k)); c.ext = pick_ext(); dma_2d(c); c.b[18] = 1'b0; end
       default: c.op = rnd(80) ? NPU_OP_NOP : npu_op_e'(ur(5, 7));     // 5..7 保留: 當 NOP
     endcase
     f = footprint(c);
@@ -283,6 +318,7 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
     c.id = id; c.op = st ? NPU_OP_DMA_ST : NPU_OP_DMA_LD; c.wt = 1'b1;
     c.k = st ? 16'(ur(40000, 65534)) : 16'hFFFF; c.a = 26'($urandom()); c.ext = $urandom();
     if (!st) c.b[17:16] = pick_fmt();                     // 解碼 LD: L2 寫入 2 × 65535 個 line
+    c.b[18] = 1'b0;
     acc_clear(); acc_add(footprint(c));
     return c;
   endfunction
@@ -298,6 +334,43 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
     acc_add(f);
     return c;
   endfunction
+  // 間接 DMA: 回傳 {DMA_LD 位址表, 間接 LD / ST}; 位址表放外部記憶體 0xE800_0000 起 (pick_ext 會把 0xE... 改成 0xD...)
+  int unsigned ind_ext = 32'hE800_0000;
+  function automatic void gen_ind(logic [7:0] id0, logic [7:0] id1, int p_wt, output npu_tile_cmd_t c0, output npu_tile_cmd_t c1);
+    int k, cw, nlist, p_skip;
+    logic [25:0] pl;
+    logic [31:0] base;
+    logic [31:0] ent [$];
+    c1 = '0; c1.id = id1; c1.op = rnd(55) ? NPU_OP_DMA_LD : NPU_OP_DMA_ST;
+    k = rnd(10) ? 0 : rnd(15) ? ur(1, 3) : rnd(70) ? ur(4, 2 * OUT) : ur(2 * OUT, 6 * OUT);
+    cw = rnd(50) ? 1 : rnd(70) ? ur(2, 4) : ur(5, 12);
+    p_skip = rnd(30) ? 0 : rnd(20) ? 90 : ur(5, 40);       // 偶爾大半是略過 (未對應的 KV page / 被丟棄的 token)
+    if (2 * k * cw > LINES / 2) k = LINES / 4 / cw;        // L2 資料範圍 (解碼時 × 2) <= L2 一半, 才放得下位址表
+    base = pick_ext();
+    if (base >= 32'hDF00_0000) base = base - 32'h0100_0000;
+    for (int i = 0; i < k; i++)                           // 項值: 小範圍 (重複 / 重疊的項) 或較大的偏移
+      ent.push_back(rnd(p_skip) ? 32'hFFFF_FFFF : rnd(50) ? 32'(ur(0, 3 * cw)) : 32'(ur(0, 4096) * cw));
+    if (k > 0 && rnd(10)) ent[k - 1] = 32'hFFFF_FFFF;     // 最後一項略過
+    nlist = (k + 15) / 16;
+    for (int l = 0; l < nlist; l++) begin
+      logic [511:0] d = {16{32'hFFFF_FFFF}};
+      for (int j = 0; j < 16 && 16 * l + j < k; j++) d[32 * j +: 32] = ent[16 * l + j];
+      if (rnd(30)) for (int j = 0; j < 16; j++) if (16 * l + j >= k) d[32 * j +: 32] = $urandom();   // 表尾以後的項不影響
+      rext[ind_ext + 32'(l)] = d; emem[ind_ext + 32'(l)] = d;
+    end
+    pl = pick_l2(nlist);
+    c0 = '0; c0.id = id0; c0.op = NPU_OP_DMA_LD; c0.k = 16'(nlist); c0.a = pl; c0.ext = ind_ext;
+    ind_ext += 32'(nlist);
+    c0 = mk_cmd(c0, p_wt);
+    ref_exec(c0);                                         // 位址表進入參考 L2, 間接命令的 footprint 才能解讀
+    c1.k = 16'(k); c1.ext = base; c1.c = pl;
+    c1.b = {7'($urandom()), 1'b1, 2'd0, 16'(cw == 1 && rnd(50) ? 0 : cw)};
+    if (c1.op == NPU_OP_DMA_LD) c1.b[17:16] = pick_fmt();
+    // 資料的 L2 範圍不可蓋到位址表 (否則依序語意下位址表在讀完之前被改寫; 規格要求兩者不重疊)
+    do c1.a = pick_l2(dma_l2n(c1)); while (!disjoint(l2i(c1.a), dma_l2n(c1), l2i(pl), nlist));
+    c1 = mk_cmd(c1, p_wt);
+  endfunction
+
   function automatic void gen_vec(logic [7:0] id0, logic [7:0] id1, int p_wt, output npu_tile_cmd_t c0, output npu_tile_cmd_t c1);
     npu_vec_pkg::npu_vec_ins_t p [$];
     int m, np;
@@ -506,6 +579,15 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
     acc_clear();
     vec_err_exp = 0; vec_err_got = 0;
     for (int i = 0; i < ncmd; i++) begin
+      if (!big && mode == 0 && i + 1 < ncmd && rnd(15)) begin                                    // DMA_LD 位址表 + 間接 DMA
+        npu_tile_cmd_t c0, c1;
+        gen_ind(ids[i], ids[i + 1], p_wt, c0, c1);
+        prog.push_back(c0); prog_pos[int'(c0.id)] = i;
+        prog.push_back(c1); prog_pos[int'(c1.id)] = i + 1;
+        ref_exec(c1);
+        i++;
+        continue;
+      end
       if (!big && mode == 0 && i + 1 < ncmd && rnd((focus == 4) ? 60 : 20)) begin             // DMA_LD 程式 + VEC
         npu_tile_cmd_t c0, c1;
         gen_vec(ids[i], ids[i + 1], p_wt, c0, c1);
@@ -708,6 +790,34 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
       end
   endtask
 
+  // directed: 長的間接 ST (項數接近 2^16, 位址表 4096 個 line 在 L2 折返): 涵蓋位址表計數器 (lf / nl) 的所有位元。
+  // 先以 backdoor 把整個 L2 填成位址表: 大多是略過, 少數是小偏移 (外部位址落在 pick_ext 的安全範圍內)。
+  // ST 只讀 L2, 所以資料範圍與位址表重疊沒有關係。
+  task automatic big_ind();
+    npu_tile_cmd_t c;
+    n_batch++;
+    p_cmd = 100; p_cpl = 100; p_rgnt = ur(60, 100); p_wgnt = ur(60, 100); p_rv = 100; fix_lat = -1; rlat = ur(1, 8); test_en = 0;
+    for (int i = 0; i < LINES; i++) begin
+      logic [511:0] d;
+      for (int j = 0; j < 16; j++) d[32 * j +: 32] = rnd(97) ? 32'hFFFF_FFFF : 32'(ur(0, 4095));
+      l2_bd_wr(i, d); rl2[i] = d;
+    end
+    prog.delete(); prog_pos.delete(); cpl_pos.delete(); pidx = 0; ncpl = 0;
+    for (int t = 0; t < 2; t++) begin                     // 位址表 4095 個 line (0xFFF) 與 4096 個 line (0x1000)
+      c = '0; c.id = 8'(230 + t); c.op = NPU_OP_DMA_ST; c.wt = 1'b1; c.k = 16'((t == 0) ? ur(65505, 65520) : ur(65521, 65535));
+      c.a = 26'($urandom()); c.c = 26'($urandom()); c.ext = pick_ext(); c.b = {7'd0, 1'b1, 2'd0, 16'd0};
+      if (c.ext >= 32'hDF00_0000) c.ext = c.ext - 32'h0100_0000;
+      acc_clear(); acc_add(footprint(c));
+      prog_pos[230 + t] = t; prog.push_back(c); ref_exec(c);
+    end
+    in_batch = 1;
+    while (ncpl != prog.size()) @(posedge clk);
+    in_batch = 0;
+    for (int w = 0; busy && w < 1000; w++) @(posedge clk);
+    check_state();
+    n_cmds += prog.size();
+  endtask
+
   int unsigned seed, nb, nc;
   initial begin
     if (!$value$plusargs("seed=%d", seed)) seed = 1;
@@ -731,7 +841,7 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
       $display("CDV: e2e bins %0d, holes %0d, closed after %0d batches", $bits(dut.u_e2e.hit), cdv_holes(), cdv_closed_at);
       for (int i = 0; i < $bits(dut.u_e2e.hit); i++) if (!dut.u_e2e.hit[i]) $display("CDV: hole bin %0d", i);
     end
-    else for (int b = 0; b < int'(nb); b++) if (b == 2) arb_lock(); else if (b % 10 == 3) begin
+    else for (int b = 0; b < int'(nb); b++) if (b == 2) arb_lock(); else if (b == 4 && !$test$plusargs("no_big")) big_ind(); else if (b % 10 == 3) begin
       // fill_all 只有一個呼叫點 (每個呼叫點都會展開一份 task 與其內嵌的參考模型)
       int pl [$];
       pl.delete(); pl.push_back((b / 10 + int'(seed)) % 5); if (b == 13) pl.push_back(5); if (b == 3) pl.push_back(6);

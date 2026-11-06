@@ -130,11 +130,13 @@ module orca_npu_ss
   logic d_done, d_busy, d_en, d_gclk;
   assign d_en = d_busy || g_dma;          // 閒置且沒有分派時停止 DMA 時脈 (命令在 idle 取樣)
   clock_gate u_dma_icg (.clk(clk), .en(d_en || !rst_n), .test_en(test_en), .clk_out(d_gclk));
-  // DMA 命令欄位: b[15:0] = 2D 每列 line 數, b[17:16] = 載入時解碼格式 (v6.3.13, npu_dma), c = 2D 列距
+  // DMA 命令欄位: b[15:0] = 2D 每列 line 數 (間接: 每項 line 數), b[17:16] = 載入時解碼格式, b[18] = 間接 (v6.3.13, npu_dma),
+  // c = 2D 列距 (間接: 位址表的 L2 line)
   npu_dma #(.OUT(OUT)) u_dma (
     .clk(d_gclk), .rst_n(rst_n),
     .cmd_valid(g_dma), .cmd_ready(d_cmd_ready), .cmd_st(head.op == NPU_OP_DMA_ST), .cmd_fmt(head.b[17:16]),
     .cmd_ext(head.ext), .cmd_l2(head.a), .cmd_n(head.k), .cmd_cols(head.b[15:0]), .cmd_stride(head.c),
+    .cmd_ind(head.b[18]), .cmd_list(head.c),
     .done(d_done), .busy(d_busy),
     .h_rd_req(d_rd_req), .h_rd_line(d_rd_line), .h_rd_gnt(d_rd_gnt), .h_rd_data(a_rd_data),
     .h_wr_req(d_wr_req), .h_wr_line(d_wr_line), .h_wr_data(d_wr_data), .h_wr_gnt(d_wr_gnt),

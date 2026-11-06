@@ -63,16 +63,16 @@ mut nop_id       $TILE "if (g_nop) begin nop_cv <= 1'b1; nop_id <= head.id; end"
 # ---- npu_dma ----
 mut dma_outst    $DMA "(outst != (OW+1)'(OUT))" "(outst != (OW+1)'(OUT - 1) && outst != (OW+1)'(OUT))"  # 在途上限少一 (功能仍正確, 由 a_issue 抓到吞吐量損失)
 mut dma_overrun  $DMA "wire [OW:0] outst = iss[OW:0] - wr[OW:0];" "wire [OW:0] outst = {1'b0, iss[OW-1:0] - wr[OW-1:0]};"  # 在途計算溢位 → FIFO 覆蓋
-mut dma_rd_qual  $DMA "wire iss_ok = st ? (h_rd_req && h_rd_gnt) : (m_rd_req && m_rd_gnt);" "wire iss_ok = st ? (h_rd_req && h_rd_gnt) : m_rd_gnt;"  # 外部 gnt 不限定 req
-mut dma_wr_qual  $DMA "wire w_fire = st ? (m_wr_req && m_wr_gnt) : (h_wr_req && h_wr_gnt);" "wire w_fire = st ? m_wr_gnt : (h_wr_req && h_wr_gnt);"
+mut dma_rd_qual  $DMA "wire iss_ok = st ? (d_hreq && !sel_l && h_rd_gnt) : ((m_rd_req && m_rd_gnt) || ld_skip);" "wire iss_ok = st ? (d_hreq && !sel_l && h_rd_gnt) : (m_rd_gnt || ld_skip);"  # 外部 gnt 不限定 req
+mut dma_wr_qual  $DMA "wire w_fire = st ? ((m_wr_req && m_wr_gnt) || (st_wv && e_skip)) : (h_wr_req && h_wr_gnt);" "wire w_fire = st ? (m_wr_gnt || (st_wv && e_skip)) : (h_wr_req && h_wr_gnt);"
 mut dma_waddr    $DMA "wire e_step = st ? pop : iss_ok;" "wire e_step = iss_ok;"                       # 寫位址用錯計數器
 mut dma_l2line   $DMA "assign h_wr_line = dec ? (l2 + 26'({wr, half})) : (l2 + 26'(wr));" "assign h_wr_line = dec ? (l2 + 26'({wr, half})) : (l2 + 26'(iss));"
 mut dma_done     $DMA "assign done      = act && (wr == n);" "assign done      = act && (iss == n);"                # 讀完就完成 (寫尚未完成)
 mut dma_fifo     $DMA "if (pop)  f_rd <= f_rd + 1'b1;" "if (pop && !push)  f_rd <= f_rd + 1'b1;"                  # FIFO 讀指標錯
-mut dma_ext31    $DMA "wire [31:0] e_addr = erow + 32'(col);" "wire [31:0] e_addr = {1'b0, erow[30:0]} + 32'(col);"       # 外部位址高位遺失
-mut dma_pushd    $DMA "wire [DW-1:0] push_d = st ? h_rd_data : m_rd_rdata;" "wire [DW-1:0] push_d = st ? h_rd_data : h_rd_data;"
+mut dma_ext31    $DMA "wire [31:0] e_addr = ind ? (ext + e_val + 32'(col)) : (erow + 32'(col));" "wire [31:0] e_addr = ind ? (ext + e_val + 32'(col)) : ({1'b0, erow[30:0]} + 32'(col));"       # 外部位址高位遺失
+mut dma_pushd    $DMA "wire [DW-1:0] push_d = st ? h_rd_data : ld_skip ? '0 : m_rd_rdata;" "wire [DW-1:0] push_d = st ? h_rd_data : ld_skip ? '0 : h_rd_data;"
 mut dma_n0       $DMA "assign done      = act && (wr == n);" "assign done      = act && (wr == n) && n != '0;"       # n = 0 永不完成
-mut dma_2d_wrap  $DMA "wire e_wrap = (cols != '0) && (col == cols - 1'b1);" "wire e_wrap = (cols != '0) && (col == cols);"           # 2D: 列多一個 line
+mut dma_2d_wrap  $DMA "((cols != '0) && (col == cols - 1'b1));" "((cols != '0) && (col == cols));"           # 2D: 列多一個 line
 mut dma_2d_strd  $DMA "if (e_wrap) begin col <= '0; erow <= erow + 32'(stride); end" "if (e_wrap) begin col <= '0; erow <= erow + 32'(cols); end"   # 2D: 忽略列距
 # ---- npu_dma 載入時解碼 (v6.3.13) ----
 mut dec_fmt_bits $TILE ".cmd_fmt(head.b[17:16])" ".cmd_fmt(head.b[16:15])"                                     # 格式欄位位置錯
@@ -85,6 +85,22 @@ mut dec_nib      $DMA "wire [DW/2-1:0] f_sel = half ? f_head[DW-1:DW/2] : f_head
 mut dec_pop1     $DMA "wire pop    = w_fire && (!dec || half);" "wire pop    = w_fire;"                       # 前半寫完就釋放
 mut dec_addr     $DMA "assign h_wr_line = dec ? (l2 + 26'({wr, half})) : (l2 + 26'(wr));" "assign h_wr_line = dec ? (l2 + 26'(wr) + 26'(half)) : (l2 + 26'(wr));"   # L2 位址未乘 2
 mut dec_st       $DMA "dec <= !cmd_st && (cmd_fmt != 2'd0);" "dec <= (cmd_fmt != 2'd0);"                        # ST 也解碼
+# ---- npu_dma 間接 gather / scatter (v6.3.13) ----
+mut ind_bit      $TILE ".cmd_ind(head.b[18])" ".cmd_ind(head.b[19])"
+mut ind_list     $TILE ".cmd_list(head.c)" ".cmd_list(head.a)"
+mut ind_skip_val $DMA "wire        e_skip = ind && (e_val == 32'hFFFF_FFFF);" "wire        e_skip = ind && (e_val == 32'hFFFF_FFFE);"
+mut ind_skip_nowait $DMA "wire ld_skip = can_iss && !st && e_skip && (pend_rd == '0);" "wire ld_skip = can_iss && !st && e_skip;"
+mut ind_addr_col $DMA "wire [31:0] e_addr = ind ? (ext + e_val + 32'(col)) : (erow + 32'(col));" "wire [31:0] e_addr = ind ? (ext + e_val) : (erow + 32'(col));"
+mut ind_list_line $DMA "assign h_rd_line = sel_l ? (list + 26'(lf)) : (l2 + 26'(iss));" "assign h_rd_line = sel_l ? (l2 + 26'(lf)) : (l2 + 26'(iss));"
+mut ind_lfree    $DMA "wire l_free = ind && e_next && (ent == EW'(EPL - 1));" "wire l_free = ind && e_step && (ent == EW'(EPL - 1));"
+mut ind_lslot    $DMA "lb[lbv[lh] ? lo : lh] <= h_rd_data;" "lb[lh] <= h_rd_data;"
+mut ind_stskip   $DMA "assign m_wr_req  = st_wv && !e_skip;" "assign m_wr_req  = st_wv;"
+mut ind_skip_data $DMA "ld_skip ? '0 : m_rd_rdata;" "ld_skip ? m_rd_rdata : m_rd_rdata;"
+mut ind_noev     $DMA "&& (st || e_v);" "&& 1'b1;"
+mut ind_cw0      $DMA "wire e_wrap = ind ? (col == ((cols == '0) ? 16'd0 : cols - 1'b1))" "wire e_wrap = ind ? (col == ((cols == '0) ? 16'd1 : cols - 1'b1))"
+mut ind_nl       $DMA "LW'((32'(cmd_n) + EPL - 1) / EPL)" "LW'(32'(cmd_n) / EPL)"
+mut ind_lbv_full $DMA "wire l_need  = act && ind && (lf != nl) && (lbv != 2'b11);" "wire l_need  = act && ind && (lf != nl);"
+mut ind_n        $DMA "n <= cmd_ind ? cmd_n * ((cmd_cols == '0) ? 16'd1 : cmd_cols) : cmd_n;" "n <= cmd_n;"
 # ---- VEC 分派 / 完成槽 / host 埠共用 (v6.3.10) ----
 mut vec_no_wait  $TILE "wire g_vec  = go && head.op == NPU_OP_VEC && !h_nop && !vec_cv;" "wire g_vec  = go && head.op == NPU_OP_VEC && !h_nop;"   # 完成槽被佔用仍分派 (覆蓋 vec_id)
 mut vec_k0       $TILE "((head.op == NPU_OP_GEMM || head.op == NPU_OP_VEC) && head.k == '0);" "(head.op == NPU_OP_GEMM && head.k == '0);"   # K = 0 的 VEC 送引擎

@@ -33,7 +33,7 @@ PY
     [[ "$b" =~ ^(npu_l2_xbar|npu_ss_dma|npu_dma)$ ]] && sed -i "s/^smtbmc z3/abc bmc3/" $M/$n/$b.sby   # 陣列 / 寬計數器: z3 BMC 30 拍太慢, 改用 ABC bmc3
     # npu_ss_dma (32 bit 位址、16 bit 計數器) 無輔助不變式時 BMC 每拍成本急增 (第 10 拍約 20 分鐘): 只做 8 拍 —
     # 每個 DMA mutant 在 cols = 1、n 小的命令下幾拍內就違反埠層級的位址 / 資料性質
-    [[ "$b" =~ ^(npu_ss_dma|npu_dma)$ ]] && sed -i "s/^prove: depth 30/prove: depth 8/" $M/$n/$b.sby
+    [[ "$b" =~ ^(npu_ss_dma|npu_dma)$ ]] && sed -i "s/^prove: depth 30/prove: depth ${BMC_DEPTH:-8}/" $M/$n/$b.sby
     (cd $M/$n && timeout 1800 sby -f $b.sby prove > bmc.log 2>&1)
     # ABC 回報 FAIL (反例) 時 sby 可能無法產生波形而報 ERROR, 以 engine 的結果為準
     if grep -qE "DONE \(FAIL|returned FAIL" $M/$n/bmc.log; then nk=$((nk + 1)); echo "$n: killed (BMC counterexample, port-level property)"
@@ -61,7 +61,7 @@ mut npu_ss_dma $D pushd_wrong "wire [DW-1:0] push_d = st ? h_rd_data : m_rd_rdat
 # npu_dma (v6.3.13): npu_ss_dma 的代表性 mutant + 載入時解碼
 E=rtl/npu/npu_dma.sv
 mut npu_dma $E done_early   "assign done      = act && (wr == n);" "assign done      = act && (iss == n);"
-mut npu_dma $E outst_over   "wire can_iss = act && (iss != n) && (outst != (OW+1)'(OUT));" "wire can_iss = act && (iss != n);"
+mut npu_dma $E outst_over   "wire can_iss = act && (iss != n) && (outst != (OW+1)'(OUT)) && (st || e_v);" "wire can_iss = act && (iss != n) && (st || e_v);"
 mut npu_dma $E stride_cols  "if (e_wrap) begin col <= '0; erow <= erow + 32'(stride); end" "if (e_wrap) begin col <= '0; erow <= erow + 32'(cols); end"
 mut npu_dma $E mx_tab       "8'd4, 8'd6, 8'd8, 8'd12}" "8'd4, 8'd5, 8'd8, 8'd12}"
 mut npu_dma $E mx_top       "8'd4, 8'd6, 8'd8, 8'd12}" "8'd4, 8'd6, 8'd8, 8'd16}"
@@ -73,6 +73,20 @@ mut npu_dma $E pop_first    "wire pop    = w_fire && (!dec || half);" "wire pop 
 mut npu_dma $E half_addr    "assign h_wr_line = dec ? (l2 + 26'({wr, half})) : (l2 + 26'(wr));" "assign h_wr_line = dec ? (l2 + 26'(wr) + 26'(half)) : (l2 + 26'(wr));"
 mut npu_dma $E dec_st       "dec <= !cmd_st && (cmd_fmt != 2'd0);" "dec <= (cmd_fmt != 2'd0);"
 mut npu_dma $E half_noflip  "if (dec && w_fire) half <= ~half;" "if (dec && pop) half <= ~half;"
+# 間接 gather / scatter (v6.3.13)。ind_nl 只造成停住 (位址表最後一個 line 沒讀, 安全性質不違反), 由 subsystem mutation 的 watchdog 抓
+mut npu_dma $E ind_skip_val   "wire        e_skip = ind && (e_val == 32'hFFFF_FFFF);" "wire        e_skip = ind && (e_val == 32'hFFFF_FFFE);"
+mut npu_dma $E ind_skip_nowait "wire ld_skip = can_iss && !st && e_skip && (pend_rd == '0);" "wire ld_skip = can_iss && !st && e_skip;"
+mut npu_dma $E ind_addr_col   "wire [31:0] e_addr = ind ? (ext + e_val + 32'(col)) : (erow + 32'(col));" "wire [31:0] e_addr = ind ? (ext + e_val) : (erow + 32'(col));"
+mut npu_dma $E ind_list_line  "assign h_rd_line = sel_l ? (list + 26'(lf)) : (l2 + 26'(iss));" "assign h_rd_line = sel_l ? (l2 + 26'(lf)) : (l2 + 26'(iss));"
+mut npu_dma $E ind_lfree      "wire l_free = ind && e_next && (ent == EW'(EPL - 1));" "wire l_free = ind && e_step && (ent == EW'(EPL - 1));"
+mut npu_dma $E ind_lslot      "lb[lbv[lh] ? lo : lh] <= h_rd_data;" "lb[lh] <= h_rd_data;"
+mut npu_dma $E ind_stskip     "assign m_wr_req  = st_wv && !e_skip;" "assign m_wr_req  = st_wv;"
+mut npu_dma $E ind_skip_data  "ld_skip ? '0 : m_rd_rdata;" "ld_skip ? m_rd_rdata : m_rd_rdata;"
+mut npu_dma $E ind_noev       "&& (st || e_v);" "&& 1'b1;"
+mut npu_dma $E ind_cw0        "wire e_wrap = ind ? (col == ((cols == '0) ? 16'd0 : cols - 1'b1))" "wire e_wrap = ind ? (col == ((cols == '0) ? 16'd1 : cols - 1'b1))"
+mut npu_dma $E ind_lbv_full   "wire l_need  = act && ind && (lf != nl) && (lbv != 2'b11);" "wire l_need  = act && ind && (lf != nl);"
+# 等 grant 時換請求種類: ST 的資料讀取等待中、位址表緩衝空出一項時才出現 (BMC 要 16 拍)
+BMC_DEPTH=16 mut npu_dma $E ind_nohold "wire sel_l   = hp ? hp_l : l_need;" "wire sel_l   = l_need;"
 mut npu_ss_dma $D wr_no_hold  "assign m_wr_req  = act && f_nempty && st;" "assign m_wr_req  = act && f_nempty && st && !iss[0];"
 T=rtl/npu/orca_npu_ss.sv
 mut orca_npu_ss $T wt_ignored  "wire go     = q_hv && (!head.wt || oc == '0);" "wire go     = q_hv;"
