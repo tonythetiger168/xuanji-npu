@@ -1,3 +1,3 @@
 # Xuanji-X1-Pro (N=16): 結構常數
-toggle npu_gemm_cu\.sv:\d+ \S* out_nxt\[[01]\]: # [C] N=16: 每個 C line 只放 1 列 (16 x INT32 = 64 B), 每列輸出後必寫回 (out_nxt 恆為 W_WR)
+toggle npu_gemm_cu\.sv:\d+\s+o_nxt\[0\]: # [C] N=16: 每個 C line 只放 1 列 (16 x INT32 = 64 B), 每列輸出後必寫回或先讀 (o_nxt 只有 W_WR / W_RD)
 toggle npu_gemm_cu\.sv:\d+\s+w_nxt\[[02]\]: # [C] N <= 16: W_WR 拿到 grant 後只會到 W_OUT (3'd1) / W_DONE (3'd3); W_RD 只在 N = 32 的前半之後

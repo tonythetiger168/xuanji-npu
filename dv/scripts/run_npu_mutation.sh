@@ -77,13 +77,13 @@ mut first_stuck   $MMA "        first <= 1'b0;" "        first <= first;"       
 # ---- npu_gemm_cu ----
 mut cu_aptr_stuck $CU "a_ptr <= a_ptr + 1'b1; fa <= fa - 1'b1; end" "a_ptr <= a_ptr; fa <= fa - 1'b1; end"   # A line 指標不前進
 mut cu_pop_early  $CU "wire pop  = feed && (step == SW'(SPL - 1) || mma_in_last);" "wire pop  = feed && (step == SW'(SPL - 2) || mma_in_last);"  # 提早換 line
-mut cu_no_wgnt    $CU "if (wr_gnt) c_ptr <= c_ptr + 1'b1;" "c_ptr <= c_ptr + 1'b1;"                          # C 指標不等寫入 grant
+mut cu_no_wgnt    $CU "W_WR: if (wr_gnt) begin c_ptr <= c_ptr + 1'b1; wst <= w_nxt; end" "W_WR: begin c_ptr <= c_ptr + 1'b1; if (wr_gnt) wst <= w_nxt; end"                          # C 指標不等寫入 grant
 mut cu_wr_early   $CU "W_WR: if (wr_gnt) begin" "W_WR: if (wr_gnt || wr_req) begin"                         # 未拿到寫入 grant 就結束該 line
 # ---- 累加 (v6.3.14) ----
 mut cu_acc_nosum  $CU "assign wr_data   = x_w ? wr_sum : wr_d;" "assign wr_data   = wr_d;"                        # 累加命令不加舊值
 mut cu_acc_pend   $CU "x_pend <= x_cmd;" "x_pend <= cmd_acc;"                                                     # 累加旗標取自埠上 (下一個命令)
 mut cu_acc_lock   $CU "assign w_sel = w_rq && !lk_f;" "assign w_sel = w_rq;"                                       # 搶走取線器未完成的請求
-mut cu_acc_skiprd $CU "wst <= !ln_done ? W_OUT : x_w ? W_RD : W_WR;" "wst <= !ln_done ? W_OUT : W_WR;"             # 累加不讀舊值 (o_line 為上一次的)
+mut cu_acc_skiprd $CU "          wst <= o_nxt;" "          wst <= (o_nxt == W_RD) ? W_WR : o_nxt;"             # 累加不讀舊值 (o_line 為上一次的)
 mut cu_acc_rdgnt  $CU "W_RD: if (w_gnt) begin" "W_RD: if (rd_gnt[0]) begin"                                         # 把取線器的 grant 當成自己的
 mut cu_acc_fb     $CU "else if (g0f) f_b <= ~f_b;" "else if (rd_gnt[0]) f_b <= ~f_b;"                               # 寫回器的 grant 也切換 A / B
 mut cu_acc_line   $CU "assign rd_line = w_sel ? c_ptr : f_ln0;" "assign rd_line = f_ln0;"                           # 讀舊值的位址錯
@@ -102,7 +102,7 @@ if [ $N -eq 32 ]; then   # 雙讀取埠 (RP = 2) 與一列兩個 C line
   mut cu_overflow $CU "assign a_req = run && (fa != '0) && (a_cnt != (PW+1)'(PF));" "assign a_req = run && (fa != '0);"  # A 緩衝滿仍預取
   mut cu_b_full   $CU "assign b_req = run && (fb != '0) && (b_cnt != (PW+1)'(PF));" "assign b_req = run && (fb != '0);"  # B 緩衝滿仍預取
   mut cu_hi_half  $CU "else if (out_fire) begin c_hi <= mma_out_vec[N-1:N/2];" "else if (out_fire) begin c_hi <= mma_out_vec[N/2-1:0];"  # 後半列放錯 (曾犯的錯)
-  mut cu_one_half $CU "assign wr_end   = wr_gnt && c_half;" "assign wr_end   = wr_gnt;"                     # 每列只寫前半
+  mut cu_one_half $CU "assign w_nxt    = c_half ? (lr ? W_DONE : W_OUT) : (x_w ? W_RD : W_WR);" "assign w_nxt    = lr ? W_DONE : W_OUT;"                     # 每列只寫前半
 else                     # 單一讀取埠, A / B 輪流
   mut cu_no_rgnt  $CU "assign a_gnt = g0f && !f_b; assign b_gnt = g0f && f_b;" "assign a_gnt = rd_req[0] && !w_sel && !f_b; assign b_gnt = rd_req[0] && !w_sel && f_b;"  # 不等讀取 grant
   mut cu_overflow $CU "assign a_req = run && !f_b && (fa != '0) && (a_cnt != (PW+1)'(PF));" "assign a_req = run && !f_b && (fa != '0);"  # 緩衝滿仍預取 (覆蓋未用的 line)

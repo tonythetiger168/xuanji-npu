@@ -176,7 +176,7 @@ module npu_gemm_cu
   wire take = pend && (wst == W_IDLE || (wst == W_DONE && done_ready));
 
   // C line 組裝: 每列寫入 line 中的位置; 湊滿 RPL 列後寫回
-  logic ln_done;                             // 本次輸出湊滿一個 (N = 32: 一列 = 兩個) C line
+  wst_t o_nxt;                               // W_OUT 輸出握手後的狀態 (湊滿一個 C line: 累加先讀舊值, 否則寫回)
   wst_t w_nxt;                               // W_WR 拿到 grant 後的狀態
   if (CPR > 1) begin : g_cw
     // N = 32: 一列 C = 2 個 line; 前半存在 c_line, 後半存在 c_hi, 依序寫回 (c_hi 只有此組態才有)
@@ -184,7 +184,7 @@ module npu_gemm_cu
     logic         c_half;                    // 0: 寫前半, 1: 寫後半
     // mma_out_vec 是 [N-1:0][31:0] 二維 packed: 索引選的是元素 (每個 32 bit), 不是位元
     assign c_line_n = mma_out_vec[N/2-1:0];
-    assign ln_done  = 1'b1;
+    assign o_nxt    = x_w ? W_RD : W_WR;
     // 前半寫完: 寫後半 (累加時先讀後半的舊值); 後半寫完: 下一列或完成
     assign w_nxt    = c_half ? (lr ? W_DONE : W_OUT) : (x_w ? W_RD : W_WR);
     assign wr_d     = c_half ? c_hi : c_line;
@@ -194,7 +194,7 @@ module npu_gemm_cu
       else if (wst == W_WR && wr_gnt) c_half <= ~c_half;
   end else if (RPL == 1) begin : g_c1
     assign c_line_n = mma_out_vec;
-    assign ln_done  = 1'b1;
+    assign o_nxt    = x_w ? W_RD : W_WR;
     assign w_nxt    = lr ? W_DONE : W_OUT;
     assign wr_d     = c_line;
   end else begin : g_cn
@@ -204,7 +204,7 @@ module npu_gemm_cu
       c_line_n = c_line;
       c_line_n[slot * N * 32 +: N * 32] = mma_out_vec;
     end
-    assign ln_done = (slot == CW'(RPL - 1));
+    assign o_nxt   = (slot != CW'(RPL - 1)) ? W_OUT : x_w ? W_RD : W_WR;
     assign w_nxt   = lr ? W_DONE : W_OUT;
     assign wr_d     = c_line;
   end
@@ -246,7 +246,7 @@ module npu_gemm_cu
         W_IDLE: ;
         W_OUT: if (out_fire) begin
           c_line <= c_line_n; lr <= (mma_out_row == RW'(N - 1));
-          wst <= !ln_done ? W_OUT : x_w ? W_RD : W_WR;
+          wst <= o_nxt;
         end
         W_RD: if (w_gnt) begin o_line <= rd_data[0]; wst <= W_WR; end
         W_WR: if (wr_gnt) begin c_ptr <= c_ptr + 1'b1; wst <= w_nxt; end
