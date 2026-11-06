@@ -997,10 +997,10 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
     n_batch++;
     nkind = 2; nord = 2; ngap = 5;
     p_cmd = 100; p_cpl = 100; p_rgnt = 100; p_wgnt = 100; p_rv = 100; fix_lat = -1; rlat = 2; test_en = 0;
-    // VEC 程式 (line 16): SPLAT v0, ST v0 → line 24
+    // VEC 程式 (line 16): SPLAT v0, ST v0 → line 24, 25, 26 (連續寫入: VEC 連拿兩次 grant 時 DMA 的寫入必須先得到)
     d = '0;
     x = '0; x.op = npu_vec_pkg::VOP_SPLAT; x.vd = 3'd0; x.imm = $urandom(); d[0 +: 77] = x;
-    x = '0; x.op = npu_vec_pkg::VOP_ST; x.va = 3'd0; x.line = 26'd24; d[128 +: 77] = x;
+    for (int s = 1; s < 4; s++) begin x = '0; x.op = npu_vec_pkg::VOP_ST; x.va = 3'd0; x.line = 26'(23 + s); d[128 * s +: 77] = x; end
     l2_bd_wr(l2i(26'd16), d); rl2[l2i(26'd16)] = d;
     for (int kind = 0; kind < nkind; kind++)
     for (int ord = 0; ord < nord; ord++)
@@ -1012,7 +1012,7 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
             if ((t < 2) == (ord == 0)) begin
               c.op = (kind == 0) ? NPU_OP_DMA_ST : NPU_OP_DMA_LD; c.k = 16'(ur(2, 6)); c.a = 26'(ur(0, 8) + 32 * kind); c.ext = pick_ext();
             end
-            else begin c.op = NPU_OP_VEC; c.k = 16'd2; c.a = 26'd16; c.ext = $urandom(); c.b = 26'($urandom()); c.c = 26'($urandom()); end
+            else begin c.op = NPU_OP_VEC; c.k = 16'd4; c.a = 26'd16; c.ext = $urandom(); c.b = 26'($urandom()); c.c = 26'($urandom()); end
           end else c.op = NPU_OP_NOP;
           prog_pos[210 + t] = prog.size(); prog.push_back(c); ref_exec(c);
           if (t == 0) begin                                    // 只送第一個, 完成後閒置 100 拍
@@ -1111,6 +1111,34 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
     end
   endtask
 
+  // directed: DMA 長度 2..OUT 各一個 (LD / ST 交替, 隨機格式 / 2D), 讓 cg_dma.cp_n 的每個長度 bin 確定出現
+  // (Pro OUT = 128 時隨機產生容易漏掉幾個長度)
+  task automatic len_sweep();
+    npu_tile_cmd_t c;
+    int nmax;
+    n_batch++;
+    nmax = OUT;                                            // 迴圈上界用執行期變數 (避免 Verilator 展開)
+    p_cmd = 100; p_cpl = ur(60, 100); p_rgnt = ur(60, 100); p_wgnt = ur(60, 100); p_rv = ur(60, 100);
+    fix_lat = -1; rlat = ur(1, 8); test_en = 0;
+    prog.delete(); prog_pos.delete(); cpl_pos.delete(); pidx = 0; ncpl = 0;
+    acc_clear();
+    for (int k = 2; k <= nmax; k++) begin
+      c = '0; c.id = 8'(k); c.k = 16'(k); c.ext = pick_ext();
+      if (k % 2 == 0) begin c.op = NPU_OP_DMA_LD; c.b[17:16] = pick_fmt(); end
+      else c.op = NPU_OP_DMA_ST;
+      if (rnd(30)) begin c.b[15:0] = 16'(ur(1, 8)); c.c = 26'(ur(0, 16)); end
+      c.a = pick_l2(dma_l2n(c));
+      c = mk_cmd(c, 20);
+      prog_pos[k] = prog.size(); prog.push_back(c); ref_exec(c);
+    end
+    in_batch = 1;
+    while (ncpl != prog.size()) @(posedge clk);
+    in_batch = 0;
+    for (int w = 0; busy && w < 1000; w++) @(posedge clk);
+    check_state();
+    n_cmds += prog.size();
+  endtask
+
   int unsigned seed, nb, nc;
   initial begin
     if (!$value$plusargs("seed=%d", seed)) seed = 1;
@@ -1136,7 +1164,7 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
       $display("CDV: e2e bins %0d, holes %0d, closed after %0d batches", $bits(dut.u_e2e.hit), cdv_holes(), cdv_closed_at);
       for (int i = 0; i < $bits(dut.u_e2e.hit); i++) if (!dut.u_e2e.hit[i]) $display("CDV: hole bin %0d", i);
     end
-    else for (int b = 0; b < int'(nb); b++) if (b == 2) arb_lock(); else if (b == 4 && !$test$plusargs("no_big")) big_ind(); else if (b == 6) llm_pairs(); else if (b % 10 == 3) begin
+    else for (int b = 0; b < int'(nb); b++) if (b == 2) arb_lock(); else if (b == 4 && !$test$plusargs("no_big")) big_ind(); else if (b == 6) len_sweep(); else if (b == 7) llm_pairs(); else if (b % 10 == 3) begin
       // fill_all 只有一個呼叫點 (每個呼叫點都會展開一份 task 與其內嵌的參考模型)
       int pl [$];
       int pr;
