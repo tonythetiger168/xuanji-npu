@@ -127,4 +127,5 @@ endmodule
 bind orca_npu_ss npu_ss_e2e_sva #(.QD(QD), .NCU(NCU)) u_e2e (
   .clk, .rst_n, .cmd_valid, .cmd_ready, .cmd, .cpl_valid, .cpl_ready, .cpl_id, .busy,
   .m_rd_req, .m_rd_gnt, .m_rd_rvalid, .m_wr_req, .m_wr_gnt,
-  .h_rd_req, .h_rd_gnt, .h_wr_req, .h_wr_gnt, .perf_steps, .dma_rd_wait(u_dma.iss != u_dma.wr));
+  .h_rd_req, .h_rd_gnt, .h_wr_req, .h_wr_gnt, .perf_steps, .dma_rd_wait(u_dma.g_ch[0].u_dma.iss != u_dma.g_ch[0].u_dma.wr ||
+                                                   u_dma.g_ch[NDC-1].u_dma.iss != u_dma.g_ch[NDC-1].u_dma.wr));   // NDC <= 2

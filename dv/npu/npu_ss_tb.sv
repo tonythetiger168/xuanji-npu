@@ -17,7 +17,7 @@
 //           +perf_dma=L: DMA 吞吐量量測 (外部埠全速, 讀取延遲固定 L 拍)
 //=============================================================================
 module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB = 4, parameter int DEPTH = 1024,
-                    parameter int OUT = 32);
+                    parameter int OUT = 32, parameter int NDC = 2);
   import orca_pkg::*;
   localparam int QD = 8;                                  // 與 orca_npu_ss 預設一致
   localparam int LINES = NB * DEPTH, SPL = 64 / N, CL = (4 * N * N + 63) / 64;
@@ -38,7 +38,7 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
   logic [47:0] perf_wdata_busy = '0, perf_wdata_steps = '0, perf_busy, perf_steps;
   always #5 clk = ~clk;
 
-  orca_npu_ss #(.N(N), .NCU(NCU), .NB(NB), .DEPTH(DEPTH), .QD(QD), .OUT(OUT)) dut (.*);
+  orca_npu_ss #(.N(N), .NCU(NCU), .NB(NB), .DEPTH(DEPTH), .QD(QD), .OUT(OUT), .NDC(NDC)) dut (.*);
 
   function automatic int ur(int lo, int hi); return lo + int'($urandom_range(hi - lo, 0)); endfunction
   function automatic bit rnd(int pct); return ur(0, 99) < pct; endfunction
@@ -713,27 +713,27 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
       if (!(cpl_valid && cpl_id == 8'(200))) begin $display("ERROR: fill_all prime %0d not in output register", prime); n_err++; end
     end
     // 迴圈上界用執行期變數: 常數上界時 Verilator 會展開迴圈 (X1 的 26 次展開讓產生的 C++ 達 85 MB, 編譯 > 30 分鐘)
-    nloop = NG + 4;
+    nloop = NG + NDC + 3;
     for (int i = 0; i < nloop; i++) begin
       c = '0; c.id = 8'(i);
       if (i < NG) begin
         if (i >= ng) continue;
         c.op = NPU_OP_GEMM; c.k = 16'(K); c.sa = 1'($urandom()); c.sb = 1'($urandom());
         c.a = 26'(i * STRIDE); c.b = c.a + 26'(AL); c.c = c.b + 26'(AL);
-      end else if (i == NG) begin
+      end else if (i < NG + NDC) begin                     // 每個 DMA 通道一個
         if (prime == 4 || prime == 6) continue;
-        c.op = NPU_OP_DMA_LD; c.k = 16'd2; c.a = 26'(NG * STRIDE); c.ext = $urandom();
-      end else if (i == NG + 1) begin
+        c.op = NPU_OP_DMA_LD; c.k = 16'd2; c.a = 26'(NG * STRIDE + 2 * (i - NG)); c.ext = $urandom();
+      end else if (i == NG + NDC) begin
         if (prime == 4 || prime == 5) continue;
         c.op = NPU_OP_NOP;
-      end else begin c.op = NPU_OP_VEC; c.k = 16'd4; c.a = 26'((NG + 1) * STRIDE + i - NG - 2); end
+      end else begin c.op = NPU_OP_VEC; c.k = 16'd4; c.a = 26'((NG + 1) * STRIDE + i - NG - NDC - 1); end
       prog_pos[i] = prog.size(); prog.push_back(c); ref_exec(c);
     end
     in_batch = 1;
     // 等到所有槽都滿, 且 DMA / NOP / VEC 的完成都在待回報 (放開回壓後 4 個來源同時競爭)
-    oc_exp = (prime == 4) ? 4 + 4 * NCU + 2 : (prime >= 5) ? 2 : 4 + 4 * NCU + 4;
+    oc_exp = (prime == 4) ? 4 + 4 * NCU + 2 : (prime == 5) ? 1 + NDC : (prime == 6) ? 2 : 4 + 4 * NCU + 3 + NDC;
     // GEMM 的完成也要已在等待 (src_v[0]; v6.3.12 起 CU 可持有多個命令, oc 到達上限時 GEMM 可能都還在計算)
-    for (int w = 0; w < 20000 && !(int'(dut.oc) == oc_exp && (prime >= 5 || dut.src_v[0]) && (prime == 4 || (prime == 6 ? dut.nop_cv : (dut.dma_cv && (dut.nop_cv || prime == 5)))) && dut.vec_cv); w++) @(posedge clk);
+    for (int w = 0; w < 20000 && !(int'(dut.oc) == oc_exp && (prime >= 5 || dut.src_v[0]) && (prime == 4 || (prime == 6 ? dut.nop_cv : (&dut.u_dma.cv && (dut.nop_cv || prime == 5)))) && dut.vec_cv); w++) @(posedge clk);
     if (int'(dut.oc) != oc_exp) begin $display("ERROR: fill_all did not reach oc = %0d (oc = %0d)", oc_exp, dut.oc); n_err++; end
     p_cpl = 80;
     while (ncpl != prog.size()) @(posedge clk);
