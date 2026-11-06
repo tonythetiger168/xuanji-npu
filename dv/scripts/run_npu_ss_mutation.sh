@@ -1,7 +1,7 @@
 #!/bin/bash
-# NPU Subsystem 檢查器的 mutation 測試 (每個產品組態): 每個 mutant 在 orca_npu_ss / npu_ss_dma 植入一個錯誤,
+# NPU Subsystem 檢查器的 mutation 測試 (每個產品組態): 每個 mutant 在 orca_npu_ss / npu_dma 植入一個錯誤,
 # npu_ss_tb (參考模型比對 + SVA) 必須抓到 (killed)。npu_core 子樹的 mutant 見 run_npu_mutation.sh。
-# 用法: dv/scripts/run_npu_ss_mutation.sh <nano|x1|pro|all> [batches=20]
+# 用法: dv/scripts/run_npu_ss_mutation.sh <nano|x1|pro|all> [batches=20]   (ONLY=<regex>: 只跑名稱相符的 mutant)
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . dv/scripts/npu_cfg.sh
@@ -12,12 +12,13 @@ fi
 npu_cfg "$CFG" || exit 1
 M=build/npu_ss_mut_$CFG; rm -rf "$M"; mkdir -p "$M"
 echo "##### NPU subsystem mutation $CFG: N=$N NCU=$NCU NB=$NB"
-TILE=rtl/npu/orca_npu_ss.sv DMA=rtl/npu/npu_ss_dma.sv ARB=rtl/npu/npu_l2_arb2.sv
+TILE=rtl/npu/orca_npu_ss.sv DMA=rtl/npu/npu_dma.sv ARB=rtl/npu/npu_l2_arb2.sv
 FP="rtl/fp/fp_add.sv rtl/fp/fp_mul.sv rtl/fp/fp_narrow.sv rtl/fp/fp_widen.sv rtl/fp/sfu.sv rtl/fp/fp_max.sv rtl/fp/fp_small_dec.sv
     rtl/fp/fp_mx_scale.sv rtl/fp/fp_from_int.sv rtl/npu/npu_vec.sv dv/vec/npu_vec_sva.sv rtl/npu/npu_vec_eng.sv dv/vec/npu_vec_eng_sva.sv"
 surv=0; nk=0; nt=0
 mut() {   # name file old new
   local n=$1 f=$2
+  [ -n "${ONLY:-}" ] && ! [[ $n =~ ^(${ONLY})$ ]] && return   # ONLY=<regex>: 只跑名稱相符的 mutant
   python3 - "$3" "$4" "$M/$n.sv" "$f" <<'PY' || { echo "$n: pattern not found"; surv=1; return; }
 import sys
 o, nw, out, f = sys.argv[1:5]
@@ -59,13 +60,13 @@ mut q_full       $TILE "assign cmd_ready = (q_cnt != (QW+1)'(QD));" "assign cmd_
 mut dma_gate     $TILE "assign d_en = d_busy || g_dma;" "assign d_en = d_busy;"                                        # 閘控未涵蓋分派拍
 mut st_dir       $TILE ".cmd_st(head.op == NPU_OP_DMA_ST)" ".cmd_st(head.op[0])"                                       # 方向解碼錯
 mut nop_id       $TILE "if (g_nop) begin nop_cv <= 1'b1; nop_id <= head.id; end" "if (g_nop) begin nop_cv <= 1'b1; end"  # NOP 完成 id 錯
-# ---- npu_ss_dma ----
+# ---- npu_dma ----
 mut dma_outst    $DMA "(outst != (OW+1)'(OUT))" "(outst != (OW+1)'(OUT - 1) && outst != (OW+1)'(OUT))"  # 在途上限少一 (功能仍正確, 由 a_issue 抓到吞吐量損失)
 mut dma_overrun  $DMA "wire [OW:0] outst = iss[OW:0] - wr[OW:0];" "wire [OW:0] outst = {1'b0, iss[OW-1:0] - wr[OW-1:0]};"  # 在途計算溢位 → FIFO 覆蓋
 mut dma_rd_qual  $DMA "wire iss_ok = st ? (h_rd_req && h_rd_gnt) : (m_rd_req && m_rd_gnt);" "wire iss_ok = st ? (h_rd_req && h_rd_gnt) : m_rd_gnt;"  # 外部 gnt 不限定 req
-mut dma_wr_qual  $DMA "wire pop    = st ? (m_wr_req && m_wr_gnt) : (h_wr_req && h_wr_gnt);" "wire pop    = st ? m_wr_gnt : (h_wr_req && h_wr_gnt);"
+mut dma_wr_qual  $DMA "wire w_fire = st ? (m_wr_req && m_wr_gnt) : (h_wr_req && h_wr_gnt);" "wire w_fire = st ? m_wr_gnt : (h_wr_req && h_wr_gnt);"
 mut dma_waddr    $DMA "wire e_step = st ? pop : iss_ok;" "wire e_step = iss_ok;"                       # 寫位址用錯計數器
-mut dma_l2line   $DMA "assign h_wr_line = l2 + 26'(wr);" "assign h_wr_line = l2 + 26'(iss);"
+mut dma_l2line   $DMA "assign h_wr_line = dec ? (l2 + 26'({wr, half})) : (l2 + 26'(wr));" "assign h_wr_line = dec ? (l2 + 26'({wr, half})) : (l2 + 26'(iss));"
 mut dma_done     $DMA "assign done      = act && (wr == n);" "assign done      = act && (iss == n);"                # 讀完就完成 (寫尚未完成)
 mut dma_fifo     $DMA "if (pop)  f_rd <= f_rd + 1'b1;" "if (pop && !push)  f_rd <= f_rd + 1'b1;"                  # FIFO 讀指標錯
 mut dma_ext31    $DMA "wire [31:0] e_addr = erow + 32'(col);" "wire [31:0] e_addr = {1'b0, erow[30:0]} + 32'(col);"       # 外部位址高位遺失
@@ -73,6 +74,17 @@ mut dma_pushd    $DMA "wire [DW-1:0] push_d = st ? h_rd_data : m_rd_rdata;" "wir
 mut dma_n0       $DMA "assign done      = act && (wr == n);" "assign done      = act && (wr == n) && n != '0;"       # n = 0 永不完成
 mut dma_2d_wrap  $DMA "wire e_wrap = (cols != '0) && (col == cols - 1'b1);" "wire e_wrap = (cols != '0) && (col == cols);"           # 2D: 列多一個 line
 mut dma_2d_strd  $DMA "if (e_wrap) begin col <= '0; erow <= erow + 32'(stride); end" "if (e_wrap) begin col <= '0; erow <= erow + 32'(cols); end"   # 2D: 忽略列距
+# ---- npu_dma 載入時解碼 (v6.3.13) ----
+mut dec_fmt_bits $TILE ".cmd_fmt(head.b[17:16])" ".cmd_fmt(head.b[16:15])"                                     # 格式欄位位置錯
+mut dec_mx_tab   $DMA "8'd4, 8'd6, 8'd8, 8'd12}" "8'd4, 8'd5, 8'd8, 8'd12}"                                                      # E2M1 1.5×2 錯
+mut dec_mx_top   $DMA "8'd4, 8'd6, 8'd8, 8'd12}" "8'd4, 8'd6, 8'd8, 8'd14}"                                               # E2M1 最大值錯
+mut dec_mx_sign  $DMA "(x[3] ? 8'(-m) : m);" "(m);"                               # MXFP4 符號遺失
+mut dec_i4_sext  $DMA "return (f == 2'd1) ? {{4{x[3]}}, x} :" "return (f == 2'd1) ? {4'd0, x} :"                            # INT4 未符號延伸
+mut dec_u4_sext  $DMA "(f == 2'd2) ? {4'd0, x} :" "(f == 2'd2) ? {{4{x[3]}}, x} :"                            # UINT4 被符號延伸
+mut dec_nib      $DMA "wire [DW/2-1:0] f_sel = half ? f_head[DW-1:DW/2] : f_head[DW/2-1:0];" "wire [DW/2-1:0] f_sel = half ? f_head[DW/2-1:0] : f_head[DW-1:DW/2];"   # 前後半對調
+mut dec_pop1     $DMA "wire pop    = w_fire && (!dec || half);" "wire pop    = w_fire;"                       # 前半寫完就釋放
+mut dec_addr     $DMA "assign h_wr_line = dec ? (l2 + 26'({wr, half})) : (l2 + 26'(wr));" "assign h_wr_line = dec ? (l2 + 26'(wr) + 26'(half)) : (l2 + 26'(wr));"   # L2 位址未乘 2
+mut dec_st       $DMA "dec <= !cmd_st && (cmd_fmt != 2'd0);" "dec <= (cmd_fmt != 2'd0);"                        # ST 也解碼
 # ---- VEC 分派 / 完成槽 / host 埠共用 (v6.3.10) ----
 mut vec_no_wait  $TILE "wire g_vec  = go && head.op == NPU_OP_VEC && !h_nop && !vec_cv;" "wire g_vec  = go && head.op == NPU_OP_VEC && !h_nop;"   # 完成槽被佔用仍分派 (覆蓋 vec_id)
 mut vec_k0       $TILE "((head.op == NPU_OP_GEMM || head.op == NPU_OP_VEC) && head.k == '0);" "(head.op == NPU_OP_GEMM && head.k == '0);"   # K = 0 的 VEC 送引擎

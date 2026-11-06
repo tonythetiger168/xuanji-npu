@@ -25,15 +25,15 @@ PY
   cp formal/$b/$b.sby $M/$n/
   (cd $M/$n && timeout 1800 sby -f $b.sby prove > sby.log 2>&1)
   # 只有證明真的失敗 (FAIL: 反例 / UNKNOWN: 歸納找到反例) 才算抓到; 逾時或工具錯誤不算
-  if grep -qE "DONE \((FAIL|UNKNOWN)" $M/$n/sby.log && [[ "$b" =~ ^(orca_pmu|npu_l2_xbar|npu_ss_dma)$ ]]; then
+  if grep -qE "DONE \((FAIL|UNKNOWN)" $M/$n/sby.log && [[ "$b" =~ ^(orca_pmu|npu_l2_xbar|npu_ss_dma|npu_dma)$ ]]; then
     # orca_pmu / npu_l2_xbar / npu_ss_dma 的歸納需要引用內部狀態的輔助不變式: 另以 BMC (深度 30, 拿掉輔助不變式) 確認
     # mutant 違反的是埠層級的性質 (真的反例), 而不只是輔助不變式
     sv2v -DFORMAL -DFORMAL_TOP_$b -DFORMAL_NO_HELPER -E Assert -Irtl/common rtl/common/orca_pkg.sv $extra $M/$n.sv > $M/$n/$b.v
     sed 's/^prove: mode prove/prove: mode bmc/; s/^prove: depth [0-9]*/prove: depth 30/' formal/$b/$b.sby > $M/$n/$b.sby
-    [[ "$b" =~ ^(npu_l2_xbar|npu_ss_dma)$ ]] && sed -i "s/^smtbmc z3/abc bmc3/" $M/$n/$b.sby   # 陣列 / 寬計數器: z3 BMC 30 拍太慢, 改用 ABC bmc3
+    [[ "$b" =~ ^(npu_l2_xbar|npu_ss_dma|npu_dma)$ ]] && sed -i "s/^smtbmc z3/abc bmc3/" $M/$n/$b.sby   # 陣列 / 寬計數器: z3 BMC 30 拍太慢, 改用 ABC bmc3
     # npu_ss_dma (32 bit 位址、16 bit 計數器) 無輔助不變式時 BMC 每拍成本急增 (第 10 拍約 20 分鐘): 只做 8 拍 —
     # 每個 DMA mutant 在 cols = 1、n 小的命令下幾拍內就違反埠層級的位址 / 資料性質
-    [ "$b" = npu_ss_dma ] && sed -i "s/^prove: depth 30/prove: depth 8/" $M/$n/$b.sby
+    [[ "$b" =~ ^(npu_ss_dma|npu_dma)$ ]] && sed -i "s/^prove: depth 30/prove: depth 8/" $M/$n/$b.sby
     (cd $M/$n && timeout 1800 sby -f $b.sby prove > bmc.log 2>&1)
     # ABC 回報 FAIL (反例) 時 sby 可能無法產生波形而報 ERROR, 以 engine 的結果為準
     if grep -qE "DONE \(FAIL|returned FAIL" $M/$n/bmc.log; then nk=$((nk + 1)); echo "$n: killed (BMC counterexample, port-level property)"
@@ -58,6 +58,21 @@ mut npu_ss_dma $D wrap_off    "wire e_wrap = (cols != '0) && (col == cols - 1'b1
 mut npu_ss_dma $D stride_cols "if (e_wrap) begin col <= '0; erow <= erow + 32'(stride); end" "if (e_wrap) begin col <= '0; erow <= erow + 32'(cols); end"
 mut npu_ss_dma $D fifo_ptr    "if (pop)  f_rd <= f_rd + 1'b1;" "if (pop && !push)  f_rd <= f_rd + 1'b1;"
 mut npu_ss_dma $D pushd_wrong "wire [DW-1:0] push_d = st ? h_rd_data : m_rd_rdata;" "wire [DW-1:0] push_d = st ? h_rd_data : h_rd_data;"
+# npu_dma (v6.3.13): npu_ss_dma 的代表性 mutant + 載入時解碼
+E=rtl/npu/npu_dma.sv
+mut npu_dma $E done_early   "assign done      = act && (wr == n);" "assign done      = act && (iss == n);"
+mut npu_dma $E outst_over   "wire can_iss = act && (iss != n) && (outst != (OW+1)'(OUT));" "wire can_iss = act && (iss != n);"
+mut npu_dma $E stride_cols  "if (e_wrap) begin col <= '0; erow <= erow + 32'(stride); end" "if (e_wrap) begin col <= '0; erow <= erow + 32'(cols); end"
+mut npu_dma $E mx_tab       "8'd4, 8'd6, 8'd8, 8'd12}" "8'd4, 8'd5, 8'd8, 8'd12}"
+mut npu_dma $E mx_top       "8'd4, 8'd6, 8'd8, 8'd12}" "8'd4, 8'd6, 8'd8, 8'd16}"
+mut npu_dma $E i4_nosext    "return (f == 2'd1) ? {{4{x[3]}}, x} :" "return (f == 2'd1) ? {4'd0, x} :"
+mut npu_dma $E u4_sext      "(f == 2'd2) ? {4'd0, x} :" "(f == 2'd2) ? {{4{x[3]}}, x} :"
+mut npu_dma $E mx_nosign    "(x[3] ? 8'(-m) : m);" "(m);"
+mut npu_dma $E nib_order    "wire [DW/2-1:0] f_sel = half ? f_head[DW-1:DW/2] : f_head[DW/2-1:0];" "wire [DW/2-1:0] f_sel = half ? f_head[DW/2-1:0] : f_head[DW-1:DW/2];"
+mut npu_dma $E pop_first    "wire pop    = w_fire && (!dec || half);" "wire pop    = w_fire;"
+mut npu_dma $E half_addr    "assign h_wr_line = dec ? (l2 + 26'({wr, half})) : (l2 + 26'(wr));" "assign h_wr_line = dec ? (l2 + 26'(wr) + 26'(half)) : (l2 + 26'(wr));"
+mut npu_dma $E dec_st       "dec <= !cmd_st && (cmd_fmt != 2'd0);" "dec <= (cmd_fmt != 2'd0);"
+mut npu_dma $E half_noflip  "if (dec && w_fire) half <= ~half;" "if (dec && pop) half <= ~half;"
 mut npu_ss_dma $D wr_no_hold  "assign m_wr_req  = act && f_nempty && st;" "assign m_wr_req  = act && f_nempty && st && !iss[0];"
 T=rtl/npu/orca_npu_ss.sv
 mut orca_npu_ss $T wt_ignored  "wire go     = q_hv && (!head.wt || oc == '0);" "wire go     = q_hv;"

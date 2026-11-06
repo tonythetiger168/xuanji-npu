@@ -5,9 +5,9 @@
 # MIN_UTIL: 效能回歸門檻 (大 K 的 MAC 利用率 %, 低於即失敗); 量測值見 docs/npu.md
 npu_cfg() {
   case "$1" in
-    nano) N=4;  NCU=1; NB=2;  DEPTH=512;  MIN_UTIL=95; TILE_OUT=16 ;;
-    x1)   N=8;  NCU=4; NB=4;  DEPTH=1024; MIN_UTIL=95; TILE_OUT=32 ;;
-    pro)  N=16; NCU=8; NB=16; DEPTH=1024; MIN_UTIL=95; TILE_OUT=64 ;;
+    nano) N=4;  NCU=1; NB=2;  DEPTH=512;  MIN_UTIL=95; TILE_OUT=32 ;;
+    x1)   N=8;  NCU=4; NB=4;  DEPTH=1024; MIN_UTIL=95; TILE_OUT=64 ;;
+    pro)  N=16; NCU=8; NB=16; DEPTH=1024; MIN_UTIL=95; TILE_OUT=128 ;;
     max)  N=32; NCU=24; NB=32; DEPTH=1024; MIN_UTIL=78; TILE_OUT=128 ;;   # K 上限 958 (24 個命令同時放進 2 MiB L2)
     *) echo "unknown NPU config '$1' (nano / x1 / pro / max)" >&2; return 1 ;;
   esac

@@ -84,10 +84,36 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
     if (e) vec_err_exp++;
   endfunction
 
+  // 載入時解碼 (v6.3.13, DMA_LD 的 b[17:16]): 1 INT4 / 2 UINT4 / 3 MXFP4 (E2M1 × 2); 參考值以實數計算 E2M1 的定義
+  function automatic logic [7:0] ref_dec4(int f, logic [3:0] x);
+    real v;
+    int e = int'(x[2:1]), m = int'(x[0]);
+    if (f == 1) return 8'($signed(x));
+    if (f == 2) return {4'd0, x};
+    v = (e == 0) ? 0.5 * m : (2.0 ** (e - 1)) * (1.0 + 0.5 * m);   // E2M1: 偏移 1, 次正規 0 / 0.5
+    v = v * 2.0;
+    return x[3] ? 8'(-int'(v)) : 8'(int'(v));
+  endfunction
+  function automatic logic [511:0] ref_dec(int f, logic [511:0] d, int h);
+    logic [511:0] o;
+    for (int e = 0; e < 64; e++) o[e * 8 +: 8] = ref_dec4(f, d[h * 256 + e * 4 +: 4]);
+    return o;
+  endfunction
+  function automatic int dma_fmt(npu_tile_cmd_t c); return (c.op == NPU_OP_DMA_LD) ? int'(c.b[17:16]) : 0; endfunction
+  function automatic int dma_l2n(npu_tile_cmd_t c); return (dma_fmt(c) != 0) ? 2 * int'(c.k) : int'(c.k); endfunction
+
   // 參考模型: 依序執行一個命令
   function automatic void ref_exec(npu_tile_cmd_t c);
     case (c.op)
-      NPU_OP_DMA_LD: for (int i = 0; i < int'(c.k); i++) rl2[l2i(c.a + 26'(i))] = rerd(ext_of(c, i));
+      NPU_OP_DMA_LD: for (int i = 0; i < int'(c.k); i++) begin
+        int f = dma_fmt(c);
+        if (f == 0) rl2[l2i(c.a + 26'(i))] = rerd(ext_of(c, i));
+        else begin
+          logic [511:0] d = rerd(ext_of(c, i));
+          rl2[l2i(c.a + 26'(2 * i))]     = ref_dec(f, d, 0);
+          rl2[l2i(c.a + 26'(2 * i + 1))] = ref_dec(f, d, 1);
+        end
+      end
       NPU_OP_DMA_ST: for (int i = 0; i < int'(c.k); i++) rext[ext_of(c, i)] = rl2[l2i(c.a + 26'(i))];
       NPU_OP_GEMM: if (c.k != 0) begin
         logic [31:0] C [];
@@ -124,7 +150,10 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
   function automatic fp_t footprint(npu_tile_cmd_t c);
     fp_t f;
     case (c.op)
-      NPU_OP_DMA_LD: for (int i = 0; i < int'(c.k); i++) begin f.l2w.push_back(l2i(c.a + 26'(i))); f.er.push_back(ext_of(c, i)); end
+      NPU_OP_DMA_LD: begin
+        for (int i = 0; i < int'(c.k); i++) f.er.push_back(ext_of(c, i));
+        for (int i = 0; i < dma_l2n(c); i++) f.l2w.push_back(l2i(c.a + 26'(i)));
+      end
       NPU_OP_DMA_ST: for (int i = 0; i < int'(c.k); i++) begin f.l2r.push_back(l2i(c.a + 26'(i))); f.ew.push_back(ext_of(c, i)); end
       NPU_OP_GEMM: if (c.k != 0) begin
         for (int l = 0; l < (int'(c.k) + SPL - 1) / SPL; l++) begin f.l2r.push_back(l2i(c.a + 26'(l))); f.l2r.push_back(l2i(c.b + 26'(l))); end
@@ -172,6 +201,8 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
     if (a[31:28] == 4'hE) a[31:28] = 4'hD;               // 0xE000_0000.. 留給向量程式
     return a;
   endfunction
+  int p_dec = 50;                                         // DMA_LD 使用解碼格式的機率 (%)
+  function automatic logic [1:0] pick_fmt(); return rnd(p_dec) ? 2'(ur(1, 3)) : 2'd0; endfunction
   function automatic logic [15:0] pick_n();
     case (ur(0, 9))
       0:       return 16'd0;
@@ -215,7 +246,7 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
       if (int'(c.k) > 512) c.k = 16'(ur(1, 512));    // 範圍有限 (< 0x20_0000 line): 不碰到 VEC 程式區 0xE000_0000
       if (c.ext >= 32'hDFE0_0000 && c.ext < 32'hE000_0000) c.ext = c.ext - 32'h0020_0000;
     end else begin
-      c.b = rnd(50) ? '0 : 26'({10'($urandom()), 16'h0});   // 1D (b 的高位元不影響)
+      c.b = rnd(50) ? '0 : 26'({10'($urandom()), 16'h0});   // 1D (ST 時 b 的高位元不影響; LD 的 b[17:16] 之後另選)
     end
   endfunction
   function automatic npu_tile_cmd_t gen_cmd(logic [7:0] id, int p_wt, int mode);
@@ -231,7 +262,10 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
         do c.c = pick_l2(CL);
         while (c.k != 0 && !(disjoint(l2i(c.c), CL, l2i(c.a), al) && disjoint(l2i(c.c), CL, l2i(c.b), al)));
       end
-      7, 8, 9, 10, 11, 12: begin c.op = NPU_OP_DMA_LD; c.k = (mode == 1) ? 16'(ur(0, 3)) : pick_n(); c.a = pick_l2(int'(c.k)); c.ext = pick_ext(); dma_2d(c); end
+      7, 8, 9, 10, 11, 12: begin
+        c.op = NPU_OP_DMA_LD; c.k = (mode == 1) ? 16'(ur(0, 3)) : pick_n(); c.ext = pick_ext(); dma_2d(c);
+        c.b[17:16] = pick_fmt(); c.a = pick_l2(dma_l2n(c));
+      end
       13, 14, 15, 16, 17:  begin c.op = NPU_OP_DMA_ST; c.k = pick_n(); c.a = pick_l2(int'(c.k)); c.ext = pick_ext(); dma_2d(c); end
       default: c.op = rnd(80) ? NPU_OP_NOP : npu_op_e'(ur(5, 7));     // 5..7 保留: 當 NOP
     endcase
@@ -248,6 +282,7 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
     npu_tile_cmd_t c = '0;
     c.id = id; c.op = st ? NPU_OP_DMA_ST : NPU_OP_DMA_LD; c.wt = 1'b1;
     c.k = st ? 16'(ur(40000, 65534)) : 16'hFFFF; c.a = 26'($urandom()); c.ext = $urandom();
+    if (!st) c.b[17:16] = pick_fmt();                     // 解碼 LD: L2 寫入 2 × 65535 個 line
     acc_clear(); acc_add(footprint(c));
     return c;
   endfunction
@@ -532,21 +567,24 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
   // +perf_dma: 外部埠全速、固定讀取延遲 L 時的 DMA 吞吐量 (line/拍); LD 2048 line 後 (wt) ST 2048 line
   task automatic perf_dma();
     npu_tile_cmd_t c;
-    longint t0, t_ld, t_st;
+    longint t0, t_ld, t_st, t_dec;
     p_cmd = 100; p_cpl = 100; p_rgnt = 100; p_wgnt = 100; p_rv = 100; test_en = 0;
     prog.delete(); prog_pos.delete(); cpl_pos.delete(); cpl_cyc.delete(); pidx = 0; ncpl = 0;
     c = '0; c.op = NPU_OP_DMA_LD; c.id = 8'd1; c.k = 16'd2048; c.a = 26'd0;  c.ext = 32'h1000_0000;
     prog.push_back(c); prog_pos[1] = 0; ref_exec(c);
+    c = '0; c.op = NPU_OP_DMA_LD; c.id = 8'd3; c.k = 16'd1024; c.a = 26'd0;  c.ext = 32'h3000_0000; c.wt = 1'b1;
+    c.b[17:16] = 2'd3;                                    // MXFP4 解碼: 外部 1024 line → L2 2048 line
+    prog.push_back(c); prog_pos[3] = 1; ref_exec(c);
     c = '0; c.op = NPU_OP_DMA_ST; c.id = 8'd2; c.k = 16'd2048; c.a = 26'd0;  c.ext = 32'h2000_0000; c.wt = 1'b1;
-    prog.push_back(c); prog_pos[2] = 1; ref_exec(c);
+    prog.push_back(c); prog_pos[2] = 2; ref_exec(c);
     @(posedge clk); t0 = cyc; in_batch = 1;
-    while (ncpl != 2) @(posedge clk);
+    while (ncpl != 3) @(posedge clk);
     in_batch = 0;
     for (int w = 0; busy && w < 1000; w++) @(posedge clk);
     check_state();
-    t_ld = cpl_cyc[1] - t0; t_st = cpl_cyc[2] - cpl_cyc[1];
-    $display("PERFDMA: OUT=%0d read_latency=%0d LD %0d lines %0d cycles (%.3f line/cycle)  ST %0d lines %0d cycles (%.3f line/cycle)",
-             OUT, fix_lat, 2048, t_ld, 2048.0 / real'(t_ld), 2048, t_st, 2048.0 / real'(t_st));
+    t_ld = cpl_cyc[1] - t0; t_dec = cpl_cyc[3] - cpl_cyc[1]; t_st = cpl_cyc[2] - cpl_cyc[3];
+    $display("PERFDMA: OUT=%0d read_latency=%0d LD %0d lines %0d cycles (%.3f line/cycle)  ST %0d lines %0d cycles (%.3f line/cycle)  LD-MXFP4 %0d->%0d lines %0d cycles (%.3f L2 line/cycle)",
+             OUT, fix_lat, 2048, t_ld, 2048.0 / real'(t_ld), 2048, t_st, 2048.0 / real'(t_st), 1024, 2048, t_dec, 2048.0 / real'(t_dec));
   endtask
 
   // directed: 完成輸出回壓期間填滿所有槽 (npu_core 佇列 + 每個 CU + 其輸出暫存 + tile 輸出暫存, 再加 DMA 與 NOP),

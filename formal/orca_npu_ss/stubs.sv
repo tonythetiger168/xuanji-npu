@@ -3,7 +3,7 @@
 //   npu_core: 已接受未回報的命令數 p <= CQD + 4·NCU + 1 (真實容量: 每個 CU 最多 3 個命令 + 1 個待回報); cpl_valid 只在 p > 0 時出現,
 //             等待 cpl_ready 期間保持 (id 不變); cmd_ready 任意但 p 滿時為 0; busy = (p != 0)。
 //             npu_core 本身由 run_npu_cov / run_npu_mutation 驗證。
-//   npu_ss_dma: 只在 idle 接受命令; done 在忙碌中任意一拍出現, 之後回到 idle (DMA 本身已形式證明)。
+//   npu_dma (v6.3.13 起取代 npu_ss_dma): 只在 idle 接受命令; done 在忙碌中任意一拍出現, 之後回到 idle (DMA 本身已形式證明)。
 //   npu_vec_eng: 同 DMA (只在 idle 接受; done 在忙碌中任意一拍; derr 任意); L2 埠不發請求 (仲裁器另外形式證明)。
 //   clock_gate: 直通 (閘控安全以 orca_npu_ss 內的組合性質檢查 en)。
 `include "orca_pkg.sv"
@@ -43,9 +43,9 @@ module npu_core #(parameter int N = 8, NCU = 4, NB = 4, DEPTH = 1024, QD = 4) (
     end
 endmodule
 
-module npu_ss_dma #(parameter int OUT = 8, DW = 512) (
+module npu_dma #(parameter int OUT = 8, DW = 512) (
   input  logic clk, rst_n,
-  input  logic cmd_valid, output logic cmd_ready, input logic cmd_st,
+  input  logic cmd_valid, output logic cmd_ready, input logic cmd_st, input logic [1:0] cmd_fmt,
   input  logic [31:0] cmd_ext, input logic [25:0] cmd_l2, input logic [15:0] cmd_n,
   input  logic [15:0] cmd_cols, input logic [25:0] cmd_stride,
   output logic done, busy,

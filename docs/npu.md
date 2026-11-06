@@ -83,7 +83,7 @@ npu_core 加上命令前端與 DMA, 成為可以直接下命令的子系統 (由
 | 命令 | 動作 |
 |---|---|
 | `GEMM` | C = A × B (INT8 → INT32, 資料已在 L2); K = 0 時只回報完成 |
-| `DMA_LD` / `DMA_ST` | 外部記憶體 → L2 / L2 → 外部記憶體, k 個 line (k = 0 時立即完成); 位址模數環繞。2D (v6.3.11): b[15:0] = 每列 line 數 (0 = 1D), c = 外部列距 (line) — 第 i 個 line 的外部位址 = ext + (i / cols) × c + i % cols, L2 端連續 |
+| `DMA_LD` / `DMA_ST` | 外部記憶體 → L2 / L2 → 外部記憶體, k 個 line (k = 0 時立即完成); 位址模數環繞。2D (v6.3.11): b[15:0] = 每列 line 數 (0 = 1D), c = 外部列距 (line) — 第 i 個 line 的外部位址 = ext + (i / cols) × c + i % cols, L2 端連續。載入時解碼 (v6.3.13, 只對 LD): b[17:16] = 0 COPY / 1 INT4 / 2 UINT4 / 3 MXFP4, 見下方「DMA 引擎 npu_dma」 |
 | `VEC` (op 4) | 執行 L2 line `a` 起的 `k` 個向量指令 (每 line 4 個; `docs/npu_vec.md`); k = 0 時只回報完成; 遇到非法指令時 `vec_err` 一拍 |
 | `NOP` (op 3; 保留的 op 5–7 同 NOP) | 只回報完成 |
 
@@ -91,7 +91,28 @@ npu_core 加上命令前端與 DMA, 成為可以直接下命令的子系統 (由
   (例如 GEMM 執行時 DMA 載入下一批資料); 軟體須保證並行命令的 L2 / 外部區域不重疊, 否則設 `wt`。
 - 完成順序不保證與命令順序相同。
 - **DMA 吞吐量**: 每拍 1 line (64 B); 外部讀取延遲 L 拍時為 min(1, OUT / (L + 3)) line/拍, OUT = 在途上限
-  (Nano 16 / X1 32 / Pro 64)。量測 (`npu_ss_tb +perf_dma=L`) 見下表。
+  (v6.3.13: Nano 32 / X1 64 / Pro 128 / Max 128; 之前 16 / 32 / 64 / 128)。量測 (`npu_ss_tb +perf_dma=L`) 見下表。
+  解碼 LD 每個外部 line 寫 2 個 L2 line, 外部只需 0.5 line/拍就能讓 L2 寫入滿速。
+
+### DMA 引擎 `npu_dma` (v6.3.13)
+
+由 `npu_ss_dma` 複製並加上載入時解碼; `npu_ss_dma` 保持不變 (SIS 子系統使用)。介面多一個 `cmd_fmt` (orca_npu_ss 接 `b[17:16]`)。
+主流 LLM 權重以 4 bit 發佈 (INT4 / MXFP4), decode 階段受 DRAM 頻寬限制: 在 DMA 內展開成 INT8 讓 GEMM 不必改,
+外部位元組數減半。
+
+| fmt | 格式 | 每個 4 bit 元素 → INT8 |
+|---|---|---|
+| 0 | COPY | 原樣搬移 (外部 1 line → L2 1 line) |
+| 1 | INT4 | 符號延伸: −8..7 |
+| 2 | UINT4 | 補 0: 0..15 (非對稱量化; zero point 由軟體處理) |
+| 3 | MXFP4 (OCP E2M1) | 值 × 2: ±{0, 1, 2, 3, 4, 6, 8, 12} (精確; −0 → 0) |
+
+- 打包順序: 第 2i 個元素 = byte i 的低 4 bit (OCP MX)。外部 line j 的元素 0..63 → L2 `a + 2j`, 64..127 → `a + 2j + 1`; k 是外部 line 數。
+- MX 的區塊比例 (E8M0, 每 32 個元素) 與 INT4 的 group scale 不在 DMA 套用: per-channel scale 由向量核在 GEMM 之後反量化;
+  每 32 個 K 一個比例的 MX 區塊比例列為後續工作 (GEMM 端)。MXFP4 解出的值是真值 × 2, 反量化時比例要多除 2。
+- ST 忽略 fmt (原樣搬移)。2D 與解碼可同時使用 (外部端 2D, L2 端連續)。
+- 驗證: 形式證明 (k-induction, DW = 16, 檢查器以 E2M1 的定義另寫參考解碼) + 形式 mutation 13 / 13;
+  subsystem CRV 的參考模型以實數計算 E2M1, LD 有 50% 機率隨機選解碼格式 (含 2D、長 DMA 65535 line → L2 131070 line、位址環繞)。
 - **低功耗**: DMA 閒置時停止時脈 (ICG); 向量引擎閒置時停止取指 / 控制的時脈, 每個向量暫存器各有 ICG; npu_core 內每個 CU、每列另有 ICG。
 
 ### NPU Subsystem 驗證
