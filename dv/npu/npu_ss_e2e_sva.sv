@@ -12,7 +12,7 @@
 `include "orca_pkg.sv"
 module npu_ss_e2e_sva
   import orca_pkg::*;
-#(parameter int QD = 8, parameter int NCU = 4, parameter int WD = 4096)(
+#(parameter int QD = 8, parameter int NCU = 4, parameter int NDC = 2, parameter int WD = 4096)(
   input logic          clk, rst_n,
   input logic          cmd_valid, cmd_ready,
   input npu_tile_cmd_t cmd,
@@ -26,19 +26,21 @@ module npu_ss_e2e_sva
 );
   default clocking cb @(posedge clk); endclocking
   default disable iff (!rst_n);
-  localparam int OC_MAX = 4 + 4 * NCU + 1 + 3;      // 與 npu_ss_sva 相同
-  localparam int TMAX = QD + OC_MAX;
-  localparam int NBIN = 28;
-  // bins: [0:14] 延遲 (op 類別 * 3 + 桶), [15:19] 亂序 (op 類別), [20:24] 接受時未完成數, [25:27] 回壓情境
+  localparam int OC_MAX = 4 + 4 * NCU + 1 + NDC + 3;    // 與 npu_ss_sva 相同
+  localparam int TMAX = QD + OC_MAX + 1;                 // 佇列 + 已分派未移入輸出暫存 + 輸出暫存
+  localparam int NC = 6;                                 // op 類別數
+  localparam int NBIN = 4 * NC + 8;
+  // bins: [0:3NC-1] 延遲 (op 類別 * 3 + 桶), [3NC:4NC-1] 亂序 (op 類別), [4NC:4NC+4] 接受時未完成數, [4NC+5:4NC+7] 回壓情境
   wire acc = cmd_valid && cmd_ready;
   wire cpl = cpl_valid && cpl_ready;
 
-  function automatic int unsigned cls(npu_tile_cmd_t c);   // 0 GEMM, 1 DMA_LD, 2 DMA_ST, 3 NOP / 保留, 4 VEC
+  function automatic int unsigned cls(npu_tile_cmd_t c);   // 0 GEMM, 1 DMA_LD, 2 DMA_ST, 3 NOP / 保留, 4 VEC, 5 KV / MOE
     unique case (c.op)
       NPU_OP_GEMM: return 0;
       NPU_OP_DMA_LD: return 1;
       NPU_OP_DMA_ST: return 2;
       NPU_OP_VEC: return 4;
+      NPU_OP_KV, NPU_OP_MOE: return 5;
       default: return 3;
     endcase
   endfunction
@@ -55,7 +57,7 @@ module npu_ss_e2e_sva
   logic [47:0]       ps_q;
 
   covergroup cg_e2e with function sample(int unsigned c, int unsigned lb, bit ooo);
-    cp_cls: coverpoint c { bins gemm = {0}; bins ld = {1}; bins st = {2}; bins nop = {3}; bins vec = {4}; }
+    cp_cls: coverpoint c { bins gemm = {0}; bins ld = {1}; bins st = {2}; bins nop = {3}; bins vec = {4}; bins llm = {5}; }
     cp_lat: coverpoint lb { bins short = {0}; bins mid = {1}; bins long = {2}; }
     cp_ooo: coverpoint ooo { bins in_order = {0}; bins ooo = {1}; }
     x_lat:  cross cp_cls, cp_lat;
@@ -87,22 +89,22 @@ module npu_ss_e2e_sva
         if (pend[cpl_id] == 4'd1) begin        // 同一 id 有多個在途時延遲 / 順序無意義, 不取樣
           u_cg_e2e.sample(c, lbin(l), ooo);
           hit[c * 3 + lbin(l)] <= 1'b1;
-          if (ooo) hit[15 + c] <= 1'b1;
+          if (ooo) hit[3 * NC + c] <= 1'b1;
         end
         pend[cpl_id] <= pend[cpl_id] - 4'd1;
         t--;
       end
       if (acc) begin
         u_cg_acc.sample(tot);
-        hit[20 + ((tot == 0) ? 0 : (tot == 1) ? 1 : (tot <= 4) ? 2 : (tot <= QD) ? 3 : 4)] <= 1'b1;
+        hit[4 * NC + ((tot == 0) ? 0 : (tot == 1) ? 1 : (tot <= 4) ? 2 : (tot <= QD) ? 3 : 4)] <= 1'b1;
         pend[cmd.id] <= ((cpl && cpl_id == cmd.id) ? pend[cmd.id] - 4'd1 : pend[cmd.id]) + 4'd1;
         pcls[cmd.id] <= 3'(cls(cmd)); pcyc[cmd.id] <= cyc; pseq[cmd.id] <= seq;
         seq <= seq + 1;
         t++;
       end
-      if (cpl_valid && !cpl_ready && tot >= 4) hit[25] <= 1'b1;
-      if (cmd_valid && !cmd_ready && cpl_valid && !cpl_ready) hit[26] <= 1'b1;
-      if (acc && cpl) hit[27] <= 1'b1;
+      if (cpl_valid && !cpl_ready && tot >= 4) hit[4 * NC + 5] <= 1'b1;
+      if (cmd_valid && !cmd_ready && cpl_valid && !cpl_ready) hit[4 * NC + 6] <= 1'b1;
+      if (acc && cpl) hit[4 * NC + 7] <= 1'b1;
       tot <= t;
       stall <= (tot == 0 || progress || env_wait) ? 0 : stall + 1;
     end
@@ -124,7 +126,7 @@ module npu_ss_e2e_sva
   c_acc_and_cpl:  cover property (acc && cpl);
 endmodule
 
-bind orca_npu_ss npu_ss_e2e_sva #(.QD(QD), .NCU(NCU)) u_e2e (
+bind orca_npu_ss npu_ss_e2e_sva #(.QD(QD), .NCU(NCU), .NDC(NDC)) u_e2e (
   .clk, .rst_n, .cmd_valid, .cmd_ready, .cmd, .cpl_valid, .cpl_ready, .cpl_id, .busy,
   .m_rd_req, .m_rd_gnt, .m_rd_rvalid, .m_wr_req, .m_wr_gnt,
   .h_rd_req, .h_rd_gnt, .h_wr_req, .h_wr_gnt, .perf_steps, .dma_rd_wait(u_dma.g_ch[0].u_dma.iss != u_dma.g_ch[0].u_dma.wr ||

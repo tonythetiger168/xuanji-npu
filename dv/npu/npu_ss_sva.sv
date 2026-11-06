@@ -130,33 +130,39 @@ module npu_ss_sva #(parameter int QD = 8, parameter int NCU = 4, parameter int N
   input logic clk, rst_n, test_en,
   input logic cmd_valid, cmd_ready, cpl_valid, cpl_ready, busy, irq,
   input logic [7:0] cpl_id,
-  input logic [$clog2(4 + 4 * NCU + 1 + NDC + 2 + 1)-1:0] oc,
+  input logic [$clog2(4 + 4 * NCU + 1 + NDC + 3 + 1)-1:0] oc,
   input logic [$clog2(QD):0] q_cnt,
-  input logic q_hv, go, q_pop, g_core, g_dma, g_vec, g_nop, d_take, v_take, h_nop, c_cmd_ready, d_cmd_ready, v_cmd_ready,
+  input logic q_hv, go, q_pop, g_core, g_dma, g_vec, g_nop, g_llm, d_take, v_take, h_nop, c_cmd_ready, d_cmd_ready, v_cmd_ready,
   input logic head_wt,
   input logic [2:0] head_op,
   input logic [15:0] head_k,
   input logic d_cpl_valid, nop_cv, vec_cv, c_cpl_valid, c_cpl_ready, c_busy, d_busy, v_busy, v_done, load,
+  input logic llm_cv, l_busy, l_done, l_rd_req, l_wr_req,
   input logic [NDC-1:0] d_ch_busy,
-  input logic [3:0] src_v, sel,
+  input logic [4:0] src_v, sel,
   input logic d_rd_req, d_wr_req, v_rd_req, v_wr_req, h_rd_req, h_rd_gnt, h_wr_req, m_rd_req, m_wr_req, m_rd_rvalid,
   input logic vec_err
 );
   default clocking cb @(posedge clk); endclocking
   default disable iff (!rst_n);
-  // npu_core 內最多: 佇列 4 + 每個 CU 4 (持有 3 個命令 + 1 個待回報; v6.3.12) + 輸出暫存 1; 另加 DMA NDC (每個通道 1) + NOP 1 + VEC 1
-  localparam int OC_MAX = 4 + 4 * NCU + 1 + NDC + 2;
+  // npu_core 內最多: 佇列 4 + 每個 CU 4 (持有 3 個命令 + 1 個待回報; v6.3.12) + 輸出暫存 1; 另加 DMA NDC (每個通道 1) + NOP 1
+  // + VEC 1 + LLM 1
+  localparam int OC_MAX = 4 + 4 * NCU + 1 + NDC + 3;
 
   a_q_bound:    assert property (q_cnt <= ($clog2(QD)+1)'(QD));
   a_cmd_ready:  assert property (cmd_ready == (q_cnt != ($clog2(QD)+1)'(QD)));
   a_oc_bound:   assert property (int'(oc) <= OC_MAX);
   // 分派: 一次最多一個去處; 等待旗標的命令只在 oc = 0 時分派; 有命令可分派且去處就緒時必分派
-  a_disp_one:   assert property ($onehot0({g_core, g_dma, g_vec, g_nop}));
+  a_disp_one:   assert property ($onehot0({g_core, g_dma, g_vec, g_nop, g_llm}));
   a_wt:         assert property (q_pop && head_wt |-> oc == '0);
   a_no_stall:   assert property (q_hv && (!head_wt || oc == '0) &&
                                  ((head_op == 3'd0 && !h_nop && c_cmd_ready) || (head_op inside {3'd1, 3'd2} && d_cmd_ready) ||
-                                  (head_op == 3'd4 && !h_nop && !vec_cv && v_cmd_ready) || (h_nop && !nop_cv)) |-> q_pop);
-  a_rsvd_nop:   assert property (q_hv && head_op > 3'd4 |-> h_nop);         // 保留的 op 當 NOP
+                                  (head_op == 3'd4 && !h_nop && !vec_cv && v_cmd_ready) || (h_nop && !nop_cv) ||
+                                  (head_op inside {3'd5, 3'd6} && !llm_cv && !l_busy)) |-> q_pop);
+  a_rsvd:       assert property (q_hv && head_op == 3'd7 |-> h_nop);         // 保留的 op 7 當 NOP
+  a_llm_op:     assert property (q_hv && head_op inside {3'd5, 3'd6} |-> !h_nop);   // KV / MOE 送 LLM 引擎 (k = 0 也是)
+  a_llm_disp:   assert property (g_llm |-> head_op inside {3'd5, 3'd6} && !llm_cv && !l_busy);
+  a_llm_slot:   assert property (l_done |-> !llm_cv);
   a_vec_k0:     assert property (g_vec |-> head_k != '0);                    // K = 0 的 VEC 不送引擎
   a_vec_slot:   assert property (v_done |-> !vec_cv);
   a_vec_err:    assert property (vec_err |-> v_done);
@@ -165,30 +171,31 @@ module npu_ss_sva #(parameter int QD = 8, parameter int NCU = 4, parameter int N
   a_cpl_hold:   assert property (cpl_valid && !cpl_ready |=> cpl_valid && $stable(cpl_id));
   a_cpl_src:    assert property (c_cpl_valid && !c_cpl_ready && cpl_valid && !cpl_ready |=> c_cpl_valid);
   a_irq:        assert property (irq == cpl_valid);
-  // 公平: 待回報的來源最多被其他來源搶先 3 次 (round-robin, 4 個來源)
-  int unsigned skip [4];
+  // 公平: 待回報的來源最多被其他來源搶先 4 次 (round-robin, 5 個來源)
+  int unsigned skip [5];
   always @(posedge clk or negedge rst_n)
-    if (!rst_n) skip = '{0, 0, 0, 0};
-    else if (load) for (int i = 0; i < 4; i++) skip[i] = sel[i] ? 0 : src_v[i] ? skip[i] + 1 : 0;
-  a_fair:       assert property (skip[0] <= 3 && skip[1] <= 3 && skip[2] <= 3 && skip[3] <= 3);
+    if (!rst_n) skip = '{0, 0, 0, 0, 0};
+    else if (load) for (int i = 0; i < 5; i++) skip[i] = sel[i] ? 0 : src_v[i] ? skip[i] + 1 : 0;
+  a_fair:       assert property (skip[0] <= 4 && skip[1] <= 4 && skip[2] <= 4 && skip[3] <= 4 && skip[4] <= 4);
   // 確切的 round-robin: 選中的是上一個選中者之後第一個有效的來源
-  logic [1:0] rr_last;
-  logic [3:0] rr_exp;
+  logic [2:0] rr_last;
+  logic [4:0] rr_exp;
   always @(posedge clk or negedge rst_n)
-    if (!rst_n) rr_last <= 2'd3;
-    else if (load) rr_last <= sel[0] ? 2'd0 : sel[1] ? 2'd1 : sel[2] ? 2'd2 : 2'd3;
+    if (!rst_n) rr_last <= 3'd4;
+    else if (load) rr_last <= sel[0] ? 3'd0 : sel[1] ? 3'd1 : sel[2] ? 3'd2 : sel[3] ? 3'd3 : 3'd4;
   always_comb begin
     rr_exp = '0;
-    for (int i = 3; i >= 0; i--) if (src_v[(int'(rr_last) + 1 + i) % 4]) rr_exp = 4'(1 << ((int'(rr_last) + 1 + i) % 4));
+    for (int i = 4; i >= 0; i--) if (src_v[(int'(rr_last) + 1 + i) % 5]) rr_exp = 5'(1 << ((int'(rr_last) + 1 + i) % 5));
   end
   a_rr:         assert property (load |-> sel == rr_exp);
   // 有界: 輸出暫存空著且有來源時必載入
   a_load:       assert property (src_v != '0 && !cpl_valid |-> load);
-  a_busy:       assert property (!busy |-> !q_hv && oc == '0 && !cpl_valid && !c_busy && !d_busy && !v_busy);
+  a_busy:       assert property (!busy |-> !q_hv && oc == '0 && !cpl_valid && !c_busy && !d_busy && !v_busy && !l_busy);
   // DMA / 向量引擎閒置時不使用 host 埠 (DMA 也不用外部埠); DMA 時脈關閉時必在 idle (test_en 時 ICG 強制開啟)
   a_dma_quiet:  assert property (!d_busy |-> !d_rd_req && !d_wr_req && !m_rd_req && !m_wr_req);
   a_vec_quiet:  assert property (!v_busy |-> !v_rd_req && !v_wr_req);
-  a_host:       assert property ((h_rd_req == (d_rd_req || v_rd_req)) && (h_wr_req == (d_wr_req || v_wr_req)));
+  a_llm_quiet:  assert property (!l_busy |-> !l_rd_req && !l_wr_req);
+  a_host:       assert property ((h_rd_req == (d_rd_req || v_rd_req || l_rd_req)) && (h_wr_req == (d_wr_req || v_wr_req || l_wr_req)));
 
   c_q_full:     cover property (cmd_valid && !cmd_ready);
   c_cpl_bp:     cover property (cpl_valid && !cpl_ready);
@@ -202,42 +209,51 @@ module npu_ss_sva #(parameter int QD = 8, parameter int NCU = 4, parameter int N
   c_nop_slot:   cover property (go && h_nop && nop_cv);
   c_k0:         cover property (g_nop && head_op == 3'd0);
   c_vec_k0:     cover property (g_nop && head_op == 3'd4);
-  c_rsvd:       cover property (g_nop && head_op > 3'd4);
+  c_rsvd:       cover property (g_nop && head_op == 3'd7);
+  c_llm_slot:   cover property (go && head_op inside {3'd5, 3'd6} && llm_cv && !l_busy);   // 等 LLM 完成槽
+  c_llm_busy:   cover property (go && head_op inside {3'd5, 3'd6} && l_busy);              // 等 LLM 引擎
+  c_host_llm_r: cover property (l_rd_req && (d_rd_req || v_rd_req));     // LLM 引擎與 DMA / VEC 同時要 host 讀埠
+  c_host_llm_w: cover property (l_wr_req && (d_wr_req || v_wr_req));
+  c_llm_core:   cover property (l_busy && c_busy && d_busy);
   c_overlap:    cover property (d_busy && c_busy && h_wr_req);
   c_host_share: cover property (d_rd_req && v_rd_req);                     // DMA 與向量引擎同時要 host 讀埠
   c_vec_core:   cover property (v_busy && c_busy);
   c_vec_err:    cover property (vec_err);
-  c_all_src:    cover property (src_v == 4'b1111 && cpl_valid && !cpl_ready);
+  c_all_src:    cover property (src_v == 5'b11111 && cpl_valid && !cpl_ready);
   c_oc_max:     cover property (int'(oc) == OC_MAX);              // 上限可達 (界限是緊的)
 
   covergroup cg_disp @(posedge clk iff rst_n && q_pop);
-    cp_op: coverpoint head_op { bins gemm = {0}; bins ld = {1}; bins st = {2}; bins nop = {3}; bins vec = {4}; bins rsvd = {[5:7]}; }
+    cp_op: coverpoint head_op { bins gemm = {0}; bins ld = {1}; bins st = {2}; bins nop = {3}; bins vec = {4}; bins kv = {5};
+                                bins moe = {6}; bins rsvd = {7}; }
     cp_wt: coverpoint head_wt;
     cp_oc: coverpoint oc { bins zero = {0}; bins one = {1}; bins few = {[2:4]}; bins many = {[5:$]}; }
     x_op_wt: cross cp_op, cp_wt;
   endgroup
   cg_disp u_cg_disp = new;
   covergroup cg_cpl @(posedge clk iff rst_n && load);
-    // 每個來源在「只有它」與「4 個都在等」兩種情況下都被選中過; 另含每對來源的競爭
-    cp_sel: coverpoint {(sel[1] ? 2'd1 : sel[2] ? 2'd2 : sel[3] ? 2'd3 : 2'd0), src_v} {
-      bins alone[] = {6'b00_0001, 6'b01_0010, 6'b10_0100, 6'b11_1000};
-      bins all[]   = {6'b00_1111, 6'b01_1111, 6'b10_1111, 6'b11_1111};
-      bins pair[]  = {6'b00_0011, 6'b01_0011, 6'b00_1001, 6'b11_1001, 6'b01_1010, 6'b11_1010, 6'b10_1100, 6'b11_1100};
+    // 每個來源在「只有它」與「5 個都在等」兩種情況下都被選中過; 另含來源對的競爭 (含 LLM 與 GEMM / DMA / VEC)
+    cp_sel: coverpoint {(sel[1] ? 3'd1 : sel[2] ? 3'd2 : sel[3] ? 3'd3 : sel[4] ? 3'd4 : 3'd0), src_v} {
+      bins alone[] = {8'b000_00001, 8'b001_00010, 8'b010_00100, 8'b011_01000, 8'b100_10000};
+      bins all[]   = {8'b000_11111, 8'b001_11111, 8'b010_11111, 8'b011_11111, 8'b100_11111};
+      bins pair[]  = {8'b000_00011, 8'b001_00011, 8'b000_01001, 8'b011_01001, 8'b001_01010, 8'b011_01010, 8'b010_01100, 8'b011_01100,
+                      8'b000_10001, 8'b100_10001, 8'b001_10010, 8'b100_10010, 8'b011_11000, 8'b100_11000};
     }
   endgroup
   cg_cpl u_cg_cpl = new;
   covergroup cg_occ @(posedge clk iff rst_n);
     cp_q:  coverpoint q_cnt { bins n[] = {[0:QD]}; }
     cp_ex: coverpoint {v_busy, d_busy, c_busy} { bins n[] = {[0:7]}; }
+    cp_llm: coverpoint {l_busy, v_busy || d_busy || c_busy} { bins n[] = {[0:3]}; }
   endgroup
   cg_occ u_cg_occ = new;
 endmodule
 
 bind orca_npu_ss npu_ss_sva #(.QD(QD), .NCU(NCU), .NDC(NDC)) u_sva (
   .clk, .rst_n, .test_en, .cmd_valid, .cmd_ready, .cpl_valid, .cpl_ready, .busy, .irq, .cpl_id, .oc, .q_cnt,
-  .q_hv, .go, .q_pop, .g_core, .g_dma, .g_vec, .g_nop, .d_take, .v_take, .h_nop, .c_cmd_ready, .d_cmd_ready, .v_cmd_ready,
+  .q_hv, .go, .q_pop, .g_core, .g_dma, .g_vec, .g_nop, .g_llm, .d_take, .v_take, .h_nop, .c_cmd_ready, .d_cmd_ready, .v_cmd_ready,
   .head_wt(head.wt), .head_op(head.op), .head_k(head.k),
   .d_cpl_valid, .nop_cv, .vec_cv, .c_cpl_valid, .c_cpl_ready, .c_busy, .d_busy, .v_busy, .v_done, .load, .d_ch_busy(u_dma.c_busy),
+  .llm_cv, .l_busy, .l_done, .l_rd_req, .l_wr_req,
   .src_v, .sel, .d_rd_req, .d_wr_req, .v_rd_req, .v_wr_req, .h_rd_req, .h_rd_gnt, .h_wr_req, .m_rd_req, .m_wr_req,
   .m_rd_rvalid, .vec_err);
 

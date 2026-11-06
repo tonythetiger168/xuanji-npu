@@ -5,14 +5,19 @@ NPU Subsystem 給 LLM 推論用的兩個命令 (op 5 `NPU_OP_KV`、op 6 `NPU_OP_
 KV 資料與 token activation 的搬移由 DMA 間接模式 (`rtl/npu/npu_dma.sv`, 另一個 PR 系列) 依這些表格執行。
 
 **狀態**: 引擎已獨立驗證 (CRV + L2 模型 + 每個命令後比對整個 L2、SVA、coverage 100%、mutation)。
-**尚未**: 接進 `orca_npu_ss` (等 npu_dma 系列把完成合併與 host L2 仲裁器泛化成 N 個來源後, 加一個來源與一個主端)、
-端到端 (attention / MoE 層對照 numpy)。尚未合成。
+已接進 `orca_npu_ss` (v6.3.13): KV / MOE 命令依序分派到引擎 (一次一個; 引擎閒置且完成槽空時), 完成合併多一個來源
+(5 個來源 round-robin), host L2 埠以第二個 `npu_l2_arb2` 與 DMA / VEC 共用; 子系統 CRV 的參考模型含 KV 頁管理狀態與
+MOE dispatch, 形式證明 (orca_npu_ss 前端) 含 LLM 引擎的契約替身。
+**尚未**: 端到端 (attention / MoE 層對照 numpy)。尚未合成。
+
+子系統參數 (orca_npu_ss): `KV_NP` 256 頁、`KV_NSEQ` 16 序列、`KV_NSLOT` 64 區塊 / 序列、`KV_BS` 16 token / 區塊、
+`KV_RW` 3 (共享上限 7)、`MOE_NEXP` 64 expert、`MOE_PW` 14 (每個命令 < 16384 個項目)、`MOE_TW` 12 (每個命令 < 4096 個 token)。
 
 ## 與其他單元的介面 (與 npu_dma 系列約定)
 
 | 項目 | 格式 |
 |---|---|
-| 間接 DMA 索引表 | L2 line c 起, u32 little-endian, 每 line 16 項 (第 i 項在 line c + i/16 的 bit 32·(i%16)); 項目 = 外部 line 偏移 (相對命令的 ext); **0xFFFFFFFF = 略過** (LD: L2 端寫 0、不讀外部; ST: 不寫外部) |
+| 間接 DMA 索引表 | L2 line c 起, u32 little-endian, 每 line 16 項 (第 i 項在 line c + i/16 的 bit 32·(i%16)); 項目 E = 外部 line 偏移 (相對命令的 ext), 每項搬 cw = b[15:0] 個 line (0 = 1; 外部 ext+E .. ext+E+cw−1, L2 端連續); **0xFFFFFFFF = 略過** (LD: L2 端寫 0、不讀外部; ST: 不寫外部)。KV_MAP 的 mult 與 MOE 的 mult 通常等於 cw (每頁 / 每 token 的 line 數) |
 | top-k 輸出 (向量核) | 每個 token 兩個 line: 16 × u32 expert id、16 × FP32 weight (由大到小); 未用的槽 id = 0xFFFFFFFF |
 | KV 量化 | 每頁一個 scale 表項 (外部記憶體); `KV_MAP` 以 mult = 1 產生 scale 表的索引, 以 mult = 每頁 line 數產生資料的索引; 兩者都用間接 DMA 搬, 解量化在向量核 |
 
