@@ -381,8 +381,9 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
     case (ur(0, 9))
       0:       return 16'd0;
       1:       return 16'd1;
-      2:       begin n_sweep++; return 16'(2 + n_sweep % (OUT - 1)); end   // 依序掃過 2..OUT (起點隨 seed): 每種長度都出現
-      3, 4:    return 16'(ur(2, OUT));
+      2, 3:    begin n_sweep++; return 16'(2 + n_sweep % (OUT - 1)); end   // 依序掃過 2..OUT (起點隨 seed): 每種長度都出現
+                                                     // (2 / 10: KV / MOE 命令佔掉部分命令後, Pro 的 127 種長度仍能掃完)
+      4:       return 16'(ur(2, OUT));
       5, 6, 7: return 16'(ur(OUT + 1, 4 * OUT));
       default: return 16'(ur(4 * OUT + 1, 6 * OUT));
     endcase
