@@ -710,6 +710,34 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
       end
   endtask
 
+  // directed: DMA 長度 2..OUT 各一個 (LD / ST 交替, 隨機格式 / 2D), 讓 cg_dma.cp_n 的每個長度 bin 確定出現
+  // (Pro OUT = 128 時隨機產生容易漏掉幾個長度)
+  task automatic len_sweep();
+    npu_tile_cmd_t c;
+    int nmax;
+    n_batch++;
+    nmax = OUT;                                            // 迴圈上界用執行期變數 (避免 Verilator 展開)
+    p_cmd = 100; p_cpl = ur(60, 100); p_rgnt = ur(60, 100); p_wgnt = ur(60, 100); p_rv = ur(60, 100);
+    fix_lat = -1; rlat = ur(1, 8); test_en = 0;
+    prog.delete(); prog_pos.delete(); cpl_pos.delete(); pidx = 0; ncpl = 0;
+    acc_clear();
+    for (int k = 2; k <= nmax; k++) begin
+      c = '0; c.id = 8'(k); c.k = 16'(k); c.ext = pick_ext();
+      if (k % 2 == 0) begin c.op = NPU_OP_DMA_LD; c.b[17:16] = pick_fmt(); end
+      else c.op = NPU_OP_DMA_ST;
+      if (rnd(30)) begin c.b[15:0] = 16'(ur(1, 8)); c.c = 26'(ur(0, 16)); end
+      c.a = pick_l2(dma_l2n(c));
+      c = mk_cmd(c, 20);
+      prog_pos[k] = prog.size(); prog.push_back(c); ref_exec(c);
+    end
+    in_batch = 1;
+    while (ncpl != prog.size()) @(posedge clk);
+    in_batch = 0;
+    for (int w = 0; busy && w < 1000; w++) @(posedge clk);
+    check_state();
+    n_cmds += prog.size();
+  endtask
+
   int unsigned seed, nb, nc;
   initial begin
     if (!$value$plusargs("seed=%d", seed)) seed = 1;
@@ -734,7 +762,7 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
       $display("CDV: e2e bins %0d, holes %0d, closed after %0d batches", $bits(dut.u_e2e.hit), cdv_holes(), cdv_closed_at);
       for (int i = 0; i < $bits(dut.u_e2e.hit); i++) if (!dut.u_e2e.hit[i]) $display("CDV: hole bin %0d", i);
     end
-    else for (int b = 0; b < int'(nb); b++) if (b == 2) arb_lock(); else if (b % 10 == 3) begin
+    else for (int b = 0; b < int'(nb); b++) if (b == 2) arb_lock(); else if (b == 6) len_sweep(); else if (b % 10 == 3) begin
       // fill_all 只有一個呼叫點 (每個呼叫點都會展開一份 task 與其內嵌的參考模型)
       int pl [$];
       pl.delete(); pl.push_back((b / 10 + int'(seed)) % 5); if (b == 13) pl.push_back(5); if (b == 3) pl.push_back(6);
