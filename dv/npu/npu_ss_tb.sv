@@ -148,7 +148,7 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
         nn = N; cl = CL;
         C = new[N * N];
         for (int i = 0; i < nn; i++) for (int j = 0; j < nn; j++) begin
-          longint acc = 0;
+          longint acc = c.ext[0] ? longint'(rl2[l2i(c.c + 26'((i * N + j) / 16))][((i * N + j) % 16) * 32 +: 32]) : 0;   // ext[0]: C += A × B
           for (int kk = 0; kk < int'(c.k); kk++) begin
             logic [7:0] av = rl2[l2i(c.a + 26'(kk / SPL))][((kk % SPL) * N + i) * 8 +: 8];
             logic [7:0] bv = rl2[l2i(c.b + 26'(kk / SPL))][((kk % SPL) * N + j) * 8 +: 8];
@@ -193,6 +193,7 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
       NPU_OP_GEMM: if (c.k != 0) begin
         for (int l = 0; l < (int'(c.k) + SPL - 1) / SPL; l++) begin f.l2r.push_back(l2i(c.a + 26'(l))); f.l2r.push_back(l2i(c.b + 26'(l))); end
         for (int l = 0; l < CL; l++) f.l2w.push_back(l2i(c.c + 26'(l)));
+        if (c.ext[0]) for (int l = 0; l < CL; l++) f.l2r.push_back(l2i(c.c + 26'(l)));   // 累加: 讀舊的 C
       end
       NPU_OP_VEC: for (int i = 0; i < int'(c.k); i++) begin                  // 程式 line + 指令的 LD / ST
         npu_vec_pkg::npu_vec_ins_t x;

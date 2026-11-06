@@ -1,1 +1,2 @@
 # Xuanji-X1 (N=8): 目前沒有組態專屬豁免
+toggle npu_gemm_cu\.sv:\d+\s+w_nxt\[[02]\]: # [C] N <= 16: W_WR 拿到 grant 後只會到 W_OUT (3'd1) / W_DONE (3'd3); W_RD 只在 N = 32 的前半之後
