@@ -758,10 +758,10 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
     n_batch++;
     nkind = 2; nord = 2; ngap = 5;
     p_cmd = 100; p_cpl = 100; p_rgnt = 100; p_wgnt = 100; p_rv = 100; fix_lat = -1; rlat = 2; test_en = 0;
-    // VEC 程式 (line 16): SPLAT v0, ST v0 → line 24
+    // VEC 程式 (line 16): SPLAT v0, ST v0 → line 24, 25, 26 (連續寫入: VEC 連拿兩次 grant 時 DMA 的寫入必須先得到)
     d = '0;
     x = '0; x.op = npu_vec_pkg::VOP_SPLAT; x.vd = 3'd0; x.imm = $urandom(); d[0 +: 77] = x;
-    x = '0; x.op = npu_vec_pkg::VOP_ST; x.va = 3'd0; x.line = 26'd24; d[128 +: 77] = x;
+    for (int s = 1; s < 4; s++) begin x = '0; x.op = npu_vec_pkg::VOP_ST; x.va = 3'd0; x.line = 26'(23 + s); d[128 * s +: 77] = x; end
     l2_bd_wr(l2i(26'd16), d); rl2[l2i(26'd16)] = d;
     for (int kind = 0; kind < nkind; kind++)
     for (int ord = 0; ord < nord; ord++)
@@ -773,7 +773,7 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
             if ((t < 2) == (ord == 0)) begin
               c.op = (kind == 0) ? NPU_OP_DMA_ST : NPU_OP_DMA_LD; c.k = 16'(ur(2, 6)); c.a = 26'(ur(0, 8) + 32 * kind); c.ext = pick_ext();
             end
-            else begin c.op = NPU_OP_VEC; c.k = 16'd2; c.a = 26'd16; c.ext = $urandom(); c.b = 26'($urandom()); c.c = 26'($urandom()); end
+            else begin c.op = NPU_OP_VEC; c.k = 16'd4; c.a = 26'd16; c.ext = $urandom(); c.b = 26'($urandom()); c.c = 26'($urandom()); end
           end else c.op = NPU_OP_NOP;
           prog_pos[210 + t] = prog.size(); prog.push_back(c); ref_exec(c);
           if (t == 0) begin                                    // 只送第一個, 完成後閒置 100 拍
