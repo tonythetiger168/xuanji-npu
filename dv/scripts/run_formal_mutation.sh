@@ -111,14 +111,13 @@ mut npu_ss_dma $D wr_no_hold  "assign m_wr_req  = act && f_nempty && st;" "assig
 T=rtl/npu/orca_npu_ss.sv
 mut orca_npu_ss $T wt_ignored  "wire go     = q_hv && (!head.wt || oc == '0);" "wire go     = q_hv;"
 mut orca_npu_ss $T oc_no_dec   "oc <= oc + OCW'(q_pop) - OCW'(load);" "oc <= oc + OCW'(q_pop);"
-mut orca_npu_ss $T oc_early    "oc <= oc + OCW'(q_pop) - OCW'(load);" "oc <= oc + OCW'(q_pop) - OCW'(load || d_done);"
-mut orca_npu_ss $T dma_slot    "head.op == NPU_OP_DMA_ST) && !dma_cv;" "head.op == NPU_OP_DMA_ST);"
+mut orca_npu_ss $T oc_early    "oc <= oc + OCW'(q_pop) - OCW'(load);" "oc <= oc + OCW'(q_pop) - OCW'(load || d_cpl_valid);"
+mut orca_npu_ss $T dma_slot    "assign d_cpl_ready = load && sel[1];" "assign d_cpl_ready = load;"
 mut orca_npu_ss $T k0_to_core  "((head.op == NPU_OP_GEMM || head.op == NPU_OP_VEC) && head.k == '0)" "1'b0"
 mut orca_npu_ss $T cpl_no_hold "wire load = (src_v != '0) && (!cpl_valid || cpl_ready);" "wire load = (src_v != '0);"
 mut orca_npu_ss $T cpl_fixed   "last      <= sel[0] ? 2'd0 : sel[1] ? 2'd1 : sel[2] ? 2'd2 : 2'd3;" "last      <= 2'd3;"
-mut orca_npu_ss $T dma_id      "if (d_take) dma_id <= head.id;" "if (g_dma) dma_id <= head.id;"
+mut orca_npu_ss $T dma_id      "sel[1] ? d_cpl_id :" "sel[1] ? c_cpl_id :"
 mut orca_npu_ss $T q_full      "assign cmd_ready = (q_cnt != (QW+1)'(QD));" "assign cmd_ready = 1'b1;"
-mut orca_npu_ss $T dma_gate    "assign d_en = d_busy || g_dma;" "assign d_en = d_busy;"
 mut orca_npu_ss $T nop_id      "if (g_nop) begin nop_cv <= 1'b1; nop_id <= head.id; end" "if (g_nop) begin nop_cv <= 1'b1; end"
 X=rtl/npu/npu_l2_xbar.sv
 mut npu_l2_xbar $X rr_frozen   "if (rd_bv[b]) rd_rr[b] <= rd_bm[b];" "if (1'b0) rd_rr[b] <= rd_bm[b];"
