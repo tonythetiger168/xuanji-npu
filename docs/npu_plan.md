@@ -98,9 +98,9 @@
 | 7 | Vision 產品組態 (Nano-Vision / X1-Vision) | #43 | |
 | 8 | SESR / YOLOv8n benchmark (週期、外部記憶體位元組數、誤差) | #44 | 需要命令串 (手寫或 #36) |
 | 9 | IMS 合約: AXI-Stream YUV 輸入 (與 IMS repo 同步) | #45 | |
-| 10 | Attention + KV cache 量化 | #20 | |
+| 10 | Attention + KV cache 量化 | #20 | paged KV 頁管理 `npu_kv_pager`、KV 命令 (`docs/npu_llm.md`, scale 表索引) 完成; 剩接進 NPU Subsystem、attention 端到端 |
 | 11 | INT4 / MXFP4 decode + 權重常駐低延遲模式 | #34 | |
-| 12 | MoE (gather / scatter) | #25 | |
+| 12 | MoE (gather / scatter) | #25 | dispatch 表產生器 `npu_moe_disp` 與 MOE 命令 (`docs/npu_llm.md`) 完成; 剩接進 NPU Subsystem、端到端 |
 | 13 | 2:4 稀疏 | #35 | |
 | 14 | 編譯器 (含靜態排程、conv 融合) | #36 | |
 
