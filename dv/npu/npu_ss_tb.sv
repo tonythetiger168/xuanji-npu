@@ -1139,6 +1139,38 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
     n_cmds += prog.size();
   endtask
 
+  // directed: 所有 DMA 通道的完成槽同時有效時才放行完成 (cpl_ready 壓住直到 cv 全 1, 放行到全部取走再壓住),
+  // 讓 round-robin 在多個通道同拍有效時選到每一個通道 (包括「較高編號的通道也有效、卻選較低編號」的情況)
+  task automatic cpl_all();
+    npu_tile_cmd_t c;
+    int nr;
+    n_batch++;
+    nr = 3 * NDC;
+    p_cmd = 100; p_cpl = 0; p_rgnt = 100; p_wgnt = 100; p_rv = 100; fix_lat = -1; rlat = 2; test_en = 0;
+    prog.delete(); prog_pos.delete(); cpl_pos.delete(); pidx = 0; ncpl = 0;
+    acc_clear();
+    for (int t = 0; t < nr; t++) begin
+      c = '0; c.id = 8'(240 + t); c.op = NPU_OP_DMA_LD; c.k = 16'd4; c.ext = pick_ext();
+      c.a = pick_l2(dma_l2n(c));
+      c = mk_cmd(c, 20);
+      prog_pos[240 + t] = prog.size(); prog.push_back(c); ref_exec(c);
+    end
+    in_batch = 1;
+    fork
+      while (ncpl != prog.size()) @(posedge clk);
+      for (int w = 0; ncpl != prog.size(); w++) begin
+        @(posedge clk);
+        if (p_cpl == 0 && (dut.u_dma.cv == '1 || w > 2000)) begin p_cpl = 100; w = 0; end
+        else if (p_cpl != 0 && dut.u_dma.cv == '0) p_cpl = 0;
+      end
+    join
+    in_batch = 0;
+    p_cpl = 100;
+    for (int w = 0; busy && w < 1000; w++) @(posedge clk);
+    check_state();
+    n_cmds += prog.size();
+  endtask
+
   int unsigned seed, nb, nc;
   initial begin
     if (!$value$plusargs("seed=%d", seed)) seed = 1;
@@ -1171,7 +1203,7 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
       $display("CDV: e2e bins %0d, holes %0d, closed after %0d batches", $bits(dut.u_e2e.hit), cdv_holes(), cdv_closed_at);
       for (int i = 0; i < $bits(dut.u_e2e.hit); i++) if (!dut.u_e2e.hit[i]) $display("CDV: hole bin %0d", i);
     end
-    else for (int b = 0; b < int'(nb); b++) if (b == 2) arb_lock(); else if (b == 4 && !$test$plusargs("no_big")) big_ind(); else if (b == 6) len_sweep(); else if (b == 7) llm_pairs(); else if (b % 10 == 3) begin
+    else for (int b = 0; b < int'(nb); b++) if (b == 2) arb_lock(); else if (b == 4 && !$test$plusargs("no_big")) big_ind(); else if (b == 6) len_sweep(); else if (b == 7) llm_pairs(); else if (b == 8) cpl_all(); else if (b % 10 == 3) begin
       // fill_all 只有一個呼叫點 (每個呼叫點都會展開一份 task 與其內嵌的參考模型)
       int pl [$];
       int pr;

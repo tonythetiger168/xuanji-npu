@@ -94,6 +94,9 @@ def main():
         if not re.search(a.rtl, f):
             continue
         t = d.get('t', '?')
+        # dv/scripts/gen_fsm_cov.py 產生的 FSM cover (pyslang 抽出的狀態 / arc) 歸類為 fsm_state / fsm_arc
+        if t == 'user' and d.get('o', '').startswith(('fsmS_', 'fsmA_')):
+            t = 'fsm_state' if d['o'].startswith('fsmS_') else 'fsm_arc'
         if t == 'toggle' and a.toggle_rtl and not re.search(a.toggle_rtl, f):
             continue
         if a.types and t not in a.types.split(','):
