@@ -861,6 +861,13 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
     repeat (3) @(posedge clk);
     rst_n <= 1'b1;
     repeat (2) @(posedge clk);
+    // reset 清除每個 DMA 通道的控制狀態 (隨機上電時, 通道的 ICG 在 reset 期間必須開啟才會套用同步取樣的 reset)
+    if (dut.u_dma.g_ch[0].u_dma.act || dut.u_dma.g_ch[0].u_dma.iss != '0 || dut.u_dma.g_ch[0].u_dma.wr != '0 ||
+        dut.u_dma.g_ch[0].u_dma.n != '0 || dut.u_dma.g_ch[0].u_dma.f_cnt != '0 || dut.u_dma.g_ch[0].u_dma.lf != '0 ||
+        dut.u_dma.g_ch[NDC-1].u_dma.act || dut.u_dma.g_ch[NDC-1].u_dma.iss != '0 || dut.u_dma.g_ch[NDC-1].u_dma.wr != '0 ||
+        dut.u_dma.g_ch[NDC-1].u_dma.n != '0 || dut.u_dma.g_ch[NDC-1].u_dma.f_cnt != '0 || dut.u_dma.g_ch[NDC-1].u_dma.lf != '0) begin
+      $display("ERROR: DMA channel state not cleared by reset"); n_err++;
+    end
     cdv = $test$plusargs("cdv");
     if ($value$plusargs("perf_dma=%d", fix_lat)) perf_dma();
     else if (cdv) begin                                    // 跑到端到端 coverage 全部命中 (最多 nb 個 batch) 再多跑 5 個

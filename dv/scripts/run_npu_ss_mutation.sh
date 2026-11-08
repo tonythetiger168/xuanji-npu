@@ -47,6 +47,9 @@ PY
   # 全 0 上電通過時, 再以隨機上電狀態 (未 reset 的儲存為隨機值) 執行
   grep -q "TB PASS" "$M/$n.log" && ! grep -q "Assertion failed" "$M/$n.log" \
     && timeout 1800 "$M/$n.obj/Vnpu_ss_tb" +seed=9 +batches=$NBT +no_big +verilator+rand+reset+2 +verilator+seed+2 > "$M/$n.log" 2>&1
+  # 再一個隨機上電樣本 (短): 不同的上電狀態讓「reset 期間閘控時脈」類 mutant 不依賴單一 seed 的運氣
+  grep -q "TB PASS" "$M/$n.log" && ! grep -q "Assertion failed" "$M/$n.log" \
+    && timeout 600 "$M/$n.obj/Vnpu_ss_tb" +seed=11 +batches=2 +no_big +verilator+rand+reset+2 +verilator+seed+3 > "$M/$n.log" 2>&1
   rm -rf "$M/$n.obj"
   if grep -q "TB PASS" "$M/$n.log" && ! grep -q "Assertion failed" "$M/$n.log"; then
     echo "$n: SURVIVED"; surv=1
@@ -84,8 +87,8 @@ mut nop_id       $TILE "if (g_nop) begin nop_cv <= 1'b1; nop_id <= head.id; end"
 # ---- npu_dma ----
 mut dma_outst    $DMA "(outst != (OW+1)'(OUT))" "(outst != (OW+1)'(OUT - 1) && outst != (OW+1)'(OUT))"  # 在途上限少一 (功能仍正確, 由 a_issue 抓到吞吐量損失)
 mut dma_overrun  $DMA "wire [OW:0] outst = iss[OW:0] - wr[OW:0];" "wire [OW:0] outst = {1'b0, iss[OW-1:0] - wr[OW-1:0]};"  # 在途計算溢位 → FIFO 覆蓋
-mut dma_rd_qual  $DMA "wire iss_ok = st ? (d_hreq && !sel_l && h_rd_gnt) : ((m_rd_req && m_rd_gnt) || ld_skip);" "wire iss_ok = st ? (d_hreq && !sel_l && h_rd_gnt) : (m_rd_gnt || ld_skip);"  # 外部 gnt 不限定 req
-mut dma_wr_qual  $DMA "wire w_fire = st ? ((m_wr_req && m_wr_gnt) || (st_wv && e_skip)) : (h_wr_req && h_wr_gnt);" "wire w_fire = st ? (m_wr_gnt || (st_wv && e_skip)) : (h_wr_req && h_wr_gnt);"
+# (dma_rd_qual / dma_wr_qual: 「外部 gnt 不限定 req」在 npu_dma_mc 內是等價 mutant — npu_rr_lock 只把 grant 給選中的請求者
+#  (formal/npu_rr_lock 證明 sel ⊆ req), 通道看到的 gnt 必伴隨自己的 req。npu_rr_lock 的 rr_gnt_all 涵蓋 grant 分配錯誤)
 mut dma_waddr    $DMA "wire e_step = st ? pop : iss_ok;" "wire e_step = iss_ok;"                       # 寫位址用錯計數器
 mut dma_l2line   $DMA "assign h_wr_line = dec ? (l2 + 26'({wr, half})) : (l2 + 26'(wr));" "assign h_wr_line = dec ? (l2 + 26'({wr, half})) : (l2 + 26'(iss));"
 mut dma_done     $DMA "assign done      = act && (wr == n);" "assign done      = act && (iss == n);"                # 讀完就完成 (寫尚未完成)
