@@ -38,10 +38,15 @@ build() {   # top -G... -- sources...
 }
 fail=0
 if [ "${REPORT_ONLY:-0}" != 1 ]; then
-build npu_mma_tb -GN=$N dv/npu/npu_mma_tb.sv
-build npu_gemm_cu_tb -GN=$N $CU dv/npu/npu_gemm_cu_tb.sv
+# FSM coverage (state / arc): pyslang 依本組態的參數抽出各 DUT 的狀態機, 產生 SVA cover (dv/scripts/gen_fsm_cov.py)
+NPU_RTL="rtl/common/orca_pkg.sv rtl/common/clock_gate.sv rtl/npu/npu_mma.sv rtl/npu/npu_gemm_cu.sv rtl/npu/npu_l2_xbar.sv rtl/npu/npu_core.sv"
+python3 dv/scripts/gen_fsm_cov.py -I rtl/common $NPU_RTL --top npu_core -GN=$N -GNCU=$NCU -GNB=$NB -GDEPTH=$DEPTH \
+  --split -o "$B" --json "$B/fsm.json" > "$B/fsm.txt"
+F=$B/fsm_npu_mma.sv; FC="$F $B/fsm_npu_gemm_cu.sv"
+build npu_mma_tb -GN=$N dv/npu/npu_mma_tb.sv $F
+build npu_gemm_cu_tb -GN=$N $CU dv/npu/npu_gemm_cu_tb.sv $FC
 build npu_core_tb -GN=$N -GNCU=$NCU -GNB=$NB -GDEPTH=$DEPTH $CU rtl/npu/npu_l2_xbar.sv dv/npu/npu_l2_xbar_sva.sv \
-  rtl/npu/npu_core.sv dv/npu/npu_core_sva.sv dv/npu/npu_core_tb.sv
+  rtl/npu/npu_core.sv dv/npu/npu_core_sva.sv dv/npu/npu_core_tb.sv $FC
 python3 dv/scripts/wide_signals.py "$B/npu_core_tb" 32768 npu_core_tb__DOT__dut__DOT__ | tee "$B/toggle_excluded.txt"
 run() {   # top name tag plusargs...
   local top=$1 n=$2 tag=$3; shift 3
@@ -75,7 +80,7 @@ if [ "${NOREPORT:-0}" = 1 ]; then [ "$fail" -eq 0 ] && echo "##### $CFG runs PAS
 # 豁免: 共用 (dv/npu/waivers.txt) + 組態專屬 (dv/npu/waivers_<cfg>.txt: 參數造成的結構常數)
 W=$B/waivers.txt; cat dv/npu/waivers.txt dv/npu/waivers_$CFG.txt > "$W" 2>/dev/null || true
 echo "=== RTL structural coverage (module-level; line / branch / expr / toggle / fsm)"
-python3 dv/scripts/cov_report.py "$B"/cov_*.dat --by-module --rtl '^rtl/(npu/(npu_mma|npu_gemm_cu|npu_l2_xbar|npu_core)|common/clock_gate)' --expect rtl/npu/npu_mma.sv --expect rtl/npu/npu_gemm_cu.sv --expect rtl/npu/npu_l2_xbar.sv --expect rtl/npu/npu_core.sv \
+python3 dv/scripts/cov_report.py "$B"/cov_*.dat --by-module --rtl "^(rtl/(npu/(npu_mma|npu_gemm_cu|npu_l2_xbar|npu_core)|common/clock_gate)|$B/fsm_)" --expect rtl/npu/npu_mma.sv --expect rtl/npu/npu_gemm_cu.sv --expect rtl/npu/npu_l2_xbar.sv --expect rtl/npu/npu_core.sv \
   --waivers "$W" --require 100 --list "${LIST:-40}" || fail=1
 echo "=== functional coverage (covergroup) + SVA cover (user)"
 python3 dv/scripts/cov_report.py "$B"/cov_*.dat --by-module --rtl '^dv/npu/npu_(mma|gemm_cu|l2_xbar|core)_sva' --types covergroup,user \
