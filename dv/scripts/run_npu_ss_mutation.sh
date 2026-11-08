@@ -2,6 +2,8 @@
 # NPU Subsystem 檢查器的 mutation 測試 (每個產品組態): 每個 mutant 在 orca_npu_ss / npu_dma 植入一個錯誤,
 # npu_ss_tb (參考模型比對 + SVA) 必須抓到 (killed)。npu_core 子樹的 mutant 見 run_npu_mutation.sh。
 # 用法: dv/scripts/run_npu_ss_mutation.sh <nano|x1|pro|all> [batches=20]   (ONLY=<regex>: 只跑名稱相符的 mutant)
+#   SHARD=i/n: 只跑第 i 片 (0 <= i < n; 依出現順序第 k 個 mutant 屬於第 (k mod n) 片)。CI 以組態 × 分片的 matrix 執行,
+#   每片的 mutant 都必須被抓到 (分片聯集 = 全部 mutant)。
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . dv/scripts/npu_cfg.sh
@@ -10,15 +12,21 @@ if [ "$CFG" = all ]; then
   rc=0; for c in nano x1 pro; do bash "$0" $c "$NBT" || rc=1; done; exit $rc
 fi
 npu_cfg "$CFG" || exit 1
-M=build/npu_ss_mut_$CFG; rm -rf "$M"; mkdir -p "$M"
-echo "##### NPU subsystem mutation $CFG: N=$N NCU=$NCU NB=$NB"
+SH_I=0; SH_N=1
+if [ -n "${SHARD:-}" ]; then
+  SH_I=${SHARD%/*}; SH_N=${SHARD#*/}
+  [[ $SH_I =~ ^[0-9]+$ && $SH_N =~ ^[0-9]+$ ]] && [ "$SH_N" -ge 1 ] && [ "$SH_I" -lt "$SH_N" ] || { echo "bad SHARD=$SHARD"; exit 1; }
+fi
+M=build/npu_ss_mut_$CFG${SHARD:+_${SH_I}of${SH_N}}; rm -rf "$M"; mkdir -p "$M"
+echo "##### NPU subsystem mutation $CFG: N=$N NCU=$NCU NB=$NB${SHARD:+ (shard $SH_I / $SH_N)}"
 TILE=rtl/npu/orca_npu_ss.sv DMA=rtl/npu/npu_dma.sv ARB=rtl/npu/npu_l2_arb2.sv MC=rtl/npu/npu_dma_mc.sv RR=rtl/npu/npu_rr_lock.sv
 FP="rtl/fp/fp_add.sv rtl/fp/fp_mul.sv rtl/fp/fp_narrow.sv rtl/fp/fp_widen.sv rtl/fp/sfu.sv rtl/fp/fp_max.sv rtl/fp/fp_small_dec.sv
     rtl/fp/fp_mx_scale.sv rtl/fp/fp_from_int.sv rtl/npu/npu_vec.sv dv/vec/npu_vec_sva.sv rtl/npu/npu_vec_eng.sv dv/vec/npu_vec_eng_sva.sv"
-surv=0; nk=0; nt=0
+surv=0; nk=0; nt=0; mi=0
 mut() {   # name file old new
   local n=$1 f=$2
   [ -n "${ONLY:-}" ] && ! [[ $n =~ ^(${ONLY})$ ]] && return   # ONLY=<regex>: 只跑名稱相符的 mutant
+  mi=$((mi + 1)); [ $(( (mi - 1) % SH_N )) -eq "$SH_I" ] || return   # SHARD: 不屬於本片
   python3 - "$3" "$4" "$M/$n.sv" "$f" <<'PY' || { echo "$n: pattern not found"; surv=1; return; }
 import sys
 o, nw, out, f = sys.argv[1:5]
