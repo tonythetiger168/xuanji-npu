@@ -100,7 +100,7 @@
 | 9 | IMS 合約: AXI-Stream YUV 輸入 (與 IMS repo 同步) | #45 | |
 | 10 | Attention + KV cache 量化 | #20 | paged KV 頁管理 `npu_kv_pager` 完成 (`docs/npu_kv.md`); 剩 attention 資料流、KV 量化 |
 | 11 | INT4 / MXFP4 decode + 權重常駐低延遲模式 | #34 | |
-| 12 | MoE (gather / scatter) | #25 | |
+| 12 | MoE (gather / scatter) | #25 | dispatch 表產生器 `npu_moe_disp` 完成 (`docs/npu_moe.md`); 剩 NPU_OP_MOE 命令、端到端 |
 | 13 | 2:4 稀疏 | #35 | |
 | 14 | 編譯器 (含靜態排程、conv 融合) | #36 | |
 
