@@ -241,16 +241,17 @@ module npu_gemm_cu
       if (feed_last) begin c_pend <= c_cmd; t_pend <= t_cmd; x_pend <= x_cmd; pend <= 1'b1; end
       else if (take) pend <= 1'b0;
       // 寫回器
-      if (take) begin c_ptr <= c_pend; t_w <= t_pend; x_w <= x_pend; wst <= W_OUT; end
-      else unique case (wst)
-        W_IDLE: ;
+      // 取下一個 tile 只發生在 W_IDLE / W_DONE (wst 轉移寫在各自的 case 項, 狀態機的弧與實際可達的轉移一致)
+      if (take) begin c_ptr <= c_pend; t_w <= t_pend; x_w <= x_pend; end
+      unique case (wst)
+        W_IDLE: if (take) wst <= W_OUT;
         W_OUT: if (out_fire) begin
           c_line <= c_line_n; lr <= (mma_out_row == RW'(N - 1));
           wst <= o_nxt;
         end
         W_RD: if (w_gnt) begin o_line <= rd_data[0]; wst <= W_WR; end
         W_WR: if (wr_gnt) begin c_ptr <= c_ptr + 1'b1; wst <= w_nxt; end
-        W_DONE: if (done_ready) wst <= W_IDLE;
+        W_DONE: if (take) wst <= W_OUT; else if (done_ready) wst <= W_IDLE;
       endcase
     end
   end

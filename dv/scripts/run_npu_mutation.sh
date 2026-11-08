@@ -89,7 +89,7 @@ mut cu_acc_fb     $CU "else if (g0f) f_b <= ~f_b;" "else if (rd_gnt[0]) f_b <= ~
 mut cu_acc_line   $CU "assign rd_line = w_sel ? c_ptr : f_ln0;" "assign rd_line = f_ln0;"                           # 讀舊值的位址錯
 mut cu_pend_tag   $CU "c_pend <= c_cmd; t_pend <= t_cmd;" "c_pend <= c_cmd; t_pend <= cmd_tag;"                  # tag 取自埠上 (下一個命令) 而非本命令
 mut cu_take_early $CU "(wst == W_DONE && done_ready)" "(wst == W_DONE)"                                       # 完成未握手就換下一個 tile
-mut cu_done_noack $CU "W_DONE: if (done_ready) wst <= W_IDLE;" "W_DONE: wst <= W_IDLE;"                           # 完成不等握手
+mut cu_done_noack $CU "else if (done_ready) wst <= W_IDLE;" "else wst <= W_IDLE;"                           # 完成不等握手
 mut cu_lr         $CU "lr <= (mma_out_row == RW'(N - 1));" "lr <= (mma_out_row == RW'(N - 2));"                   # 提早完成
 mut cu_take_cmd   $CU "if (take) begin c_ptr <= c_pend;" "if (take) begin c_ptr <= c_cmd;"                        # 寫回器取錯 C 位址
 mut cu_busy_pend  $CU "assign busy      = (fst != F_IDLE) || pend || (wst != W_IDLE);" "assign busy      = (fst != F_IDLE) || (wst != W_IDLE);"  # busy 漏掉等待輸出
