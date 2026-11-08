@@ -824,55 +824,69 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
   // (Pro OUT = 128 時隨機產生容易漏掉幾個長度)
   task automatic len_sweep();
     npu_tile_cmd_t c;
+    fp_t f;
     int nmax;
     n_batch++;
     nmax = OUT;                                            // 迴圈上界用執行期變數 (避免 Verilator 展開)
     p_cmd = 100; p_cpl = ur(60, 100); p_rgnt = ur(60, 100); p_wgnt = ur(60, 100); p_rv = ur(60, 100);
     fix_lat = -1; rlat = ur(1, 8); test_en = 0;
-    prog.delete(); prog_pos.delete(); cpl_pos.delete(); pidx = 0; ncpl = 0;
-    acc_clear();
+    // 每個長度一組 NDC 個命令, 組與組之間等 DMA 閒置: 通道全空時命令依序交給最低編號的空閒通道,
+    // 所以組內第 i 個命令一定由通道 i 執行 → 每個通道的 cg_dma 都看到每個長度
     for (int k = 2; k <= nmax; k++) begin
-      c = '0; c.id = 8'(k); c.k = 16'(k); c.ext = pick_ext();
-      if (k % 2 == 0) begin c.op = NPU_OP_DMA_LD; c.b[17:16] = pick_fmt(); end
-      else c.op = NPU_OP_DMA_ST;
-      if (rnd(30)) begin c.b[15:0] = 16'(ur(1, 8)); c.c = 26'(ur(0, 16)); end
-      c.a = pick_l2(dma_l2n(c));
-      c = mk_cmd(c, 20);
-      prog_pos[k] = prog.size(); prog.push_back(c); ref_exec(c);
+      prog.delete(); prog_pos.delete(); cpl_pos.delete(); pidx = 0; ncpl = 0;
+      acc_clear();
+      for (int ch = 0; ch < NDC; ch++) begin
+        npu_tile_cmd_t c0;
+        c0 = '0; c0.k = 16'(k); c0.id = 8'(prog.size());
+        if (k % 2 == 0) begin c0.op = NPU_OP_DMA_LD; c0.b[17:16] = pick_fmt(); end
+        else c0.op = NPU_OP_DMA_ST;
+        if (rnd(30)) begin c0.b[15:0] = 16'(ur(1, 8)); c0.c = 26'(ur(0, 16)); end
+        // 組內不等待 (wt = 0) 才會分給不同通道: 與前面的命令衝突時換位址重抽 (仍衝突就照 mk_cmd 等待, 正確性優先)
+        for (int r = 0; r < 20; r++) begin
+          c = c0; c.ext = pick_ext(); c.a = pick_l2(dma_l2n(c));
+          f = footprint(c);
+          if (ch == 0 || !conflicts(f)) break;
+        end
+        c = mk_cmd(c, 0);
+        prog_pos[int'(c.id)] = prog.size(); prog.push_back(c); ref_exec(c);
+      end
+      in_batch = 1;
+      while (ncpl != prog.size()) @(posedge clk);
+      in_batch = 0;
+      for (int w = 0; busy && w < 1000; w++) @(posedge clk);
+      check_state();
+      n_cmds += prog.size();
     end
-    in_batch = 1;
-    while (ncpl != prog.size()) @(posedge clk);
-    in_batch = 0;
-    for (int w = 0; busy && w < 1000; w++) @(posedge clk);
-    check_state();
-    n_cmds += prog.size();
   endtask
 
-  // directed: 所有 DMA 通道的完成槽同時有效時才放行完成 (cpl_ready 壓住直到 cv 全 1, 放行到全部取走再壓住),
-  // 讓 round-robin 在多個通道同拍有效時選到每一個通道 (包括「較高編號的通道也有效、卻選較低編號」的情況)
+  // directed: 所有 DMA 通道的完成槽同時有效時才放行「一個」完成, 下一個命令補進空出的通道後再放行下一個。
+  // 每次輸出時所有通道都有效, round-robin 依序輪到每個通道 → 會出現「較高編號的通道也有效、卻選較低編號」的情況
+  // (一次放行全部時 rr 從 c_last 繞一圈又回到 c_last, NDC = 2 時永遠先選通道 1, 見不到這種情況)
   task automatic cpl_all();
-    npu_tile_cmd_t c;
+    npu_tile_cmd_t c, c0;
+    fp_t f;
     int nr;
     n_batch++;
-    nr = 3 * NDC;
+    nr = 6 * NDC;
     p_cmd = 100; p_cpl = 0; p_rgnt = 100; p_wgnt = 100; p_rv = 100; fix_lat = -1; rlat = 2; test_en = 0;
     prog.delete(); prog_pos.delete(); cpl_pos.delete(); pidx = 0; ncpl = 0;
     acc_clear();
     for (int t = 0; t < nr; t++) begin
-      c = '0; c.id = 8'(240 + t); c.op = NPU_OP_DMA_LD; c.k = 16'd4; c.ext = pick_ext();
-      c.a = pick_l2(dma_l2n(c));
-      c = mk_cmd(c, 20);
+      c0 = '0; c0.id = 8'(240 + t); c0.op = NPU_OP_DMA_LD; c0.k = 16'd4;
+      for (int r = 0; r < 20; r++) begin                    // 不等待 (wt = 0): 與前面的命令衝突時換位址重抽
+        c = c0; c.ext = pick_ext(); c.a = pick_l2(dma_l2n(c));
+        f = footprint(c);
+        if (!conflicts(f)) break;
+      end
+      c = mk_cmd(c, 0);
       prog_pos[240 + t] = prog.size(); prog.push_back(c); ref_exec(c);
     end
     in_batch = 1;
-    fork
-      while (ncpl != prog.size()) @(posedge clk);
-      for (int w = 0; ncpl != prog.size(); w++) begin
-        @(posedge clk);
-        if (p_cpl == 0 && (dut.u_dma.cv == '1 || w > 2000)) begin p_cpl = 100; w = 0; end
-        else if (p_cpl != 0 && dut.u_dma.cv == '0) p_cpl = 0;
-      end
-    join
+    for (int w = 0; ncpl != prog.size(); w++) begin
+      @(posedge clk);
+      if (p_cpl == 0 && (dut.u_dma.cv == '1 || w > 2000 || prog.size() - ncpl < NDC)) begin p_cpl = 100; w = 0; end
+      else if (p_cpl != 0 && cpl_valid && cpl_ready && prog.size() - ncpl > NDC) p_cpl = 0;   // 這拍握手, 下一拍 cpl_ready 落下: 只取走一個
+    end
     in_batch = 0;
     p_cpl = 100;
     for (int w = 0; busy && w < 1000; w++) @(posedge clk);
