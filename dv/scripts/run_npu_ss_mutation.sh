@@ -2,6 +2,8 @@
 # NPU Subsystem 檢查器的 mutation 測試 (每個產品組態): 每個 mutant 在 orca_npu_ss / npu_dma 植入一個錯誤,
 # npu_ss_tb (參考模型比對 + SVA) 必須抓到 (killed)。npu_core 子樹的 mutant 見 run_npu_mutation.sh。
 # 用法: dv/scripts/run_npu_ss_mutation.sh <nano|x1|pro|all> [batches=20]   (ONLY=<regex>: 只跑名稱相符的 mutant)
+#   SHARD=i/n: 只跑第 i 片 (0 <= i < n; 依出現順序第 k 個 mutant 屬於第 (k mod n) 片)。CI 以組態 × 分片的 matrix 執行,
+#   每片的 mutant 都必須被抓到 (分片聯集 = 全部 mutant)。
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . dv/scripts/npu_cfg.sh
@@ -10,15 +12,21 @@ if [ "$CFG" = all ]; then
   rc=0; for c in nano x1 pro; do bash "$0" $c "$NBT" || rc=1; done; exit $rc
 fi
 npu_cfg "$CFG" || exit 1
-M=build/npu_ss_mut_$CFG; rm -rf "$M"; mkdir -p "$M"
-echo "##### NPU subsystem mutation $CFG: N=$N NCU=$NCU NB=$NB"
+SH_I=0; SH_N=1
+if [ -n "${SHARD:-}" ]; then
+  SH_I=${SHARD%/*}; SH_N=${SHARD#*/}
+  [[ $SH_I =~ ^[0-9]+$ && $SH_N =~ ^[0-9]+$ ]] && [ "$SH_N" -ge 1 ] && [ "$SH_I" -lt "$SH_N" ] || { echo "bad SHARD=$SHARD"; exit 1; }
+fi
+M=build/npu_ss_mut_$CFG${SHARD:+_${SH_I}of${SH_N}}; rm -rf "$M"; mkdir -p "$M"
+echo "##### NPU subsystem mutation $CFG: N=$N NCU=$NCU NB=$NB${SHARD:+ (shard $SH_I / $SH_N)}"
 TILE=rtl/npu/orca_npu_ss.sv DMA=rtl/npu/npu_dma.sv ARB=rtl/npu/npu_l2_arb2.sv MC=rtl/npu/npu_dma_mc.sv RR=rtl/npu/npu_rr_lock.sv
 FP="rtl/fp/fp_add.sv rtl/fp/fp_mul.sv rtl/fp/fp_narrow.sv rtl/fp/fp_widen.sv rtl/fp/sfu.sv rtl/fp/fp_max.sv rtl/fp/fp_small_dec.sv
     rtl/fp/fp_mx_scale.sv rtl/fp/fp_from_int.sv rtl/npu/npu_vec.sv dv/vec/npu_vec_sva.sv rtl/npu/npu_vec_eng.sv dv/vec/npu_vec_eng_sva.sv"
-surv=0; nk=0; nt=0
+surv=0; nk=0; nt=0; mi=0
 mut() {   # name file old new
   local n=$1 f=$2
   [ -n "${ONLY:-}" ] && ! [[ $n =~ ^(${ONLY})$ ]] && return   # ONLY=<regex>: 只跑名稱相符的 mutant
+  mi=$((mi + 1)); [ $(( (mi - 1) % SH_N )) -eq "$SH_I" ] || return   # SHARD: 不屬於本片
   python3 - "$3" "$4" "$M/$n.sv" "$f" <<'PY' || { echo "$n: pattern not found"; surv=1; return; }
 import sys
 o, nw, out, f = sys.argv[1:5]
@@ -39,6 +47,9 @@ PY
   # 全 0 上電通過時, 再以隨機上電狀態 (未 reset 的儲存為隨機值) 執行
   grep -q "TB PASS" "$M/$n.log" && ! grep -q "Assertion failed" "$M/$n.log" \
     && timeout 1800 "$M/$n.obj/Vnpu_ss_tb" +seed=9 +batches=$NBT +no_big +verilator+rand+reset+2 +verilator+seed+2 > "$M/$n.log" 2>&1
+  # 再一個隨機上電樣本 (短): 不同的上電狀態讓「reset 期間閘控時脈」類 mutant 不依賴單一 seed 的運氣
+  grep -q "TB PASS" "$M/$n.log" && ! grep -q "Assertion failed" "$M/$n.log" \
+    && timeout 600 "$M/$n.obj/Vnpu_ss_tb" +seed=11 +batches=2 +no_big +verilator+rand+reset+2 +verilator+seed+3 > "$M/$n.log" 2>&1
   rm -rf "$M/$n.obj"
   if grep -q "TB PASS" "$M/$n.log" && ! grep -q "Assertion failed" "$M/$n.log"; then
     echo "$n: SURVIVED"; surv=1
@@ -76,8 +87,8 @@ mut nop_id       $TILE "if (g_nop) begin nop_cv <= 1'b1; nop_id <= head.id; end"
 # ---- npu_dma ----
 mut dma_outst    $DMA "(outst != (OW+1)'(OUT))" "(outst != (OW+1)'(OUT - 1) && outst != (OW+1)'(OUT))"  # 在途上限少一 (功能仍正確, 由 a_issue 抓到吞吐量損失)
 mut dma_overrun  $DMA "wire [OW:0] outst = iss[OW:0] - wr[OW:0];" "wire [OW:0] outst = {1'b0, iss[OW-1:0] - wr[OW-1:0]};"  # 在途計算溢位 → FIFO 覆蓋
-mut dma_rd_qual  $DMA "wire iss_ok = st ? (d_hreq && !sel_l && h_rd_gnt) : ((m_rd_req && m_rd_gnt) || ld_skip);" "wire iss_ok = st ? (d_hreq && !sel_l && h_rd_gnt) : (m_rd_gnt || ld_skip);"  # 外部 gnt 不限定 req
-mut dma_wr_qual  $DMA "wire w_fire = st ? ((m_wr_req && m_wr_gnt) || (st_wv && e_skip)) : (h_wr_req && h_wr_gnt);" "wire w_fire = st ? (m_wr_gnt || (st_wv && e_skip)) : (h_wr_req && h_wr_gnt);"
+# (dma_rd_qual / dma_wr_qual: 「外部 gnt 不限定 req」在 npu_dma_mc 內是等價 mutant — npu_rr_lock 只把 grant 給選中的請求者
+#  (formal/npu_rr_lock 證明 sel ⊆ req), 通道看到的 gnt 必伴隨自己的 req。npu_rr_lock 的 rr_gnt_all 涵蓋 grant 分配錯誤)
 mut dma_waddr    $DMA "wire e_step = st ? pop : iss_ok;" "wire e_step = iss_ok;"                       # 寫位址用錯計數器
 mut dma_l2line   $DMA "assign h_wr_line = dec ? (l2 + 26'({wr, half})) : (l2 + 26'(wr));" "assign h_wr_line = dec ? (l2 + 26'({wr, half})) : (l2 + 26'(iss));"
 mut dma_done     $DMA "assign done      = act && (wr == n);" "assign done      = act && (iss == n);"                # 讀完就完成 (寫尚未完成)
