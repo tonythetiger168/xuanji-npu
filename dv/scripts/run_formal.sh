@@ -8,6 +8,7 @@ cd "$(dirname "$0")/../.."
 export LANG=C.UTF-8 LC_ALL=C.UTF-8      # sv2v 需要 UTF-8 locale (原始碼含中文註解)
 declare -A SRC=(
   [npu_ss_dma]="rtl/npu/npu_ss_dma.sv"
+  [npu_dma]="rtl/npu/npu_dma.sv"
   [orca_npu_ss]="formal/orca_npu_ss/stubs.sv rtl/npu/npu_l2_arb2.sv rtl/npu/orca_npu_ss.sv"
   [npu_l2_xbar]="rtl/npu/npu_l2_xbar.sv"
   [npu_core]="formal/npu_core/stubs.sv rtl/npu/npu_core.sv"

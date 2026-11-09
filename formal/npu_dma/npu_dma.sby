@@ -1,0 +1,21 @@
+# npu_dma: 性質與歸納不變式在 rtl/npu/npu_dma.sv 的 `ifdef FORMAL 區塊 (OUT=4, DW=16; 計數器為實際寬度 16 bit)。COPY 只依位置搬移 (每個 bit 獨立), 解碼逐 4 bit 元素獨立 (每個 byte 只依對應的 nibble), 故 DW=16 (每半 2 個元素) 的資料完整性推廣到 512
+[tasks]
+prove
+cover
+
+[options]
+prove: mode prove
+prove: depth 5
+cover: mode cover
+cover: depth 30
+
+[engines]
+smtbmc z3
+
+[script]
+read_verilog -sv -formal npu_dma.v
+chparam -set OUT 4 -set DW 16 npu_dma
+prep -top npu_dma
+
+[files]
+npu_dma.v

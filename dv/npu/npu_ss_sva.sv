@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-// orca_npu_ss / npu_ss_dma 的 SVA: 佇列 / 分派 (等待旗標) / 完成合併 / DMA 協定 / 時脈閘控安全 + 功能 coverage。
+// orca_npu_ss / npu_dma (v6.3.13 起取代 npu_ss_dma) 的 SVA: 佇列 / 分派 (等待旗標) / 完成合併 / DMA 協定 / 時脈閘控安全 + 功能 coverage。
 // 以 bind 掛到 DUT。
 
 module npu_ss_dma_sva #(parameter int OUT = 8) (
   input logic clk, rst_n,
-  input logic cmd_valid, cmd_ready, done, act, st,
+  input logic cmd_valid, cmd_ready, done, act, st, cmd_st, dec, half,
+  input logic [1:0] cmd_fmt, fmt,
   input logic [15:0] cmd_n, n, iss, wr, cols, col,
   input logic [25:0] stride,
   input logic [$clog2(OUT):0] f_cnt,
@@ -37,6 +38,19 @@ module npu_ss_dma_sva #(parameter int OUT = 8) (
   a_n0:         assert property (cmd_valid && cmd_ready && cmd_n == '0 |=> done);
   a_ready:      assert property (cmd_ready == !act);
 
+  // 載入時解碼 (v6.3.13): 只有 LD 解碼; 後半只在 FIFO 頭有 line 時出現; 每個外部 line 寫 2 個 L2 line
+  a_dec_ld:     assert property (dec |-> !st && fmt != 2'd0);
+  a_dec_cmd:    assert property (cmd_valid && cmd_ready |=> dec == (!$past(cmd_st) && $past(cmd_fmt) != 2'd0) && fmt == $past(cmd_fmt));
+  a_half:       assert property (half |-> dec && f_cnt != '0);
+  a_half_hold:  assert property (h_wr_req && !h_wr_gnt |=> $stable(half));
+  c_dec_ld:     cover property (act && dec && done && n > 16'(OUT));
+  c_dec_i4:     cover property (act && dec && fmt == 2'd1 && done && n > 16'd1);
+  c_dec_u4:     cover property (act && dec && fmt == 2'd2 && done && n > 16'd1);
+  c_dec_mx:     cover property (act && dec && fmt == 2'd3 && done && n > 16'd1);
+  c_dec_full:   cover property (act && dec && (iss - wr) == 16'(OUT) && iss != n);
+  c_dec_hwait:  cover property (h_wr_req && !h_wr_gnt && half);
+  c_dec_2d:     cover property (act && dec && done && cols != '0 && n > cols);
+  c_st_fmt:     cover property (act && st && fmt != 2'd0 && done && n > 16'd1);   // ST 忽略格式欄位
   c_ld:         cover property (act && !st && done && n > 16'(OUT));
   // 2D (外部端每列 cols 個 line): LD / ST 跨過列邊界、最後一列不滿、列距 0 / 小於列寬 (重疊)
   c_2d_ld:      cover property (act && !st && done && cols != '0 && n > cols);
@@ -59,6 +73,9 @@ module npu_ss_dma_sva #(parameter int OUT = 8) (
 
   covergroup cg_dma @(posedge clk iff rst_n && cmd_valid && cmd_ready);
     cp_n:   coverpoint cmd_n { bins zero = {0}; bins one = {1}; bins le_out[] = {[2:OUT]}; bins mid = {[OUT+1:4*OUT]}; bins big = {[4*OUT+1:$]}; }
+    cp_fmt: coverpoint cmd_fmt;
+    cp_st:  coverpoint cmd_st;
+    x_fmt:  cross cp_fmt, cp_st;
   endgroup
   cg_dma u_cg_dma = new;
   covergroup cg_outst @(posedge clk iff rst_n && act);
@@ -71,6 +88,7 @@ endmodule
 // 以 tile 的未閘控時脈取樣 (DMA 時脈關閉期間發生的非同步 reset 仍會中止進行中的 |=> 檢查)
 bind orca_npu_ss npu_ss_dma_sva #(.OUT(OUT)) u_dma_sva (
   .clk, .rst_n, .cmd_valid(u_dma.cmd_valid), .cmd_ready(u_dma.cmd_ready), .done(u_dma.done), .act(u_dma.act), .st(u_dma.st),
+  .cmd_st(u_dma.cmd_st), .dec(u_dma.dec), .half(u_dma.half), .cmd_fmt(u_dma.cmd_fmt), .fmt(u_dma.fmt),
   .cmd_n(u_dma.cmd_n), .n(u_dma.n), .iss(u_dma.iss), .wr(u_dma.wr), .cols(u_dma.cols), .col(u_dma.col), .stride(u_dma.stride),
   .f_cnt(u_dma.f_cnt),
   .h_rd_req(u_dma.h_rd_req), .h_rd_gnt(u_dma.h_rd_gnt), .h_wr_req(u_dma.h_wr_req), .h_wr_gnt(u_dma.h_wr_gnt),

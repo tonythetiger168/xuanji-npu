@@ -2,7 +2,7 @@
 // Xuanji (原 ORCA v6.3) - NPU Subsystem (v6.3.9: 由舊 AI tile 以 npu_core 重建)
 `include "orca_pkg.sv"
 
-// orca_npu_ss: 命令佇列 + 分派 (等待旗標) + npu_core (GEMM) + npu_ss_dma (外部記憶體 <-> L2) + 完成合併。
+// orca_npu_ss: 命令佇列 + 分派 (等待旗標) + npu_core (GEMM) + npu_dma (外部記憶體 <-> L2, 載入時解碼) + 完成合併。
 //
 // 命令 (npu_tile_cmd_t, cmd_valid / cmd_ready): 依序進 QD 項佇列, 依序分派 —
 //   GEMM → npu_core (可多個同時在不同 CU 執行); DMA_LD / DMA_ST → DMA (一次一個); VEC → 向量引擎 (一次一個);
@@ -14,7 +14,7 @@
 //   隊首等待時後面的命令也等待 (依序分派)。
 // 完成 (cpl_valid / cpl_ready + cpl_id): 輸出暫存, 等待 ready 期間保持; 來源 (GEMM / DMA / NOP)
 //   (GEMM / DMA / VEC / NOP) round-robin 進入。完成順序不保證與命令順序相同 (wt 只約束分派)。irq = cpl_valid (level)。
-// 外部記憶體埠: 見 npu_ss_dma (64 B line, 讀回應依序且無回壓)。
+// 外部記憶體埠: 見 npu_dma (64 B line, 讀回應依序且無回壓)。
 // 效能計數: npu_core 的 perf_busy / perf_steps 直通。
 // 低功耗: DMA 一個 ICG (閒置停止時脈); 向量引擎一個 ICG; npu_core 內每個 CU 一個 ICG。
 module orca_npu_ss
@@ -26,7 +26,7 @@ module orca_npu_ss
   parameter int NB    = 4,
   parameter int DEPTH = 1024,
   parameter int QD    = 8,              // tile 命令佇列深度 (2 的冪)
-  parameter int OUT   = 32              // DMA 在途上限 (見 npu_products.sv: Nano 16 / X1 32 / Pro 64)
+  parameter int OUT   = 64              // DMA 在途上限 (見 npu_products.sv: Nano 32 / X1 64 / Pro 128 / Max 128)
 )(
   input  logic clk, rst_n,
   input  logic test_en,
@@ -130,9 +130,10 @@ module orca_npu_ss
   logic d_done, d_busy, d_en, d_gclk;
   assign d_en = d_busy || g_dma;          // 閒置且沒有分派時停止 DMA 時脈 (命令在 idle 取樣)
   clock_gate u_dma_icg (.clk(clk), .en(d_en || !rst_n), .test_en(test_en), .clk_out(d_gclk));
-  npu_ss_dma #(.OUT(OUT)) u_dma (
+  // DMA 命令欄位: b[15:0] = 2D 每列 line 數, b[17:16] = 載入時解碼格式 (v6.3.13, npu_dma), c = 2D 列距
+  npu_dma #(.OUT(OUT)) u_dma (
     .clk(d_gclk), .rst_n(rst_n),
-    .cmd_valid(g_dma), .cmd_ready(d_cmd_ready), .cmd_st(head.op == NPU_OP_DMA_ST),
+    .cmd_valid(g_dma), .cmd_ready(d_cmd_ready), .cmd_st(head.op == NPU_OP_DMA_ST), .cmd_fmt(head.b[17:16]),
     .cmd_ext(head.ext), .cmd_l2(head.a), .cmd_n(head.k), .cmd_cols(head.b[15:0]), .cmd_stride(head.c),
     .done(d_done), .busy(d_busy),
     .h_rd_req(d_rd_req), .h_rd_line(d_rd_line), .h_rd_gnt(d_rd_gnt), .h_rd_data(a_rd_data),

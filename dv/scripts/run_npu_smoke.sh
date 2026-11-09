@@ -27,7 +27,7 @@ else
     rtl/fp/fp_add.sv rtl/fp/fp_mul.sv rtl/fp/fp_narrow.sv rtl/fp/fp_widen.sv rtl/fp/sfu.sv rtl/fp/fp_max.sv rtl/fp/fp_small_dec.sv \
     rtl/fp/fp_mx_scale.sv rtl/fp/fp_from_int.sv rtl/npu/npu_vec.sv dv/vec/npu_vec_sva.sv rtl/npu/npu_vec_eng.sv dv/vec/npu_vec_eng_sva.sv \
     rtl/npu/npu_l2_arb2.sv dv/npu/npu_l2_arb2_sva.sv $CU rtl/npu/npu_l2_xbar.sv dv/npu/npu_l2_xbar_sva.sv \
-    rtl/npu/npu_core.sv dv/npu/npu_core_sva.sv rtl/npu/npu_ss_dma.sv rtl/npu/orca_npu_ss.sv dv/npu/npu_ss_sva.sv dv/npu/npu_ss_e2e_sva.sv dv/npu/npu_ss_tb.sv \
+    rtl/npu/npu_core.sv dv/npu/npu_core_sva.sv rtl/npu/npu_dma.sv rtl/npu/orca_npu_ss.sv dv/npu/npu_ss_sva.sv dv/npu/npu_ss_e2e_sva.sv dv/npu/npu_ss_tb.sv \
     -GN=$N -GNCU=$NCU -GNB=$NB -GDEPTH=$DEPTH -GOUT=$TILE_OUT --top-module npu_ss_tb > "$B/build.log" 2>&1 \
     || { tail -20 "$B/build.log"; echo "BUILD FAIL"; exit 1; }
   RUN=("$B/tb/Vnpu_ss_tb" +seed=1 +batches=1 +cmds="$NC" +no_big); TAG=NPUSS
