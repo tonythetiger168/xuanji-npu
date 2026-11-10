@@ -47,7 +47,7 @@ module npu_dma #(parameter int OUT = 8, DW = 512) (
   input  logic clk, rst_n,
   input  logic cmd_valid, output logic cmd_ready, input logic cmd_st, input logic [1:0] cmd_fmt,
   input  logic [31:0] cmd_ext, input logic [25:0] cmd_l2, input logic [15:0] cmd_n,
-  input  logic [15:0] cmd_cols, input logic [25:0] cmd_stride,
+  input  logic [15:0] cmd_cols, input logic [25:0] cmd_stride, input logic cmd_ind, input logic [25:0] cmd_list,
   output logic done, busy,
   output logic h_rd_req, output logic [25:0] h_rd_line, input logic h_rd_gnt, input logic [DW-1:0] h_rd_data,
   output logic h_wr_req, output logic [25:0] h_wr_line, output logic [DW-1:0] h_wr_data, input logic h_wr_gnt,

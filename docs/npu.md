@@ -83,7 +83,7 @@ npu_core 加上命令前端與 DMA, 成為可以直接下命令的子系統 (由
 | 命令 | 動作 |
 |---|---|
 | `GEMM` | C = A × B (INT8 → INT32, 資料已在 L2); K = 0 時只回報完成 |
-| `DMA_LD` / `DMA_ST` | 外部記憶體 → L2 / L2 → 外部記憶體, k 個 line (k = 0 時立即完成); 位址模數環繞。2D (v6.3.11): b[15:0] = 每列 line 數 (0 = 1D), c = 外部列距 (line) — 第 i 個 line 的外部位址 = ext + (i / cols) × c + i % cols, L2 端連續。載入時解碼 (v6.3.13, 只對 LD): b[17:16] = 0 COPY / 1 INT4 / 2 UINT4 / 3 MXFP4, 見下方「DMA 引擎 npu_dma」 |
+| `DMA_LD` / `DMA_ST` | 外部記憶體 → L2 / L2 → 外部記憶體, k 個 line (k = 0 時立即完成); 位址模數環繞。2D (v6.3.11): b[15:0] = 每列 line 數 (0 = 1D), c = 外部列距 (line) — 第 i 個 line 的外部位址 = ext + (i / cols) × c + i % cols, L2 端連續。載入時解碼 (v6.3.13, 只對 LD): b[17:16] = 0 COPY / 1 INT4 / 2 UINT4 / 3 MXFP4。間接 gather / scatter (v6.3.13): b[18] = 1, c = 位址表的 L2 line, b[15:0] = 每項 line 數; 見下方「DMA 引擎 npu_dma」 |
 | `VEC` (op 4) | 執行 L2 line `a` 起的 `k` 個向量指令 (每 line 4 個; `docs/npu_vec.md`); k = 0 時只回報完成; 遇到非法指令時 `vec_err` 一拍 |
 | `NOP` (op 3; 保留的 op 5–7 同 NOP) | 只回報完成 |
 
@@ -111,8 +111,21 @@ npu_core 加上命令前端與 DMA, 成為可以直接下命令的子系統 (由
 - MX 的區塊比例 (E8M0, 每 32 個元素) 與 INT4 的 group scale 不在 DMA 套用: per-channel scale 由向量核在 GEMM 之後反量化;
   每 32 個 K 一個比例的 MX 區塊比例列為後續工作 (GEMM 端)。MXFP4 解出的值是真值 × 2, 反量化時比例要多除 2。
 - ST 忽略 fmt (原樣搬移)。2D 與解碼可同時使用 (外部端 2D, L2 端連續)。
-- 驗證: 形式證明 (k-induction, DW = 16, 檢查器以 E2M1 的定義另寫參考解碼) + 形式 mutation 13 / 13;
+- 驗證: 形式證明 (k-induction, DW = 64, 檢查器以 E2M1 的定義另寫參考解碼) + 形式 mutation 25 / 25 (含間接 12 個);
   subsystem CRV 的參考模型以實數計算 E2M1, LD 有 50% 機率隨機選解碼格式 (含 2D、長 DMA 65535 line → L2 131070 line、位址環繞)。
+- **間接 gather / scatter** (`b[18] = 1`, 給 paged KV cache 與 MoE token 分派):
+  位址表放在 L2 (line `c` 起), 每項 u32 小端, 一個 line 16 項。k = 項數, 每項搬 cw = (b[15:0] = 0 ? 1 : b[15:0]) 個 line。
+  第 i 項的值 E: 外部端 `ext + E .. ext + E + cw − 1`, L2 端連續 (`a + i × cw`, 解碼時 × 2)。LD = gather, ST = scatter。
+  總 line 數 k × cw 須 <= 65535 (計數器 16 bit; 較長的 gather 由軟體切成多個命令)。
+  E = `0xFFFF_FFFF` 為略過: LD 對該項的 L2 line 寫 0 (不讀外部), ST 不寫外部。
+  位址表經 L2 讀埠讀入 2 line 緩衝並預取下一個 line; ST 時與資料讀取共用讀埠 (位址表優先, 請求保持到 gnt)。
+  解碼 (b[17:16]) 可與間接同時使用 (例: 從分頁的 INT4 權重 / KV 區塊 gather 並展開成 INT8)。
+  LD 的略過項要等先前發出的外部讀取都回來才進入 FIFO (保持順序, 不需要重排緩衝), 所以略過密集時吞吐量會下降。
+  形式證明 (DW = 64, 每 line 2 項, 假設 cw <= 2) 另外追蹤一個任意項的位址表讀取與外部位址;
+  subsystem CRV 隨機產生位址表 (含略過、cw 1..12、與解碼同時), 先以一般 DMA_LD 把位址表載入 L2 再執行間接命令。
+  另有一個 directed 測試: 項數 65505..65535 的間接 ST (位址表 4095 / 4096 個 line, 在 L2 折返), 涵蓋位址表計數器的所有位元。
+  形式證明只含安全性質: 「位址表最後一個 line 沒讀」這類只會停住的錯誤由 subsystem TB 的 watchdog 抓 (mutation `ind_nl`)。
+  mutation: 形式 12 個 (`ind_*`, 其中 `ind_nohold` 以 BMC 16 拍), subsystem 15 個 (含命令欄位接錯)。
 - **低功耗**: DMA 閒置時停止時脈 (ICG); 向量引擎閒置時停止取指 / 控制的時脈, 每個向量暫存器各有 ICG; npu_core 內每個 CU、每列另有 ICG。
 
 ### NPU Subsystem 驗證
@@ -127,7 +140,7 @@ bash dv/scripts/run_npu_ss_mutation.sh <nano|x1|pro|all>                # 檢查
 | TB `dv/npu/npu_ss_tb.sv` | 每個 batch 一段隨機命令程式 (含 K = 0、line 數 0、L2 2^26 / 外部 2^32 位址環繞); 產生器追蹤自上一個 `wt` 以來的讀 / 寫範圍, 衝突必設 `wt` → DUT 必須等同依序執行。外部記憶體模型: grant 隨機 (與 req 無關)、讀回應依序且延遲隨機 (含 > OUT)。比對整個 L2 (後門) 與外部記憶體、每個 id 恰好完成一次、`wt` 命令的完成在所有先前命令之後、`perf_steps`。另有: GEMM / NOP / DMA 突發 (填滿 npu_core 佇列)、65535 line 長 DMA、fill_all (完成回壓時填滿所有槽)、中途 reset、隨機 `test_en` |
 | SVA `dv/npu/npu_ss_sva.sv` | 33 個 assertion: 佇列 / 分派 (`a_wt`、`a_no_stall`)、未完成數上限 (`a_oc_bound`, 界限可達)、完成合併 (保持、不遺失、公平 ≤ 2 次搶先)、DMA 帳目 / 吞吐量 (`a_issue`) / 請求保持、閘控安全; 24 個 cover |
 | covergroup | 命令類型 × `wt`、分派時未完成數、每種來源組合下的選擇、佇列深度、DMA 長度、在途數 / FIFO 深度 |
-| 範圍 | 量測 tile 自身 (`orca_npu_ss`、`npu_ss_dma`、`clock_gate`); npu_core 子樹由上面的 NPU flow 收斂 |
+| 範圍 | 量測 tile 自身 (`orca_npu_ss`、`npu_dma`、`clock_gate`); npu_core 子樹由上面的 NPU flow 收斂 |
 
 ### NPU Subsystem 結果 (每款 6 seed × 30 batch + 2 次隨機上電 + DMA 吞吐量量測; 豁免 0 項; v6.3.12 重新收斂)
 

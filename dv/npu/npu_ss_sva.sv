@@ -6,7 +6,11 @@ module npu_ss_dma_sva #(parameter int OUT = 8) (
   input logic clk, rst_n,
   input logic cmd_valid, cmd_ready, done, act, st, cmd_st, dec, half,
   input logic [1:0] cmd_fmt, fmt,
-  input logic [15:0] cmd_n, n, iss, wr, cols, col,
+  input logic ind, cmd_ind, ld_skip, st_skip, sel_l, l_need, d_hreq, e_v,
+  input logic [1:0] lbv,
+  input logic [12:0] lf, nl,
+  input logic [15:0] cmd_n, cmd_cols, cols, col,
+  input logic [15:0] n, iss, wr,
   input logic [25:0] stride,
   input logic [$clog2(OUT):0] f_cnt,
   input logic h_rd_req, h_rd_gnt, h_wr_req, h_wr_gnt, m_rd_req, m_rd_gnt, m_rd_rvalid, m_wr_req, m_wr_gnt,
@@ -20,19 +24,21 @@ module npu_ss_dma_sva #(parameter int OUT = 8) (
   // 帳: wr <= iss <= n, 在途 <= OUT, FIFO 內容 <= 在途
   a_cnt_order:  assert property (!act || (wr <= iss && iss <= n));
   a_outst:      assert property (!act || (iss - wr) <= 16'(OUT));   // RTL 只保留 outst 的低 log2(OUT)+1 bit
-  a_fifo:       assert property (32'(f_cnt) <= 32'(iss - wr) || !act);
+  a_fifo:       assert property (16'(f_cnt) <= iss - wr || !act);
   a_fifo_idle:  assert property (!act |-> f_cnt == '0);
   // 有在途額度就發出讀取 (吞吐量: 在途上限 OUT 全部可用)
-  a_issue:      assert property (act && iss != n && (iss - wr) < 16'(OUT) |-> (st ? h_rd_req : m_rd_req));
+  a_issue:      assert property (act && !ind && iss != n && (iss - wr) < 16'(OUT) |-> (st ? h_rd_req : m_rd_req));
+  a_issue_ind:  assert property (act && ind && st && iss != n && (iss - wr) < 16'(OUT) |-> h_rd_req);
   // 一次只有一個方向動作
-  a_dir:        assert property (!(st && (m_rd_req || h_wr_req)) && !(!st && (h_rd_req || m_wr_req)));
+  a_dir:        assert property (!(st && (m_rd_req || h_wr_req)) && !(!st && ((h_rd_req && !sel_l) || m_wr_req)));
+  a_dir_l:      assert property (sel_l |-> ind && h_rd_req);   // 間接 LD 的 L2 讀取只會是索引表
   // 請求保持到 grant, 位址 / 資料不變
   a_mrd_hold:   assert property (m_rd_req && !m_rd_gnt |=> m_rd_req && $stable(m_rd_addr));
   a_mwr_hold:   assert property (m_wr_req && !m_wr_gnt |=> m_wr_req && $stable(m_wr_addr) && $stable(m_wr_data));
   a_hrd_hold:   assert property (h_rd_req && !h_rd_gnt |=> h_rd_req && $stable(h_rd_line));
   a_hwr_hold:   assert property (h_wr_req && !h_wr_gnt |=> h_wr_req && $stable(h_wr_line) && $stable(h_wr_data));
   // 讀回應只會在 LD 進行中、且有已發出未回來的讀取時出現
-  a_rvalid:     assert property (m_rd_rvalid |-> act && !st && 32'(iss - wr) > 32'(f_cnt));
+  a_rvalid:     assert property (m_rd_rvalid |-> act && !st && iss - wr > 16'(f_cnt));
   // 完成: 一拍脈衝; n = 0 的命令接受後下一拍完成
   a_done_once:  assert property (done |=> !done && !act);
   a_n0:         assert property (cmd_valid && cmd_ready && cmd_n == '0 |=> done);
@@ -51,10 +57,29 @@ module npu_ss_dma_sva #(parameter int OUT = 8) (
   c_dec_hwait:  cover property (h_wr_req && !h_wr_gnt && half);
   c_dec_2d:     cover property (act && dec && done && cols != '0 && n > cols);
   c_st_fmt:     cover property (act && st && fmt != 2'd0 && done && n > 16'd1);   // ST 忽略格式欄位
+  // 間接 (v6.3.13): 位址表讀取只在間接命令; LD 略過項進入 FIFO 時沒有尚未回應的外部讀取; 讀完位址表才結束
+  a_ind_list:   assert property (sel_l |-> ind && act && lf != nl);
+  a_ind_skip:   assert property (ld_skip |-> !st && 32'(f_cnt) == iss - wr && !m_rd_req && !m_rd_rvalid);
+  a_ind_stskip: assert property (st_skip |-> st && ind && !m_wr_req);
+  a_ind_done:   assert property (done && ind |-> lf == nl && !h_rd_req);
+  a_ind_noext:  assert property (ind && !e_v |-> !m_rd_req && !m_wr_req && !ld_skip);
+  // 軟體規則: 間接命令的總 line 數 k × cw <= 65535 (RTL 計數器 16 bit)
+  a_ind_len:    assert property (cmd_valid && cmd_ind |-> 32'(cmd_n) * ((cmd_cols == '0) ? 32'd1 : 32'(cmd_cols)) <= 32'd65535);
+  c_ind_ld:     cover property (act && ind && !st && done && n > 16'(OUT));
+  c_ind_st:     cover property (act && ind && st && done && n > 16'(OUT));
+  c_ind_cw:     cover property (act && ind && done && cols > 16'd1 && n > 32'(cols));
+  c_ind_dec:    cover property (act && ind && dec && done && n > 32'd1);
+  c_ind_lskip:  cover property (ld_skip);
+  c_ind_lskip_wait: cover property (act && ind && !st && !e_v && iss != n);   // 外部端等位址表
+  c_ind_sskip:  cover property (st_skip);
+  c_ind_both:   cover property (act && ind && lbv == 2'b11);
+  c_ind_lwait:  cover property (sel_l && !h_rd_gnt);
+  c_ind_contend: cover property (st && l_need && d_hreq);                  // ST: 位址表與資料讀取爭用 host 讀埠
+  c_ind_multi:  cover property (act && ind && done && nl > 16'd2);
   c_ld:         cover property (act && !st && done && n > 16'(OUT));
   // 2D (外部端每列 cols 個 line): LD / ST 跨過列邊界、最後一列不滿、列距 0 / 小於列寬 (重疊)
-  c_2d_ld:      cover property (act && !st && done && cols != '0 && n > cols);
-  c_2d_st:      cover property (act && st && done && cols != '0 && n > cols);
+  c_2d_ld:      cover property (act && !ind && !st && done && cols != '0 && n > cols);
+  c_2d_st:      cover property (act && !ind && st && done && cols != '0 && n > cols);
   c_2d_part:    cover property (act && done && cols > 16'd1 && (n % cols) != '0 && n > cols);
   c_2d_s0:      cover property (act && done && cols != '0 && stride == '0 && n > cols);
   c_2d_ovl:     cover property (act && done && cols > 16'd1 && stride != '0 && 32'(stride) < 32'(cols) && n > cols);
@@ -74,6 +99,8 @@ module npu_ss_dma_sva #(parameter int OUT = 8) (
   covergroup cg_dma @(posedge clk iff rst_n && cmd_valid && cmd_ready);
     cp_n:   coverpoint cmd_n { bins zero = {0}; bins one = {1}; bins le_out[] = {[2:OUT]}; bins mid = {[OUT+1:4*OUT]}; bins big = {[4*OUT+1:$]}; }
     cp_fmt: coverpoint cmd_fmt;
+    cp_ind: coverpoint cmd_ind;
+    x_ind:  cross cp_ind, cp_st;
     cp_st:  coverpoint cmd_st;
     x_fmt:  cross cp_fmt, cp_st;
   endgroup
@@ -89,7 +116,9 @@ endmodule
 bind orca_npu_ss npu_ss_dma_sva #(.OUT(OUT)) u_dma_sva (
   .clk, .rst_n, .cmd_valid(u_dma.cmd_valid), .cmd_ready(u_dma.cmd_ready), .done(u_dma.done), .act(u_dma.act), .st(u_dma.st),
   .cmd_st(u_dma.cmd_st), .dec(u_dma.dec), .half(u_dma.half), .cmd_fmt(u_dma.cmd_fmt), .fmt(u_dma.fmt),
-  .cmd_n(u_dma.cmd_n), .n(u_dma.n), .iss(u_dma.iss), .wr(u_dma.wr), .cols(u_dma.cols), .col(u_dma.col), .stride(u_dma.stride),
+  .ind(u_dma.ind), .cmd_ind(u_dma.cmd_ind), .ld_skip(u_dma.ld_skip), .st_skip(u_dma.st_wv && u_dma.e_skip), .sel_l(u_dma.sel_l),
+  .l_need(u_dma.l_need), .d_hreq(u_dma.d_hreq), .e_v(u_dma.e_v), .lbv(u_dma.lbv), .lf(u_dma.lf), .nl(u_dma.nl),
+  .cmd_n(u_dma.cmd_n), .cmd_cols(u_dma.cmd_cols), .n(u_dma.n), .iss(u_dma.iss), .wr(u_dma.wr), .cols(u_dma.cols), .col(u_dma.col), .stride(u_dma.stride),
   .f_cnt(u_dma.f_cnt),
   .h_rd_req(u_dma.h_rd_req), .h_rd_gnt(u_dma.h_rd_gnt), .h_wr_req(u_dma.h_wr_req), .h_wr_gnt(u_dma.h_wr_gnt),
   .m_rd_req(u_dma.m_rd_req), .m_rd_gnt(u_dma.m_rd_gnt), .m_rd_rvalid(u_dma.m_rd_rvalid),
