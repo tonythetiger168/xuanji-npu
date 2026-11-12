@@ -126,7 +126,15 @@ npu_core 加上命令前端與 DMA, 成為可以直接下命令的子系統 (由
   另有一個 directed 測試: 項數 65505..65535 的間接 ST (位址表 4095 / 4096 個 line, 在 L2 折返), 涵蓋位址表計數器的所有位元。
   形式證明只含安全性質: 「位址表最後一個 line 沒讀」這類只會停住的錯誤由 subsystem TB 的 watchdog 抓 (mutation `ind_nl`)。
   mutation: 形式 12 個 (`ind_*`, 其中 `ind_nohold` 以 BMC 16 拍), subsystem 15 個 (含命令欄位接錯)。
-- **低功耗**: DMA 閒置時停止時脈 (ICG); 向量引擎閒置時停止取指 / 控制的時脈, 每個向量暫存器各有 ICG; npu_core 內每個 CU、每列另有 ICG。
+- **多通道** (`npu_dma_mc`, v6.3.13): orca_npu_ss 的參數 `NDC` (預設 2, 所有產品組態) 個 `npu_dma` 通道, 不同通道的 DMA 命令同時執行
+  (例: 載入下一層權重的同時 gather KV cache 或寫回結果)。命令交給編號最小的空閒通道 (閒置且完成槽空); 每個通道一個完成槽,
+  round-robin 回報。通道之間沒有順序保證, 與其他 wt = 0 的命令相同: 同時執行的 DMA 存取區域須不重疊, 否則以 wt 分隔。
+  L2 讀 / L2 寫 / 外部讀 / 外部寫各一個 `npu_rr_lock` (round-robin, 等待 grant 時鎖定); 外部讀回應依請求順序,
+  以深度 NDC × OUT 的 tag FIFO 送回發出的通道。每個通道各有 OUT 項 FIFO 與一個 ICG。
+  形式: `npu_rr_lock` (NM = 3: one-hot、只選請求者、鎖定、確切 round-robin、每個主端最多等 NM − 1 次) 與 `npu_dma_mc`
+  (通道為替身; 命令分派、四個埠的位址 / 資料屬於得主、任選一個外部讀取追蹤其回應送回發出者、完成 id) 皆 k-induction 證明;
+  `orca_npu_ss` 的形式以 npu_dma_mc 替身 (最多 NDC 個未回報命令) 重新證明。subsystem SVA 另外掛在每個通道與 npu_dma_mc 上。
+- **低功耗**: 每個 DMA 通道閒置時停止時脈 (ICG); 向量引擎閒置時停止取指 / 控制的時脈, 每個向量暫存器各有 ICG; npu_core 內每個 CU、每列另有 ICG。
 
 ### NPU Subsystem 驗證
 
@@ -140,7 +148,7 @@ bash dv/scripts/run_npu_ss_mutation.sh <nano|x1|pro|all>                # 檢查
 | TB `dv/npu/npu_ss_tb.sv` | 每個 batch 一段隨機命令程式 (含 K = 0、line 數 0、L2 2^26 / 外部 2^32 位址環繞); 產生器追蹤自上一個 `wt` 以來的讀 / 寫範圍, 衝突必設 `wt` → DUT 必須等同依序執行。外部記憶體模型: grant 隨機 (與 req 無關)、讀回應依序且延遲隨機 (含 > OUT)。比對整個 L2 (後門) 與外部記憶體、每個 id 恰好完成一次、`wt` 命令的完成在所有先前命令之後、`perf_steps`。另有: GEMM / NOP / DMA 突發 (填滿 npu_core 佇列)、65535 line 長 DMA、fill_all (完成回壓時填滿所有槽)、中途 reset、隨機 `test_en` |
 | SVA `dv/npu/npu_ss_sva.sv` | 33 個 assertion: 佇列 / 分派 (`a_wt`、`a_no_stall`)、未完成數上限 (`a_oc_bound`, 界限可達)、完成合併 (保持、不遺失、公平 ≤ 2 次搶先)、DMA 帳目 / 吞吐量 (`a_issue`) / 請求保持、閘控安全; 24 個 cover |
 | covergroup | 命令類型 × `wt`、分派時未完成數、每種來源組合下的選擇、佇列深度、DMA 長度、在途數 / FIFO 深度 |
-| 範圍 | 量測 tile 自身 (`orca_npu_ss`、`npu_dma`、`clock_gate`); npu_core 子樹由上面的 NPU flow 收斂 |
+| 範圍 | 量測 tile 自身 (`orca_npu_ss`、`npu_dma_mc`、`npu_dma`、`npu_rr_lock`、`clock_gate`); npu_core 子樹由上面的 NPU flow 收斂 |
 
 ### NPU Subsystem 結果 (每款 6 seed × 30 batch + 2 次隨機上電 + DMA 吞吐量量測; 豁免 0 項; v6.3.12 重新收斂)
 
@@ -201,7 +209,10 @@ bash dv/scripts/run_formal_mutation.sh   # 形式 mutation: 植入錯誤的 RTL 
 | 區塊 | 參數 | 性質 | 結果 |
 |---|---|---|---|
 | `npu_ss_dma` | OUT = 4, DW = 8 (計數器為實際 16 bit) | 計數順序 (寫 ≤ 讀 ≤ n)、在途 ≤ OUT、FIFO 佔用 / 指標、done 恰在第 n 個寫入、有額度就發讀、請求等待 grant 時保持、done 為單拍; **資料完整**: 任選一個 line index (anyconst), 從輸入埠記錄的資料必須等於寫出的資料 | k-induction 證明通過 (深度 5); cover 3 / 3 可達; 形式 mutation 7 / 7 無法證明 |
-| `orca_npu_ss` (前端) | QD = 4, NCU = 2; npu_core / DMA / ICG 以契約替身取代 (`formal/orca_npu_ss/stubs.sv`) | 命令守恆 (接受 = 佇列中 + 已分派; 已分派 = 未完成 + 已載入; 已載入 = 已輸出 + 輸出暫存中)、未完成數 = core 內 + DMA + NOP 且 ≤ 上限、等待旗標 (oc = 0 才分派)、可分派時必分派、K = 0 不送 core、DMA / NOP 完成槽的 id 不被覆蓋、完成合併選一個有效來源且為**確切 round-robin** (檢查器自己記錄上次選中者)、輸出等待時保持、core 的 id 原樣輸出、busy / irq、DMA 時脈閘控安全 | k-induction 證明通過 (深度 6); cover 4 / 4 可達; 形式 mutation 14 / 14 無法證明 |
+| `npu_dma` (v6.3.13) | OUT = 4, DW = 64 | `npu_ss_dma` 的性質 + 載入時解碼 (檢查器另寫 E2M1 參考) + 間接: 任選一項追蹤其位址表讀取、值與外部位址、略過項 (假設 cw ≤ 2) | k-induction 證明通過; cover 可達; 形式 mutation 25 / 25 |
+| `npu_rr_lock` (v6.3.13) | NM = 3 | one-hot、只選請求者、等待 grant 時保持、確切 round-robin、每個主端最多被搶先 NM − 1 次 | k-induction 證明通過; cover 可達 |
+| `npu_dma_mc` (v6.3.13) | NDC = 2, OUT = 4, DW = 8; 通道為契約替身 (`formal/npu_dma_mc/stubs.sv`) | 命令交給最小的空閒通道、四個共用埠的 grant 只給請求者且位址 / 資料屬於得主、任選第 k 個外部讀取其回應送回發出的通道、回應只送給有在途讀取的通道、完成 id = 該通道接受的命令 id | k-induction 證明通過; cover 可達 |
+| `orca_npu_ss` (前端) | QD = 4, NCU = 2; npu_core / DMA / ICG 以契約替身取代 (`formal/orca_npu_ss/stubs.sv`) | 命令守恆 (接受 = 佇列中 + 已分派; 已分派 = 未完成 + 已載入; 已載入 = 已輸出 + 輸出暫存中)、未完成數 = core 內 + DMA (v6.3.13: 最多 NDC 個) + NOP 且 ≤ 上限、等待旗標 (oc = 0 才分派)、可分派時必分派、K = 0 不送 core、NOP / VEC 完成槽的 id 不被覆蓋、DMA 的完成 id 原樣輸出、完成合併選一個有效來源且為**確切 round-robin** (檢查器自己記錄上次選中者)、輸出等待時保持、core 的 id 原樣輸出、busy / irq (DMA 時脈閘控在 npu_dma_mc 內, 由 subsystem SVA `a_gate` 檢查) | k-induction 證明通過 (深度 6); cover 4 / 4 可達; 形式 mutation 14 / 14 無法證明 |
 | `npu_l2_xbar` | NM = 4, NW = 3, NB = 2, DEPTH = 2, LDW = 8 (新增參數 LDW, 預設 512); light sleep LS_IDLE = 3、LS_WAKE = 2 | grant 必有請求、每個 bank 每拍最多一讀一寫 grant、醒著時**確切 round-robin** 且 work-conserving (檢查器從 gnt 埠記錄得主)、等待 ≤ NM − 1 + LS_WAKE + 1 拍; light sleep: 檢查器由請求埠重算每個 bank 的睡眠 / 喚醒狀態, `bank_ls` 相符、睡眠 / 喚醒中不給 grant; **資料**: 任選一個 line (anyconst), 讀到的必是最後寫入的資料 | k-induction 證明通過 (深度 10); 拿掉輔助不變式的 ABC BMC 30 拍通過; cover 5 / 5 可達; 形式 mutation 13 / 13 無法證明 (含 light sleep 5) |
 | `npu_core` (控制) | QD = 4, NCU = 2; CU / xbar / ICG 以契約替身取代 (`formal/npu_core/stubs.sv`; CU 的契約以 assume 寫在 npu_core 的 FORMAL 區塊) | 命令守恆 (接受 − 輸出 = 未完成 = 佇列 + 各 CU 持有 + 待回報槽 + 輸出暫存) 且上限 QD + 4·NCU + 1 為緊; 輸出的 id 必是尚未完成的命令 (不捏造、不重複; host 契約: id 不與未完成者重複); 檢查器從埠記錄每個 CU 持有的 tag 佇列, 待回報槽的 tag = CU 完成握手帶回的 tag; 分派最多一個 CU、只給可接受命令的 CU、優先完全閒置者中編號最小者、否則可接受者中編號最小者、可分派時必分派; done_ready = 待回報槽空; 輸出等待時保持; **完成仲裁公平**: 待回報期間被略過 ≤ NCU − 1 次; busy / cmd_ready | k-induction 證明通過 (深度 4, 約 17 分鐘); cover 6 / 6 可達; 形式 mutation 11 / 11 無法證明 |
 

@@ -5,7 +5,8 @@
 // orca_npu_ss: 命令佇列 + 分派 (等待旗標) + npu_core (GEMM) + npu_dma (外部記憶體 <-> L2, 載入時解碼) + 完成合併。
 //
 // 命令 (npu_tile_cmd_t, cmd_valid / cmd_ready): 依序進 QD 項佇列, 依序分派 —
-//   GEMM → npu_core (可多個同時在不同 CU 執行); DMA_LD / DMA_ST → DMA (一次一個); VEC → 向量引擎 (一次一個);
+//   GEMM → npu_core (可多個同時在不同 CU 執行); DMA_LD / DMA_ST → npu_dma_mc (NDC 個通道, 最多 NDC 個同時執行);
+//   VEC → 向量引擎 (一次一個);
 //   NOP、保留的 op (5..7)、K = 0 的 GEMM / VEC → 直接完成 (L2 不變)。DMA 的 line 數 k = 0 時也立即完成。
 //   DMA 與向量引擎以 npu_l2_arb2 共用 npu_core 的 host L2 埠。VEC 命令執行中遇到非法指令時 vec_err 一拍脈衝
 //   (與該命令的完成同時進入完成槽)。
@@ -26,7 +27,8 @@ module orca_npu_ss
   parameter int NB    = 4,
   parameter int DEPTH = 1024,
   parameter int QD    = 8,              // tile 命令佇列深度 (2 的冪)
-  parameter int OUT   = 64              // DMA 在途上限 (見 npu_products.sv: Nano 32 / X1 64 / Pro 128 / Max 128)
+  parameter int OUT   = 64,             // 每個 DMA 通道的在途上限 (見 npu_products.sv: Nano 32 / X1 64 / Pro 128 / Max 128)
+  parameter int NDC   = 2               // DMA 通道數 (v6.3.13, npu_dma_mc; 不同通道的 DMA 命令可同時執行)
 )(
   input  logic clk, rst_n,
   input  logic test_en,
@@ -76,18 +78,18 @@ module orca_npu_ss
   //     + 輸出暫存; v6.3.12 命令重疊) + DMA + NOP + VEC (SVA a_oc_bound)
   localparam int CQD = 4;                // npu_core 命令佇列深度
   localparam int CCAP = CQD + 4 * NCU + 1;
-  localparam int OC_MAX = CCAP + 3;
+  localparam int OC_MAX = CCAP + NDC + 2;
   localparam int OCW = $clog2(OC_MAX + 1);
   logic [OCW-1:0] oc;
-  logic       dma_cv, nop_cv, vec_cv;    // DMA / NOP / VEC 完成槽
-  logic [7:0] dma_id, nop_id, vec_id;
+  logic       nop_cv, vec_cv;            // NOP / VEC 完成槽 (DMA 的完成槽在 npu_dma_mc 內, 每個通道一個)
+  logic [7:0] nop_id, vec_id;
   logic       c_cmd_ready, d_cmd_ready, v_cmd_ready;
   wire go     = q_hv && (!head.wt || oc == '0);
   // K = 0 的 GEMM 不送 npu_core (CU 要求 K >= 1), 與 NOP 相同只回報完成 (C 不變)
   wire h_nop  = head.op == NPU_OP_NOP || head.op > NPU_OP_VEC ||
                ((head.op == NPU_OP_GEMM || head.op == NPU_OP_VEC) && head.k == '0);
   wire g_core = go && head.op == NPU_OP_GEMM && !h_nop;
-  wire g_dma  = go && (head.op == NPU_OP_DMA_LD || head.op == NPU_OP_DMA_ST) && !dma_cv;
+  wire g_dma  = go && (head.op == NPU_OP_DMA_LD || head.op == NPU_OP_DMA_ST);
   wire g_vec  = go && head.op == NPU_OP_VEC && !h_nop && !vec_cv;
   wire g_nop  = go && h_nop && !nop_cv;
   wire d_take = g_dma && d_cmd_ready;
@@ -123,21 +125,20 @@ module orca_npu_ss
     .perf_wr(perf_wr), .perf_wdata_busy(perf_wdata_busy), .perf_wdata_steps(perf_wdata_steps),
     .perf_busy(perf_busy), .perf_steps(perf_steps));
 
-  // ---------------- DMA ----------------
+  // ---------------- DMA (多通道) ----------------
   logic         d_rd_req, d_rd_gnt, d_wr_req, d_wr_gnt;
   logic [25:0]  d_rd_line, d_wr_line;
   logic [511:0] d_wr_data, a_rd_data;         // a_rd_data: 經仲裁器的 host 讀資料
-  logic d_done, d_busy, d_en, d_gclk;
-  assign d_en = d_busy || g_dma;          // 閒置且沒有分派時停止 DMA 時脈 (命令在 idle 取樣)
-  clock_gate u_dma_icg (.clk(clk), .en(d_en || !rst_n), .test_en(test_en), .clk_out(d_gclk));
+  logic         d_busy, d_cpl_valid, d_cpl_ready;
+  logic [7:0]   d_cpl_id;
   // DMA 命令欄位: b[15:0] = 2D 每列 line 數 (間接: 每項 line 數), b[17:16] = 載入時解碼格式, b[18] = 間接 (v6.3.13, npu_dma),
-  // c = 2D 列距 (間接: 位址表的 L2 line)
-  npu_dma #(.OUT(OUT)) u_dma (
-    .clk(d_gclk), .rst_n(rst_n),
-    .cmd_valid(g_dma), .cmd_ready(d_cmd_ready), .cmd_st(head.op == NPU_OP_DMA_ST), .cmd_fmt(head.b[17:16]),
+  // c = 2D 列距 (間接: 位址表的 L2 line)。每個通道各有 ICG (在 npu_dma_mc 內)。
+  npu_dma_mc #(.NDC(NDC), .OUT(OUT)) u_dma (
+    .clk(clk), .rst_n(rst_n), .test_en(test_en),
+    .cmd_valid(g_dma), .cmd_ready(d_cmd_ready), .cmd_id(head.id), .cmd_st(head.op == NPU_OP_DMA_ST), .cmd_fmt(head.b[17:16]),
     .cmd_ext(head.ext), .cmd_l2(head.a), .cmd_n(head.k), .cmd_cols(head.b[15:0]), .cmd_stride(head.c),
     .cmd_ind(head.b[18]), .cmd_list(head.c),
-    .done(d_done), .busy(d_busy),
+    .cpl_valid(d_cpl_valid), .cpl_ready(d_cpl_ready), .cpl_id(d_cpl_id), .busy(d_busy),
     .h_rd_req(d_rd_req), .h_rd_line(d_rd_line), .h_rd_gnt(d_rd_gnt), .h_rd_data(a_rd_data),
     .h_wr_req(d_wr_req), .h_wr_line(d_wr_line), .h_wr_data(d_wr_data), .h_wr_gnt(d_wr_gnt),
     .m_rd_req(m_rd_req), .m_rd_addr(m_rd_addr), .m_rd_gnt(m_rd_gnt),
@@ -169,7 +170,7 @@ module orca_npu_ss
   // 來源 0 = npu_core, 1 = DMA, 2 = NOP, 3 = VEC; 輸出暫存空出 (或本拍被接受) 時從上次選中者的下一個開始找
   logic [3:0] src_v, sel;
   logic [1:0] last;
-  assign src_v = {vec_cv, nop_cv, dma_cv, c_cpl_valid};
+  assign src_v = {vec_cv, nop_cv, d_cpl_valid, c_cpl_valid};
   wire load = (src_v != '0) && (!cpl_valid || cpl_ready);
   always_comb begin
     sel = '0;
@@ -179,18 +180,16 @@ module orca_npu_ss
     end
   end
   assign c_cpl_ready = load && sel[0];
+  assign d_cpl_ready = load && sel[1];
   assign irq  = cpl_valid;
   assign busy = q_hv || (oc != '0) || cpl_valid || c_busy || d_busy || v_busy;
 
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
-      oc <= '0; dma_cv <= 1'b0; nop_cv <= 1'b0; vec_cv <= 1'b0; dma_id <= '0; nop_id <= '0; vec_id <= '0;
+      oc <= '0; nop_cv <= 1'b0; vec_cv <= 1'b0; nop_id <= '0; vec_id <= '0;
       cpl_valid <= 1'b0; cpl_id <= '0; last <= 2'd3;
     end else begin
       oc <= oc + OCW'(q_pop) - OCW'(load);
-      if (d_take) dma_id <= head.id;
-      if (d_done) dma_cv <= 1'b1;
-      else if (load && sel[1]) dma_cv <= 1'b0;
       if (g_nop) begin nop_cv <= 1'b1; nop_id <= head.id; end
       else if (load && sel[2]) nop_cv <= 1'b0;
       if (v_take) vec_id <= head.id;
@@ -198,7 +197,7 @@ module orca_npu_ss
       else if (load && sel[3]) vec_cv <= 1'b0;
       if (load) begin
         cpl_valid <= 1'b1;
-        cpl_id    <= sel[0] ? c_cpl_id : sel[1] ? dma_id : sel[2] ? nop_id : vec_id;
+        cpl_id    <= sel[0] ? c_cpl_id : sel[1] ? d_cpl_id : sel[2] ? nop_id : vec_id;
         last      <= sel[0] ? 2'd0 : sel[1] ? 2'd1 : sel[2] ? 2'd2 : 2'd3;
       end else if (cpl_ready) cpl_valid <= 1'b0;
     end
@@ -210,9 +209,9 @@ module orca_npu_ss
   initial f_past = 1'b0;
   always @(posedge clk) f_past <= 1'b1;
   // 命令守恆: 接受 = 佇列中 + 已分派; 已分派 = 未完成 (oc) + 已載入輸出; 已載入 = 已輸出 + 輸出暫存中
-  logic [7:0] f_acc, f_disp, f_load, f_out, f_cin, f_cout;
+  logic [7:0] f_acc, f_disp, f_load, f_out, f_cin, f_cout, f_din, f_dout;
   always @(posedge clk or negedge rst_n)
-    if (!rst_n) begin f_acc <= 0; f_disp <= 0; f_load <= 0; f_out <= 0; f_cin <= 0; f_cout <= 0; end
+    if (!rst_n) begin f_acc <= 0; f_disp <= 0; f_load <= 0; f_out <= 0; f_cin <= 0; f_cout <= 0; f_din <= 0; f_dout <= 0; end
     else begin
       f_acc  <= f_acc  + 8'(q_push);
       f_disp <= f_disp + 8'(q_pop);
@@ -220,34 +219,38 @@ module orca_npu_ss
       f_out  <= f_out  + 8'(cpl_valid && cpl_ready);
       f_cin  <= f_cin  + 8'(g_core && c_cmd_ready);
       f_cout <= f_cout + 8'(c_cpl_valid && c_cpl_ready);
+      f_din  <= f_din  + 8'(d_take);
+      f_dout <= f_dout + 8'(d_cpl_valid && d_cpl_ready);
     end
   // 分派到 DMA / NOP / VEC 的命令 id
-  logic [7:0] f_dma_id, f_nop_id, f_vec_id;
+  logic [7:0] f_nop_id, f_vec_id;
   always @(posedge clk) begin
-    if (d_take) f_dma_id <= head.id;
     if (g_nop)  f_nop_id <= head.id;
     if (v_take) f_vec_id <= head.id;
   end
   wire [7:0] f_core_pend = f_cin - f_cout;
+  wire [7:0] f_dma_pend  = f_din - f_dout;
   // npu_core 的介面契約 (stub 內部也成立; 以 tile 自己的計數重述, 讓歸納不從不可達狀態出發):
   //   容量 CCAP 滿時不收命令; 只在有未回報命令時回報完成
   always @(*) if (rst_n) begin
     assume (!c_cmd_ready || f_core_pend < 8'(CCAP));
     assume (!c_cpl_valid || f_core_pend != 0);
+    // npu_dma_mc 的契約 (npu_dma_mc 本身另外形式證明): 最多 NDC 個未回報命令
+    assume (!d_cmd_ready || f_dma_pend < 8'(NDC));
+    assume (!d_cpl_valid || f_dma_pend != 0);
+    assume (d_busy || f_dma_pend == 0 || d_cpl_valid);
   end
   always @(*) if (rst_n) begin
-    assert (f_core_pend <= 8'(CCAP));
+    assert (f_core_pend <= 8'(CCAP) && f_dma_pend <= 8'(NDC));
     assert (q_cnt <= (QW+1)'(QD));
     assert (cmd_ready == (q_cnt != (QW+1)'(QD)));
     assert (8'(f_acc - f_disp) == 8'(q_cnt));
     assert (8'(f_disp - f_load) == 8'(oc));
     assert (8'(f_load - f_out) == 8'(cpl_valid));
     // 未完成數 = npu_core 內 + DMA / VEC (執行中或完成待回報) + NOP 完成待回報; 不超過上限
-    assert (8'(oc) == f_core_pend + 8'(d_busy || dma_cv) + 8'(nop_cv) + 8'(v_busy || vec_cv));
-    assert (!(d_busy && dma_cv));
+    assert (8'(oc) == f_core_pend + f_dma_pend + 8'(nop_cv) + 8'(v_busy || vec_cv));
     assert (!(v_busy && vec_cv));
     // DMA / NOP 完成槽的 id 在整個佔用期間等於分派時的 id (不被後來的命令覆蓋)
-    if (d_busy || dma_cv) assert (dma_id == f_dma_id);
     if (nop_cv) assert (nop_id == f_nop_id);
     if (v_busy || vec_cv) assert (vec_id == f_vec_id);
     assert (int'(oc) <= OC_MAX);
@@ -259,13 +262,12 @@ module orca_npu_ss
     if (g_core) assert (head.k != '0);
     if (q_hv && (!head.wt || oc == '0) &&
         ((head.op == NPU_OP_GEMM && !h_nop && c_cmd_ready) ||
-         ((head.op == NPU_OP_DMA_LD || head.op == NPU_OP_DMA_ST) && !dma_cv && d_cmd_ready) ||
+         ((head.op == NPU_OP_DMA_LD || head.op == NPU_OP_DMA_ST) && d_cmd_ready) ||
          (head.op == NPU_OP_VEC && !h_nop && !vec_cv && v_cmd_ready) || (h_nop && !nop_cv)))
       assert (q_pop);
     // 完成合併: 選一個有效來源, 確切 round-robin, 輸出暫存空時必載入; id 來自對應來源
     if (load) begin
       assert ($onehot(sel) && (sel & ~src_v) == '0);
-      if (sel[1]) assert (dma_id == f_dma_id);
       if (sel[2]) assert (nop_id == f_nop_id);
       if (sel[3]) assert (vec_id == f_vec_id);
     end
@@ -273,8 +275,6 @@ module orca_npu_ss
     assert (irq == cpl_valid);
     if (!busy) assert (!q_hv && oc == '0 && !cpl_valid && !c_busy && !d_busy && !v_busy);
     assert (!vec_err || v_done);
-    // DMA 時脈閘控: 關閉時 DMA 必閒置且本拍沒有分派
-    if (!test_en && !d_en) assert (!d_busy && !g_dma);
   end
   // 確切 round-robin: 上次選中者之後第一個有效來源
   // 上次選中者: 由檢查器自己從 sel 記錄 (不用 RTL 的 last, 否則與被檢查的邏輯循環)
@@ -294,6 +294,7 @@ module orca_npu_ss
   always @(posedge clk) if (f_past && rst_n && $past(rst_n)) begin
     if ($past(cpl_valid && !cpl_ready)) assert (cpl_valid && cpl_id == $past(cpl_id));
     if ($past(load && sel[0])) assert (cpl_id == $past(c_cpl_id));
+    if ($past(load && sel[1])) assert (cpl_id == $past(d_cpl_id));
   end
   always @(*) if (rst_n) begin
     cover (int'(oc) == OC_MAX);

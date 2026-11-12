@@ -17,7 +17,7 @@
 //           +perf_dma=L: DMA 吞吐量量測 (外部埠全速, 讀取延遲固定 L 拍)
 //=============================================================================
 module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB = 4, parameter int DEPTH = 1024,
-                    parameter int OUT = 32);
+                    parameter int OUT = 32, parameter int NDC = 2);
   import orca_pkg::*;
   localparam int QD = 8;                                  // 與 orca_npu_ss 預設一致
   localparam int LINES = NB * DEPTH, SPL = 64 / N, CL = (4 * N * N + 63) / 64;
@@ -38,7 +38,7 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
   logic [47:0] perf_wdata_busy = '0, perf_wdata_steps = '0, perf_busy, perf_steps;
   always #5 clk = ~clk;
 
-  orca_npu_ss #(.N(N), .NCU(NCU), .NB(NB), .DEPTH(DEPTH), .QD(QD), .OUT(OUT)) dut (.*);
+  orca_npu_ss #(.N(N), .NCU(NCU), .NB(NB), .DEPTH(DEPTH), .QD(QD), .OUT(OUT), .NDC(NDC)) dut (.*);
 
   function automatic int ur(int lo, int hi); return lo + int'($urandom_range(hi - lo, 0)); endfunction
   function automatic bit rnd(int pct); return ur(0, 99) < pct; endfunction
@@ -715,27 +715,27 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
       if (!(cpl_valid && cpl_id == 8'(200))) begin $display("ERROR: fill_all prime %0d not in output register", prime); n_err++; end
     end
     // 迴圈上界用執行期變數: 常數上界時 Verilator 會展開迴圈 (X1 的 26 次展開讓產生的 C++ 達 85 MB, 編譯 > 30 分鐘)
-    nloop = NG + 4;
+    nloop = NG + NDC + 3;
     for (int i = 0; i < nloop; i++) begin
       c = '0; c.id = 8'(i);
       if (i < NG) begin
         if (i >= ng) continue;
         c.op = NPU_OP_GEMM; c.k = 16'(K); c.sa = 1'($urandom()); c.sb = 1'($urandom());
         c.a = 26'(i * STRIDE); c.b = c.a + 26'(AL); c.c = c.b + 26'(AL);
-      end else if (i == NG) begin
+      end else if (i < NG + NDC) begin                     // 每個 DMA 通道一個
         if (prime == 4 || prime == 6) continue;
-        c.op = NPU_OP_DMA_LD; c.k = 16'd2; c.a = 26'(NG * STRIDE); c.ext = $urandom();
-      end else if (i == NG + 1) begin
+        c.op = NPU_OP_DMA_LD; c.k = 16'd2; c.a = 26'(NG * STRIDE + 2 * (i - NG)); c.ext = $urandom();
+      end else if (i == NG + NDC) begin
         if (prime == 4 || prime == 5) continue;
         c.op = NPU_OP_NOP;
-      end else begin c.op = NPU_OP_VEC; c.k = 16'd4; c.a = 26'((NG + 1) * STRIDE + i - NG - 2); end
+      end else begin c.op = NPU_OP_VEC; c.k = 16'd4; c.a = 26'((NG + 1) * STRIDE + i - NG - NDC - 1); end
       prog_pos[i] = prog.size(); prog.push_back(c); ref_exec(c);
     end
     in_batch = 1;
     // 等到所有槽都滿, 且 DMA / NOP / VEC 的完成都在待回報 (放開回壓後 4 個來源同時競爭)
-    oc_exp = (prime == 4) ? 4 + 4 * NCU + 2 : (prime >= 5) ? 2 : 4 + 4 * NCU + 4;
+    oc_exp = (prime == 4) ? 4 + 4 * NCU + 2 : (prime == 5) ? 1 + NDC : (prime == 6) ? 2 : 4 + 4 * NCU + 3 + NDC;
     // GEMM 的完成也要已在等待 (src_v[0]; v6.3.12 起 CU 可持有多個命令, oc 到達上限時 GEMM 可能都還在計算)
-    for (int w = 0; w < 20000 && !(int'(dut.oc) == oc_exp && (prime >= 5 || dut.src_v[0]) && (prime == 4 || (prime == 6 ? dut.nop_cv : (dut.dma_cv && (dut.nop_cv || prime == 5)))) && dut.vec_cv); w++) @(posedge clk);
+    for (int w = 0; w < 20000 && !(int'(dut.oc) == oc_exp && (prime >= 5 || dut.src_v[0]) && (prime == 4 || (prime == 6 ? dut.nop_cv : (&dut.u_dma.cv && (dut.nop_cv || prime == 5)))) && dut.vec_cv); w++) @(posedge clk);
     if (int'(dut.oc) != oc_exp) begin $display("ERROR: fill_all did not reach oc = %0d (oc = %0d)", oc_exp, dut.oc); n_err++; end
     p_cpl = 80;
     while (ncpl != prog.size()) @(posedge clk);
@@ -792,6 +792,38 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
       end
   endtask
 
+  // directed: DMA 通道的埠選擇器鎖定 (npu_rr_lock; mutation rr_nolock 在 Nano 存活)。外部讀埠 grant 機率調低,
+  // 讓通道在等待 grant 時另一個通道開始請求:
+  //   偶數輪: LD A (→ 通道 0), 隔幾個 NOP 後 LD B (→ 通道 1): 通道 0 等待中、上次得主是 0, 通道 1 加入 (c_lock_0)
+  //   奇數輪: 短 LD (→ 通道 0) 後長 LD (→ 通道 1), 再連續送短 LD: 通道 1 等待中、上次得主是 1, 通道 0 加入 (c_lock_1)
+  task automatic rr_lock();
+    npu_tile_cmd_t c;
+    int kq [$];                            // 每個命令: > 0 = DMA_LD 的 k, 0 = NOP
+    int nrep, nq;
+    n_batch++;
+    nrep = 8;
+    p_cmd = 100; p_cpl = 100; p_rgnt = 35; p_wgnt = 100; p_rv = 100; fix_lat = -1; rlat = 2; test_en = 0;
+    for (int r = 0; r < nrep; r++) begin
+      prog.delete(); prog_pos.delete(); cpl_pos.delete(); pidx = 0; ncpl = 0;
+      kq.delete();
+      if (r % 2 == 0) begin kq.push_back(8); for (int g = 0; g < r / 2; g++) kq.push_back(0); kq.push_back(4); end
+      else begin kq.push_back(1); kq.push_back(24); for (int g = 0; g < 6; g++) kq.push_back(1); end
+      nq = kq.size();
+      for (int t = 0; t < nq; t++) begin
+        c = '0; c.id = 8'(220 + t);
+        if (kq[t] == 0) c.op = NPU_OP_NOP;
+        else begin c.op = NPU_OP_DMA_LD; c.k = 16'(kq[t]); c.a = 26'(40 + 32 * t); c.ext = pick_ext(); end
+        prog_pos[220 + t] = prog.size(); prog.push_back(c); ref_exec(c);
+      end
+      in_batch = 1;
+      while (ncpl != prog.size()) @(posedge clk);
+      in_batch = 0;
+      for (int w = 0; busy && w < 1000; w++) @(posedge clk);
+      check_state();
+      n_cmds += prog.size();
+    end
+  endtask
+
   // directed: 長的間接 ST (項數接近 2^16, 位址表 4096 個 line 在 L2 折返): 涵蓋位址表計數器 (lf / nl) 的所有位元。
   // 先以 backdoor 把整個 L2 填成位址表: 大多是略過, 少數是小偏移 (外部位址落在 pick_ext 的安全範圍內)。
   // ST 只讀 L2, 所以資料範圍與位址表重疊沒有關係。
@@ -824,25 +856,71 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
   // (Pro OUT = 128 時隨機產生容易漏掉幾個長度)
   task automatic len_sweep();
     npu_tile_cmd_t c;
+    fp_t f;
     int nmax;
     n_batch++;
     nmax = OUT;                                            // 迴圈上界用執行期變數 (避免 Verilator 展開)
     p_cmd = 100; p_cpl = ur(60, 100); p_rgnt = ur(60, 100); p_wgnt = ur(60, 100); p_rv = ur(60, 100);
     fix_lat = -1; rlat = ur(1, 8); test_en = 0;
+    // 每個長度一組 NDC 個命令, 組與組之間等 DMA 閒置: 通道全空時命令依序交給最低編號的空閒通道,
+    // 所以組內第 i 個命令一定由通道 i 執行 → 每個通道的 cg_dma 都看到每個長度
+    for (int k = 2; k <= nmax; k++) begin
+      prog.delete(); prog_pos.delete(); cpl_pos.delete(); pidx = 0; ncpl = 0;
+      acc_clear();
+      for (int ch = 0; ch < NDC; ch++) begin
+        npu_tile_cmd_t c0;
+        c0 = '0; c0.k = 16'(k); c0.id = 8'(prog.size());
+        if (k % 2 == 0) begin c0.op = NPU_OP_DMA_LD; c0.b[17:16] = pick_fmt(); end
+        else c0.op = NPU_OP_DMA_ST;
+        if (rnd(30)) begin c0.b[15:0] = 16'(ur(1, 8)); c0.c = 26'(ur(0, 16)); end
+        // 組內不等待 (wt = 0) 才會分給不同通道: 與前面的命令衝突時換位址重抽 (仍衝突就照 mk_cmd 等待, 正確性優先)
+        for (int r = 0; r < 20; r++) begin
+          c = c0; c.ext = pick_ext(); c.a = pick_l2(dma_l2n(c));
+          f = footprint(c);
+          if (ch == 0 || !conflicts(f)) break;
+        end
+        c = mk_cmd(c, 0);
+        prog_pos[int'(c.id)] = prog.size(); prog.push_back(c); ref_exec(c);
+      end
+      in_batch = 1;
+      while (ncpl != prog.size()) @(posedge clk);
+      in_batch = 0;
+      for (int w = 0; busy && w < 1000; w++) @(posedge clk);
+      check_state();
+      n_cmds += prog.size();
+    end
+  endtask
+
+  // directed: 所有 DMA 通道的完成槽同時有效時才放行「一個」完成, 下一個命令補進空出的通道後再放行下一個。
+  // 每次輸出時所有通道都有效, round-robin 依序輪到每個通道 → 會出現「較高編號的通道也有效、卻選較低編號」的情況
+  // (一次放行全部時 rr 從 c_last 繞一圈又回到 c_last, NDC = 2 時永遠先選通道 1, 見不到這種情況)
+  task automatic cpl_all();
+    npu_tile_cmd_t c, c0;
+    fp_t f;
+    int nr;
+    n_batch++;
+    nr = 6 * NDC;
+    p_cmd = 100; p_cpl = 0; p_rgnt = 100; p_wgnt = 100; p_rv = 100; fix_lat = -1; rlat = 2; test_en = 0;
     prog.delete(); prog_pos.delete(); cpl_pos.delete(); pidx = 0; ncpl = 0;
     acc_clear();
-    for (int k = 2; k <= nmax; k++) begin
-      c = '0; c.id = 8'(k); c.k = 16'(k); c.ext = pick_ext();
-      if (k % 2 == 0) begin c.op = NPU_OP_DMA_LD; c.b[17:16] = pick_fmt(); end
-      else c.op = NPU_OP_DMA_ST;
-      if (rnd(30)) begin c.b[15:0] = 16'(ur(1, 8)); c.c = 26'(ur(0, 16)); end
-      c.a = pick_l2(dma_l2n(c));
-      c = mk_cmd(c, 20);
-      prog_pos[k] = prog.size(); prog.push_back(c); ref_exec(c);
+    for (int t = 0; t < nr; t++) begin
+      c0 = '0; c0.id = 8'(240 + t); c0.op = NPU_OP_DMA_LD; c0.k = 16'd4;
+      for (int r = 0; r < 20; r++) begin                    // 不等待 (wt = 0): 與前面的命令衝突時換位址重抽
+        c = c0; c.ext = pick_ext(); c.a = pick_l2(dma_l2n(c));
+        f = footprint(c);
+        if (!conflicts(f)) break;
+      end
+      c = mk_cmd(c, 0);
+      prog_pos[240 + t] = prog.size(); prog.push_back(c); ref_exec(c);
     end
     in_batch = 1;
-    while (ncpl != prog.size()) @(posedge clk);
+    for (int w = 0; ncpl != prog.size(); w++) begin
+      @(posedge clk);
+      if (p_cpl == 0 && (dut.u_dma.cv == '1 || w > 2000 || prog.size() - ncpl < NDC)) begin p_cpl = 100; w = 0; end
+      else if (p_cpl != 0 && cpl_valid && cpl_ready && prog.size() - ncpl > NDC) p_cpl = 0;   // 這拍握手, 下一拍 cpl_ready 落下: 只取走一個
+    end
     in_batch = 0;
+    p_cpl = 100;
     for (int w = 0; busy && w < 1000; w++) @(posedge clk);
     check_state();
     n_cmds += prog.size();
@@ -861,6 +939,13 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
     repeat (3) @(posedge clk);
     rst_n <= 1'b1;
     repeat (2) @(posedge clk);
+    // reset 清除每個 DMA 通道的控制狀態 (隨機上電時, 通道的 ICG 在 reset 期間必須開啟才會套用同步取樣的 reset)
+    if (dut.u_dma.g_ch[0].u_dma.act || dut.u_dma.g_ch[0].u_dma.iss != '0 || dut.u_dma.g_ch[0].u_dma.wr != '0 ||
+        dut.u_dma.g_ch[0].u_dma.n != '0 || dut.u_dma.g_ch[0].u_dma.f_cnt != '0 || dut.u_dma.g_ch[0].u_dma.lf != '0 ||
+        dut.u_dma.g_ch[NDC-1].u_dma.act || dut.u_dma.g_ch[NDC-1].u_dma.iss != '0 || dut.u_dma.g_ch[NDC-1].u_dma.wr != '0 ||
+        dut.u_dma.g_ch[NDC-1].u_dma.n != '0 || dut.u_dma.g_ch[NDC-1].u_dma.f_cnt != '0 || dut.u_dma.g_ch[NDC-1].u_dma.lf != '0) begin
+      $display("ERROR: DMA channel state not cleared by reset"); n_err++;
+    end
     cdv = $test$plusargs("cdv");
     if ($value$plusargs("perf_dma=%d", fix_lat)) perf_dma();
     else if (cdv) begin                                    // 跑到端到端 coverage 全部命中 (最多 nb 個 batch) 再多跑 5 個
@@ -872,7 +957,7 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
       $display("CDV: e2e bins %0d, holes %0d, closed after %0d batches", $bits(dut.u_e2e.hit), cdv_holes(), cdv_closed_at);
       for (int i = 0; i < $bits(dut.u_e2e.hit); i++) if (!dut.u_e2e.hit[i]) $display("CDV: hole bin %0d", i);
     end
-    else for (int b = 0; b < int'(nb); b++) if (b == 2) arb_lock(); else if (b == 4 && !$test$plusargs("no_big")) big_ind(); else if (b == 6) len_sweep(); else if (b % 10 == 3) begin
+    else for (int b = 0; b < int'(nb); b++) if (b == 2) arb_lock(); else if (b == 4 && !$test$plusargs("no_big")) big_ind(); else if (b == 6) len_sweep(); else if (b == 7) rr_lock(); else if (b == 8) cpl_all(); else if (b % 10 == 3) begin
       // fill_all 只有一個呼叫點 (每個呼叫點都會展開一份 task 與其內嵌的參考模型)
       int pl [$];
       pl.delete(); pl.push_back((b / 10 + int'(seed)) % 5); if (b == 13) pl.push_back(5); if (b == 3) pl.push_back(6);

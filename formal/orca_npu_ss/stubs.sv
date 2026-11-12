@@ -3,7 +3,8 @@
 //   npu_core: 已接受未回報的命令數 p <= CQD + 4·NCU + 1 (真實容量: 每個 CU 最多 3 個命令 + 1 個待回報); cpl_valid 只在 p > 0 時出現,
 //             等待 cpl_ready 期間保持 (id 不變); cmd_ready 任意但 p 滿時為 0; busy = (p != 0)。
 //             npu_core 本身由 run_npu_cov / run_npu_mutation 驗證。
-//   npu_dma (v6.3.13 起取代 npu_ss_dma): 只在 idle 接受命令; done 在忙碌中任意一拍出現, 之後回到 idle (DMA 本身已形式證明)。
+//   npu_dma_mc (v6.3.13): 最多 NDC 個未回報命令; 執行中的命令任意一拍完成, 進入待回報 (cpl_valid, id 任意)。
+//             npu_dma_mc / npu_dma 本身另外形式證明。
 //   npu_vec_eng: 同 DMA (只在 idle 接受; done 在忙碌中任意一拍; derr 任意); L2 埠不發請求 (仲裁器另外形式證明)。
 //   clock_gate: 直通 (閘控安全以 orca_npu_ss 內的組合性質檢查 en)。
 `include "orca_pkg.sv"
@@ -43,27 +44,35 @@ module npu_core #(parameter int N = 8, NCU = 4, NB = 4, DEPTH = 1024, QD = 4) (
     end
 endmodule
 
-module npu_dma #(parameter int OUT = 8, DW = 512) (
-  input  logic clk, rst_n,
-  input  logic cmd_valid, output logic cmd_ready, input logic cmd_st, input logic [1:0] cmd_fmt,
+module npu_dma_mc #(parameter int NDC = 2, OUT = 8, DW = 512) (
+  input  logic clk, rst_n, test_en,
+  input  logic cmd_valid, output logic cmd_ready, input logic [7:0] cmd_id, input logic cmd_st, input logic [1:0] cmd_fmt,
   input  logic [31:0] cmd_ext, input logic [25:0] cmd_l2, input logic [15:0] cmd_n,
   input  logic [15:0] cmd_cols, input logic [25:0] cmd_stride, input logic cmd_ind, input logic [25:0] cmd_list,
-  output logic done, busy,
+  output logic cpl_valid, input logic cpl_ready, output logic [7:0] cpl_id,
+  output logic busy,
   output logic h_rd_req, output logic [25:0] h_rd_line, input logic h_rd_gnt, input logic [DW-1:0] h_rd_data,
   output logic h_wr_req, output logic [25:0] h_wr_line, output logic [DW-1:0] h_wr_data, input logic h_wr_gnt,
   output logic m_rd_req, output logic [31:0] m_rd_addr, input logic m_rd_gnt, input logic m_rd_rvalid,
   input  logic [DW-1:0] m_rd_rdata,
   output logic m_wr_req, output logic [31:0] m_wr_addr, output logic [DW-1:0] m_wr_data, input logic m_wr_gnt
 );
-  (* anyseq *) logic done_any;
-  logic act;
-  assign cmd_ready = !act; assign busy = act; assign done = act && done_any;
+  // 未回報命令 p <= NDC; 其中 q 個已完成待回報 (cpl_valid = q > 0, id 任意); 其餘執行中 (busy)
+  (* anyseq *) logic rdy_any, done_any;
+  (* anyseq *) logic [7:0] id_any;
+  logic [7:0] p, q;
+  assign cmd_ready = rdy_any && (p < 8'(NDC));
+  assign cpl_valid = (q != 0); assign cpl_id = id_any;
+  assign busy = (p != q);
   assign h_rd_req = 0; assign h_rd_line = 0; assign h_wr_req = 0; assign h_wr_line = 0; assign h_wr_data = 0;
   assign m_rd_req = 0; assign m_rd_addr = 0; assign m_wr_req = 0; assign m_wr_addr = 0; assign m_wr_data = 0;
+  wire fin = done_any && (p != q);
   always @(posedge clk or negedge rst_n)
-    if (!rst_n) act <= 0;
-    else if (cmd_valid && cmd_ready) act <= 1;
-    else if (done) act <= 0;
+    if (!rst_n) begin p <= 0; q <= 0; end
+    else begin
+      p <= p + 8'(cmd_valid && cmd_ready) - 8'(cpl_valid && cpl_ready);
+      q <= q + 8'(fin) - 8'(cpl_valid && cpl_ready);
+    end
 endmodule
 
 module npu_vec_eng #(parameter int NV = 8) (

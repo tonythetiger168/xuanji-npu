@@ -20,17 +20,18 @@ PY
   nt=$((nt + 1)); mkdir -p $M/$n
   local extra=""; [ -f formal/$b/stubs.sv ] && extra=formal/$b/stubs.sv   # 子模組契約替身
   [ "$b" = orca_npu_ss ] && extra="$extra rtl/npu/npu_l2_arb2.sv"           # 真的仲裁器 (不是替身)
+  [ "$b" = npu_dma_mc ] && extra="$extra rtl/npu/npu_rr_lock.sv"           # 真的埠選擇器
   [[ "$b" =~ ^(npu_ss_regs|gs_raster_regs)$ ]] && extra="$extra rtl/common/ret_shadow.sv"   # retention 影子
   sv2v -DFORMAL -DFORMAL_TOP_$b -E Assert -Irtl/common rtl/common/orca_pkg.sv $extra $M/$n.sv > $M/$n/$b.v
   cp formal/$b/$b.sby $M/$n/
   (cd $M/$n && timeout 1800 sby -f $b.sby prove > sby.log 2>&1)
   # 只有證明真的失敗 (FAIL: 反例 / UNKNOWN: 歸納找到反例) 才算抓到; 逾時或工具錯誤不算
-  if grep -qE "DONE \((FAIL|UNKNOWN)" $M/$n/sby.log && [[ "$b" =~ ^(orca_pmu|npu_l2_xbar|npu_ss_dma|npu_dma)$ ]]; then
+  if grep -qE "DONE \((FAIL|UNKNOWN)" $M/$n/sby.log && [[ "$b" =~ ^(orca_pmu|npu_l2_xbar|npu_ss_dma|npu_dma|npu_rr_lock|npu_dma_mc)$ ]]; then
     # orca_pmu / npu_l2_xbar / npu_ss_dma 的歸納需要引用內部狀態的輔助不變式: 另以 BMC (深度 30, 拿掉輔助不變式) 確認
     # mutant 違反的是埠層級的性質 (真的反例), 而不只是輔助不變式
     sv2v -DFORMAL -DFORMAL_TOP_$b -DFORMAL_NO_HELPER -E Assert -Irtl/common rtl/common/orca_pkg.sv $extra $M/$n.sv > $M/$n/$b.v
     sed 's/^prove: mode prove/prove: mode bmc/; s/^prove: depth [0-9]*/prove: depth 30/' formal/$b/$b.sby > $M/$n/$b.sby
-    [[ "$b" =~ ^(npu_l2_xbar|npu_ss_dma|npu_dma)$ ]] && sed -i "s/^smtbmc z3/abc bmc3/" $M/$n/$b.sby   # 陣列 / 寬計數器: z3 BMC 30 拍太慢, 改用 ABC bmc3
+    [[ "$b" =~ ^(npu_l2_xbar|npu_ss_dma|npu_dma|npu_dma_mc)$ ]] && sed -i "s/^smtbmc z3/abc bmc3/" $M/$n/$b.sby   # 陣列 / 寬計數器: z3 BMC 30 拍太慢, 改用 ABC bmc3
     # npu_ss_dma (32 bit 位址、16 bit 計數器) 無輔助不變式時 BMC 每拍成本急增 (第 10 拍約 20 分鐘): 只做 8 拍 —
     # 每個 DMA mutant 在 cols = 1、n 小的命令下幾拍內就違反埠層級的位址 / 資料性質
     [[ "$b" =~ ^(npu_ss_dma|npu_dma)$ ]] && sed -i "s/^prove: depth 30/prove: depth ${BMC_DEPTH:-8}/" $M/$n/$b.sby
@@ -87,18 +88,36 @@ mut npu_dma $E ind_cw0        "wire e_wrap = ind ? (col == ((cols == '0) ? 16'd0
 mut npu_dma $E ind_lbv_full   "wire l_need  = act && ind && (lf != nl) && (lbv != 2'b11);" "wire l_need  = act && ind && (lf != nl);"
 # 等 grant 時換請求種類: ST 的資料讀取等待中、位址表緩衝空出一項時才出現 (BMC 要 16 拍)
 BMC_DEPTH=16 mut npu_dma $E ind_nohold "wire sel_l   = hp ? hp_l : l_need;" "wire sel_l   = l_need;"
+# npu_rr_lock / npu_dma_mc (v6.3.13 多通道 DMA)
+R=rtl/npu/npu_rr_lock.sv
+mut npu_rr_lock $R nolock      "assign sel     = lock ? own : pick;" "assign sel     = pick;"
+mut npu_rr_lock $R gnt_all     "assign gnt     = m_gnt ? sel : '0;" "assign gnt     = m_gnt ? req : '0;"
+mut npu_rr_lock $R no_last     "if (out_req && m_gnt)" "if (1'b0)"
+mut npu_rr_lock $R lock_gnt    "lock <= out_req && !m_gnt;" "lock <= out_req;"
+mut npu_rr_lock $R rr_order    "automatic int s = (int'(last) + 1 + i) % NM;" "automatic int s = (int'(last) + i) % NM;"
+C=rtl/npu/npu_dma_mc.sv
+mut npu_dma_mc $C take_two     "if (c_free[i]) c_take = NDC'(1) << i;" "if (c_free[i]) c_take = c_take | (NDC'(1) << i);"
+mut npu_dma_mc $C take_novalid "if (!cmd_valid) c_take = '0;" "if (1'b0) c_take = '0;"
+mut npu_dma_mc $C free_cv      "wire [NDC-1:0] c_free = c_ready & ~cv;" "wire [NDC-1:0] c_free = c_ready;"
+mut npu_dma_mc $C tag_ch       "if (m_rd_rvalid) c_mrd_rv[t_head] = 1'b1;" "if (m_rd_rvalid) c_mrd_rv[0] = 1'b1;"
+mut npu_dma_mc $C tag_push     "wire t_push = m_rd_req && m_rd_gnt;" "wire t_push = m_rd_req;"
+mut npu_dma_mc $C tag_in       "for (int i = 0; i < NDC; i++) if (s_mrd[i]) t_in = CW'(i);" "for (int i = 0; i < NDC; i++) if (c_mrd_req[i]) t_in = CW'(i);"
+mut npu_dma_mc $C hrd_line     "if (s_hrd[i]) h_rd_line = c_hrd_line[i];" "if (c_hrd_req[i]) h_rd_line = c_hrd_line[i];"
+mut npu_dma_mc $C mwr_data     "if (s_mwr[i]) begin m_wr_addr = c_mwr_addr[i]; m_wr_data = c_mwr_data[i]; end" "if (s_mwr[i]) m_wr_addr = c_mwr_addr[i]; m_wr_data = c_mwr_data[0];"
+mut npu_dma_mc $C cpl_id       "for (int i = 0; i < NDC; i++) if (c_sel[i]) cpl_id = c_id[i];" "for (int i = 0; i < NDC; i++) if (cv[i]) cpl_id = c_id[i];"
+mut npu_dma_mc $C cv_clr       "else if (c_pop && c_sel[i]) cv[i] <= 1'b0;" "else if (c_pop) cv[i] <= 1'b0;"
+mut npu_dma_mc $C id_take      "if (c_take[i]) c_id[i] <= cmd_id;" "if (cmd_valid) c_id[i] <= cmd_id;"
 mut npu_ss_dma $D wr_no_hold  "assign m_wr_req  = act && f_nempty && st;" "assign m_wr_req  = act && f_nempty && st && !iss[0];"
 T=rtl/npu/orca_npu_ss.sv
 mut orca_npu_ss $T wt_ignored  "wire go     = q_hv && (!head.wt || oc == '0);" "wire go     = q_hv;"
 mut orca_npu_ss $T oc_no_dec   "oc <= oc + OCW'(q_pop) - OCW'(load);" "oc <= oc + OCW'(q_pop);"
-mut orca_npu_ss $T oc_early    "oc <= oc + OCW'(q_pop) - OCW'(load);" "oc <= oc + OCW'(q_pop) - OCW'(load || d_done);"
-mut orca_npu_ss $T dma_slot    "head.op == NPU_OP_DMA_ST) && !dma_cv;" "head.op == NPU_OP_DMA_ST);"
+mut orca_npu_ss $T oc_early    "oc <= oc + OCW'(q_pop) - OCW'(load);" "oc <= oc + OCW'(q_pop) - OCW'(load || d_cpl_valid);"
+mut orca_npu_ss $T dma_slot    "assign d_cpl_ready = load && sel[1];" "assign d_cpl_ready = load;"
 mut orca_npu_ss $T k0_to_core  "((head.op == NPU_OP_GEMM || head.op == NPU_OP_VEC) && head.k == '0)" "1'b0"
 mut orca_npu_ss $T cpl_no_hold "wire load = (src_v != '0) && (!cpl_valid || cpl_ready);" "wire load = (src_v != '0);"
 mut orca_npu_ss $T cpl_fixed   "last      <= sel[0] ? 2'd0 : sel[1] ? 2'd1 : sel[2] ? 2'd2 : 2'd3;" "last      <= 2'd3;"
-mut orca_npu_ss $T dma_id      "if (d_take) dma_id <= head.id;" "if (g_dma) dma_id <= head.id;"
+mut orca_npu_ss $T dma_id      "sel[1] ? d_cpl_id :" "sel[1] ? c_cpl_id :"
 mut orca_npu_ss $T q_full      "assign cmd_ready = (q_cnt != (QW+1)'(QD));" "assign cmd_ready = 1'b1;"
-mut orca_npu_ss $T dma_gate    "assign d_en = d_busy || g_dma;" "assign d_en = d_busy;"
 mut orca_npu_ss $T nop_id      "if (g_nop) begin nop_cv <= 1'b1; nop_id <= head.id; end" "if (g_nop) begin nop_cv <= 1'b1; end"
 X=rtl/npu/npu_l2_xbar.sv
 mut npu_l2_xbar $X rr_frozen   "if (rd_bv[b]) rd_rr[b] <= rd_bm[b];" "if (1'b0) rd_rr[b] <= rd_bm[b];"

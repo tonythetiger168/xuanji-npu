@@ -112,39 +112,40 @@ module npu_ss_dma_sva #(parameter int OUT = 8) (
   cg_outst u_cg_outst = new;
 endmodule
 
-// 以 tile 的未閘控時脈取樣 (DMA 時脈關閉期間發生的非同步 reset 仍會中止進行中的 |=> 檢查)
-bind orca_npu_ss npu_ss_dma_sva #(.OUT(OUT)) u_dma_sva (
-  .clk, .rst_n, .cmd_valid(u_dma.cmd_valid), .cmd_ready(u_dma.cmd_ready), .done(u_dma.done), .act(u_dma.act), .st(u_dma.st),
-  .cmd_st(u_dma.cmd_st), .dec(u_dma.dec), .half(u_dma.half), .cmd_fmt(u_dma.cmd_fmt), .fmt(u_dma.fmt),
-  .ind(u_dma.ind), .cmd_ind(u_dma.cmd_ind), .ld_skip(u_dma.ld_skip), .st_skip(u_dma.st_wv && u_dma.e_skip), .sel_l(u_dma.sel_l),
-  .l_need(u_dma.l_need), .d_hreq(u_dma.d_hreq), .e_v(u_dma.e_v), .lbv(u_dma.lbv), .lf(u_dma.lf), .nl(u_dma.nl),
-  .cmd_n(u_dma.cmd_n), .cmd_cols(u_dma.cmd_cols), .n(u_dma.n), .iss(u_dma.iss), .wr(u_dma.wr), .cols(u_dma.cols), .col(u_dma.col), .stride(u_dma.stride),
-  .f_cnt(u_dma.f_cnt),
-  .h_rd_req(u_dma.h_rd_req), .h_rd_gnt(u_dma.h_rd_gnt), .h_wr_req(u_dma.h_wr_req), .h_wr_gnt(u_dma.h_wr_gnt),
-  .m_rd_req(u_dma.m_rd_req), .m_rd_gnt(u_dma.m_rd_gnt), .m_rd_rvalid(u_dma.m_rd_rvalid),
-  .m_wr_req(u_dma.m_wr_req), .m_wr_gnt(u_dma.m_wr_gnt),
-  .h_rd_line(u_dma.h_rd_line), .h_wr_line(u_dma.h_wr_line), .m_rd_addr(u_dma.m_rd_addr), .m_wr_addr(u_dma.m_wr_addr),
-  .h_wr_data(u_dma.h_wr_data), .m_wr_data(u_dma.m_wr_data));
+// v6.3.13: 掛到每個 npu_dma 通道 (npu_dma_mc 內), 以通道的閘控時脈取樣 (通道閒置時時脈停止, 沒有待檢查的事件)
+bind npu_dma npu_ss_dma_sva #(.OUT(OUT)) u_dma_sva (
+  .clk, .rst_n, .cmd_valid(cmd_valid), .cmd_ready(cmd_ready), .done(done), .act(act), .st(st),
+  .cmd_st(cmd_st), .dec(dec), .half(half), .cmd_fmt(cmd_fmt), .fmt(fmt),
+  .ind(ind), .cmd_ind(cmd_ind), .ld_skip(ld_skip), .st_skip(st_wv && e_skip), .sel_l(sel_l),
+  .l_need(l_need), .d_hreq(d_hreq), .e_v(e_v), .lbv(lbv), .lf(lf), .nl(nl),
+  .cmd_n(cmd_n), .cmd_cols(cmd_cols), .n(n), .iss(iss), .wr(wr), .cols(cols), .col(col), .stride(stride),
+  .f_cnt(f_cnt),
+  .h_rd_req(h_rd_req), .h_rd_gnt(h_rd_gnt), .h_wr_req(h_wr_req), .h_wr_gnt(h_wr_gnt),
+  .m_rd_req(m_rd_req), .m_rd_gnt(m_rd_gnt), .m_rd_rvalid(m_rd_rvalid),
+  .m_wr_req(m_wr_req), .m_wr_gnt(m_wr_gnt),
+  .h_rd_line(h_rd_line), .h_wr_line(h_wr_line), .m_rd_addr(m_rd_addr), .m_wr_addr(m_wr_addr),
+  .h_wr_data(h_wr_data), .m_wr_data(m_wr_data));
 
-module npu_ss_sva #(parameter int QD = 8, parameter int NCU = 4) (
+module npu_ss_sva #(parameter int QD = 8, parameter int NCU = 4, parameter int NDC = 2) (
   input logic clk, rst_n, test_en,
   input logic cmd_valid, cmd_ready, cpl_valid, cpl_ready, busy, irq,
   input logic [7:0] cpl_id,
-  input logic [$clog2(4 + 4 * NCU + 4 + 1)-1:0] oc,
+  input logic [$clog2(4 + 4 * NCU + 1 + NDC + 2 + 1)-1:0] oc,
   input logic [$clog2(QD):0] q_cnt,
   input logic q_hv, go, q_pop, g_core, g_dma, g_vec, g_nop, d_take, v_take, h_nop, c_cmd_ready, d_cmd_ready, v_cmd_ready,
   input logic head_wt,
   input logic [2:0] head_op,
   input logic [15:0] head_k,
-  input logic dma_cv, nop_cv, vec_cv, c_cpl_valid, c_cpl_ready, c_busy, d_busy, v_busy, d_done, v_done, d_en, load,
+  input logic d_cpl_valid, nop_cv, vec_cv, c_cpl_valid, c_cpl_ready, c_busy, d_busy, v_busy, v_done, load,
+  input logic [NDC-1:0] d_ch_busy,
   input logic [3:0] src_v, sel,
   input logic d_rd_req, d_wr_req, v_rd_req, v_wr_req, h_rd_req, h_rd_gnt, h_wr_req, m_rd_req, m_wr_req, m_rd_rvalid,
   input logic vec_err
 );
   default clocking cb @(posedge clk); endclocking
   default disable iff (!rst_n);
-  // npu_core 內最多: 佇列 4 + 每個 CU 4 (持有 3 個命令 + 1 個待回報; v6.3.12) + 輸出暫存 1; 另加 DMA 1 + NOP 1 + VEC 1
-  localparam int OC_MAX = 4 + 4 * NCU + 1 + 3;
+  // npu_core 內最多: 佇列 4 + 每個 CU 4 (持有 3 個命令 + 1 個待回報; v6.3.12) + 輸出暫存 1; 另加 DMA NDC (每個通道 1) + NOP 1 + VEC 1
+  localparam int OC_MAX = 4 + 4 * NCU + 1 + NDC + 2;
 
   a_q_bound:    assert property (q_cnt <= ($clog2(QD)+1)'(QD));
   a_cmd_ready:  assert property (cmd_ready == (q_cnt != ($clog2(QD)+1)'(QD)));
@@ -153,11 +154,10 @@ module npu_ss_sva #(parameter int QD = 8, parameter int NCU = 4) (
   a_disp_one:   assert property ($onehot0({g_core, g_dma, g_vec, g_nop}));
   a_wt:         assert property (q_pop && head_wt |-> oc == '0);
   a_no_stall:   assert property (q_hv && (!head_wt || oc == '0) &&
-                                 ((head_op == 3'd0 && !h_nop && c_cmd_ready) || (head_op inside {3'd1, 3'd2} && !dma_cv && d_cmd_ready) ||
+                                 ((head_op == 3'd0 && !h_nop && c_cmd_ready) || (head_op inside {3'd1, 3'd2} && d_cmd_ready) ||
                                   (head_op == 3'd4 && !h_nop && !vec_cv && v_cmd_ready) || (h_nop && !nop_cv)) |-> q_pop);
   a_rsvd_nop:   assert property (q_hv && head_op > 3'd4 |-> h_nop);         // 保留的 op 當 NOP
   a_vec_k0:     assert property (g_vec |-> head_k != '0);                    // K = 0 的 VEC 不送引擎
-  a_dma_slot:   assert property (d_done |-> !dma_cv);
   a_vec_slot:   assert property (v_done |-> !vec_cv);
   a_vec_err:    assert property (vec_err |-> v_done);
   // 完成合併: 選中一個有效來源; 輸出保持; irq = cpl_valid
@@ -189,7 +189,6 @@ module npu_ss_sva #(parameter int QD = 8, parameter int NCU = 4) (
   a_dma_quiet:  assert property (!d_busy |-> !d_rd_req && !d_wr_req && !m_rd_req && !m_wr_req);
   a_vec_quiet:  assert property (!v_busy |-> !v_rd_req && !v_wr_req);
   a_host:       assert property ((h_rd_req == (d_rd_req || v_rd_req)) && (h_wr_req == (d_wr_req || v_wr_req)));
-  a_gate_safe:  assert property (!test_en && !d_en |-> !d_busy && !g_dma && !m_rd_rvalid);
 
   c_q_full:     cover property (cmd_valid && !cmd_ready);
   c_cpl_bp:     cover property (cpl_valid && !cpl_ready);
@@ -197,7 +196,8 @@ module npu_ss_sva #(parameter int QD = 8, parameter int NCU = 4) (
   c_core_full:  cover property (g_core && !c_cmd_ready);
   c_dma_busy:   cover property (g_dma && !d_cmd_ready);
   c_vec_busy:   cover property (g_vec && !v_cmd_ready);
-  c_dma_slot:   cover property (go && head_op inside {3'd1, 3'd2} && dma_cv);
+  c_dma_slot:   cover property (go && head_op inside {3'd1, 3'd2} && !d_cmd_ready && d_cpl_valid);   // 通道都忙或完成槽滿
+  c_dma_multi:  cover property (d_ch_busy == '1 && c_busy && v_busy);                 // 所有 DMA 通道與 GEMM / VEC 同時執行
   c_vec_slot:   cover property (go && head_op == 3'd4 && !h_nop && vec_cv);
   c_nop_slot:   cover property (go && h_nop && nop_cv);
   c_k0:         cover property (g_nop && head_op == 3'd0);
@@ -208,7 +208,6 @@ module npu_ss_sva #(parameter int QD = 8, parameter int NCU = 4) (
   c_vec_core:   cover property (v_busy && c_busy);
   c_vec_err:    cover property (vec_err);
   c_all_src:    cover property (src_v == 4'b1111 && cpl_valid && !cpl_ready);
-  c_gated:      cover property (!test_en && busy && !d_en);
   c_oc_max:     cover property (int'(oc) == OC_MAX);              // 上限可達 (界限是緊的)
 
   covergroup cg_disp @(posedge clk iff rst_n && q_pop);
@@ -234,10 +233,35 @@ module npu_ss_sva #(parameter int QD = 8, parameter int NCU = 4) (
   cg_occ u_cg_occ = new;
 endmodule
 
-bind orca_npu_ss npu_ss_sva #(.QD(QD), .NCU(NCU)) u_sva (
+bind orca_npu_ss npu_ss_sva #(.QD(QD), .NCU(NCU), .NDC(NDC)) u_sva (
   .clk, .rst_n, .test_en, .cmd_valid, .cmd_ready, .cpl_valid, .cpl_ready, .busy, .irq, .cpl_id, .oc, .q_cnt,
   .q_hv, .go, .q_pop, .g_core, .g_dma, .g_vec, .g_nop, .d_take, .v_take, .h_nop, .c_cmd_ready, .d_cmd_ready, .v_cmd_ready,
   .head_wt(head.wt), .head_op(head.op), .head_k(head.k),
-  .dma_cv, .nop_cv, .vec_cv, .c_cpl_valid, .c_cpl_ready, .c_busy, .d_busy, .v_busy, .d_done, .v_done, .d_en, .load,
+  .d_cpl_valid, .nop_cv, .vec_cv, .c_cpl_valid, .c_cpl_ready, .c_busy, .d_busy, .v_busy, .v_done, .load, .d_ch_busy(u_dma.c_busy),
   .src_v, .sel, .d_rd_req, .d_wr_req, .v_rd_req, .v_wr_req, .h_rd_req, .h_rd_gnt, .h_wr_req, .m_rd_req, .m_wr_req,
   .m_rd_rvalid, .vec_err);
+
+// v6.3.13 多通道 DMA: 每個通道的時脈閘控安全 + 通道使用的 coverage
+module npu_dma_mc_sva #(parameter int NDC = 2) (
+  input logic clk, rst_n, test_en, cmd_valid, cmd_ready, cpl_valid, cpl_ready,
+  input logic [NDC-1:0] c_busy, c_take, c_mrd_rv, cv, c_sel, c_mrd_req, c_hrd_req, c_hwr_req, c_mwr_req
+);
+  default clocking cb @(posedge clk); endclocking
+  default disable iff (!rst_n);
+  for (genvar i = 0; i < NDC; i++) begin : g_c
+    // 通道時脈關閉 (閒置且沒有分派) 時不會有屬於它的外部讀回應
+    a_gate:     assert property (!test_en && !(c_busy[i] || c_take[i]) |-> !c_mrd_rv[i]);
+    c_used:     cover property (c_take[i] && c_busy != '0);              // 其他通道忙時分派到這個通道
+    c_gated:    cover property (!test_en && !c_busy[i] && c_busy != '0);
+    c_cpl_wait: cover property (cv[i] && !c_sel[i] && cpl_valid);         // 完成槽等待另一個通道先回報
+  end
+  c_all_busy:   cover property (c_busy == '1 && cmd_valid && !cmd_ready);
+  c_mrd_both:   cover property (c_mrd_req == '1);
+  c_hrd_both:   cover property (c_hrd_req == '1);
+  c_hwr_both:   cover property (c_hwr_req == '1);
+  c_mwr_both:   cover property (c_mwr_req == '1);
+  c_rv_mix:     cover property (c_mrd_rv[0] ##1 c_mrd_rv[NDC-1] ##1 c_mrd_rv[0]);   // 回應交錯送到不同通道
+endmodule
+bind npu_dma_mc npu_dma_mc_sva #(.NDC(NDC)) u_mc_sva (
+  .clk, .rst_n, .test_en, .cmd_valid, .cmd_ready, .cpl_valid, .cpl_ready,
+  .c_busy, .c_take, .c_mrd_rv, .cv, .c_sel, .c_mrd_req, .c_hrd_req, .c_hwr_req, .c_mwr_req);

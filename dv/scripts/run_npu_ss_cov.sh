@@ -21,9 +21,9 @@ echo "##### NPU subsystem config $CFG: N=$N NCU=$NCU NB=$NB DEPTH=$DEPTH DMA OUT
 SRC="-Irtl/common -Irtl/fp rtl/common/orca_pkg.sv rtl/common/clock_gate.sv rtl/npu/npu_mma.sv dv/npu/npu_mma_sva.sv
   rtl/fp/fp_add.sv rtl/fp/fp_mul.sv rtl/fp/fp_narrow.sv rtl/fp/fp_widen.sv rtl/fp/sfu.sv rtl/fp/fp_max.sv rtl/fp/fp_small_dec.sv
   rtl/fp/fp_mx_scale.sv rtl/fp/fp_from_int.sv rtl/npu/npu_vec.sv dv/vec/npu_vec_sva.sv rtl/npu/npu_vec_eng.sv dv/vec/npu_vec_eng_sva.sv
-  rtl/npu/npu_l2_arb2.sv dv/npu/npu_l2_arb2_sva.sv
+  rtl/npu/npu_l2_arb2.sv dv/npu/npu_l2_arb2_sva.sv dv/npu/npu_rr_lock_sva.sv
   rtl/npu/npu_gemm_cu.sv dv/npu/npu_gemm_cu_sva.sv rtl/npu/npu_l2_xbar.sv dv/npu/npu_l2_xbar_sva.sv
-  rtl/npu/npu_core.sv dv/npu/npu_core_sva.sv rtl/npu/npu_dma.sv rtl/npu/orca_npu_ss.sv
+  rtl/npu/npu_core.sv dv/npu/npu_core_sva.sv rtl/npu/npu_dma.sv rtl/npu/npu_rr_lock.sv rtl/npu/npu_dma_mc.sv rtl/npu/orca_npu_ss.sv
   dv/npu/npu_ss_sva.sv dv/npu/npu_ss_e2e_sva.sv dv/npu/npu_ss_tb.sv"
 if [ "${REPORT_ONLY:-0}" != 1 ]; then
 # 建置印記: 參數 + 原始碼內容的雜湊; RESUME 時相同就不重建
@@ -70,10 +70,10 @@ fi
 if [ "${NOREPORT:-0}" = 1 ]; then [ "$fail" -eq 0 ] && echo "##### $CFG runs PASS (report skipped)" && exit 0; echo "##### $CFG FAIL"; exit 1; fi
 W=$B/waivers.txt; cat dv/npu/waivers_ss.txt dv/npu/waivers_ss_$CFG.txt > "$W" 2>/dev/null || true
 echo "=== RTL structural coverage (module-level; line / branch / expr / toggle)"
-python3 dv/scripts/cov_report.py "$B"/cov_*.dat --by-module --rtl '^rtl/(npu/(orca_npu_ss|npu_dma|npu_l2_arb2)|common/clock_gate)' --expect rtl/npu/orca_npu_ss.sv --expect rtl/npu/npu_dma.sv \
-  --expect rtl/npu/npu_l2_arb2.sv \
+python3 dv/scripts/cov_report.py "$B"/cov_*.dat --by-module --rtl '^rtl/(npu/(orca_npu_ss|npu_dma|npu_dma_mc|npu_rr_lock|npu_l2_arb2)|common/clock_gate)' --expect rtl/npu/orca_npu_ss.sv --expect rtl/npu/npu_dma.sv \
+  --expect rtl/npu/npu_l2_arb2.sv --expect rtl/npu/npu_dma_mc.sv --expect rtl/npu/npu_rr_lock.sv \
   --waivers "$W" --require 100 --list "${LIST:-40}" || fail=1
 echo "=== functional coverage (covergroup) + SVA cover (user)"
-python3 dv/scripts/cov_report.py "$B"/cov_*.dat --by-module --rtl '^dv/npu/npu_(ss|ss_e2e|l2_arb2)_sva' --types covergroup,user \
+python3 dv/scripts/cov_report.py "$B"/cov_*.dat --by-module --rtl '^dv/npu/npu_(ss|ss_e2e|l2_arb2|rr_lock)_sva' --types covergroup,user \
   --waivers "$W" --require 100 --list "${LIST:-40}" || fail=1
 [ "$fail" -eq 0 ] && echo "##### $CFG PASS" || { echo "##### $CFG FAIL"; exit 1; }
