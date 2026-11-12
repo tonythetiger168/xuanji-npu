@@ -1,0 +1,22 @@
+# npu_topk (向量核 TOPK 的 bitonic 網路, 組合式): 輸出降序, 且 y[r] 是 2N 個輸入中排第 r 的鍵 (含重複的鍵)
+# N = 16 (向量核的組態), W = 1: 0-1 原理 — 比較交換網路 (每個比較交換的位置與資料無關, 以整個鍵比較) 若對所有 0/1 輸入
+# 都選出前 N 個並排序, 對任意寬度的鍵也成立 (對每個門檻值 t, 把 >= t 的鍵映成 1 即得)。所以 W = 1 窮舉 2^32 個輸入即為
+# W = 64 的完整證明; 64 bit 鍵的位元一致另由模擬 (run_vec.sh) 比對。
+# 純組合式: 加一個狀態位元讓 ABC 的 BMC 可用, 每拍輸入任意, 深度 2 (第 2 拍檢查) 即為完整證明。
+[tasks]
+prove
+
+[options]
+prove: mode bmc
+prove: depth 2
+
+[engines]
+abc bmc3
+
+[script]
+read_verilog -sv -formal npu_topk.v
+chparam -set N 16 -set W 1 npu_topk
+prep -top npu_topk
+
+[files]
+npu_topk.v
