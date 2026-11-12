@@ -1096,6 +1096,7 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
   //   0: X = LLM, {GEMM, LLM} → GEMM    1: X = GEMM, {GEMM, LLM} → LLM
   //   2: X = VEC, {VEC, LLM}  → LLM     3: X = VEC, {NOP, VEC}   → NOP
   //   4: X = GEMM, {DMA, LLM} → DMA     5: X = DMA, {DMA, LLM}   → LLM     6: X = GEMM, {VEC, LLM} → VEC
+  //   7: X = LLM, {LLM, LLM}  → 第二個 LLM 的完成佔住完成槽時, 第三個不得分派 (完成槽只有一格, llm_id 不可被覆蓋)
   task automatic llm_pairs();
     npu_tile_cmd_t c;
     logic [511:0] d;
@@ -1107,14 +1108,14 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
     x = '0; x.op = npu_vec_pkg::VOP_SPLAT; x.vd = 3'd0; x.imm = $urandom(); d[0 +: 77] = x;
     x = '0; x.op = npu_vec_pkg::VOP_ST; x.va = 3'd0; x.line = 26'd108; d[128 +: 77] = x;
     l2_bd_wr(l2i(26'd100), d); rl2[l2i(26'd100)] = d;
-    nsc = 7;
+    nsc = 8;
     for (int sc = 0; sc < nsc; sc++) begin
       n_batch++;
       p_cmd = 100; p_cpl = 0; p_rgnt = 100; p_wgnt = 100; p_rv = 100; fix_lat = -1; rlat = 2; test_en = 0;
       prog.delete(); prog_pos.delete(); cpl_pos.delete(); pidx = 0; ncpl = 0;
       for (int t = 0; t < 3; t++) begin
         int kind;                                          // 0 GEMM, 1 LLM, 2 VEC, 3 NOP, 4 DMA_LD
-        int ks [7][3] = '{'{1, 0, 1}, '{0, 0, 1}, '{2, 2, 1}, '{2, 3, 2}, '{0, 4, 1}, '{4, 4, 1}, '{0, 2, 1}};
+        int ks [8][3] = '{'{1, 0, 1}, '{0, 0, 1}, '{2, 2, 1}, '{2, 3, 2}, '{0, 4, 1}, '{4, 4, 1}, '{0, 2, 1}, '{1, 1, 1}};
         kind = ks[sc][t];
         c = '0; c.id = 8'(240 + t);
         case (kind)
@@ -1131,7 +1132,8 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
           if (!(cpl_valid && cpl_id == 8'(240))) begin $display("ERROR: llm_pairs %0d: X not in output register", sc); n_err++; end
         end
       end
-      want = (sc <= 1) ? 5'b10001 : (sc == 2 || sc == 6) ? 5'b11000 : (sc == 3) ? 5'b01100 : 5'b10010;
+      // sc 7: X、Y、Z 都是 LLM — X 佔住輸出暫存, Y 完成後佔住 LLM 完成槽, Z 必須等槽空出才能分派 (否則 llm_id 被覆蓋)
+      want = (sc <= 1) ? 5'b10001 : (sc == 2 || sc == 6) ? 5'b11000 : (sc == 3) ? 5'b01100 : (sc == 7) ? 5'b10000 : 5'b10010;
       for (int w = 0; w < 20000 && dut.src_v != want; w++) @(posedge clk);
       if (dut.src_v != want) begin $display("ERROR: llm_pairs %0d: src_v %b != %b", sc, dut.src_v, want); n_err++; end
       p_cpl = 100;
