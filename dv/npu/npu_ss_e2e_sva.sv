@@ -2,7 +2,7 @@
 //=============================================================================
 // orca_npu_ss 端到端 SVA + functional coverage (只看子系統邊界, 任何環境都可 bind: 單元 CRV、APB 整合、SoC)
 //   命令守恆: 每個被接受的命令 (依 id 計數) 恰好完成一次, 不會有未曾下過的 id 完成;
-//   閒置 (busy = 0) 時沒有未完成的命令; 未完成命令數有上界 (佇列 QD + 分派後在途 OC_MAX);
+//   閒置 (busy = 0) 時沒有未完成的命令; 未完成命令數有上界 (佇列 QD + 分派後在途 OC_MAX + 輸出暫存 1);
 //   不卡死: 有未完成命令時, 若既沒有任何進展 (命令 / 完成 / 外部記憶體 / host L2 握手、GEMM 步進)
 //   也沒有在等環境 (完成回壓、外部 grant、DMA 讀回應), 連續 WD 拍即判定 hang。
 // coverage (cg_e2e, 樣本於每個完成握手): 各 op 類別 × 端到端延遲 (含排隊)、各 op 類別的亂序完成 (越過更早的命令);
@@ -12,7 +12,7 @@
 `include "orca_pkg.sv"
 module npu_ss_e2e_sva
   import orca_pkg::*;
-#(parameter int QD = 8, parameter int NCU = 4, parameter int WD = 4096)(
+#(parameter int QD = 8, parameter int NCU = 4, parameter int NDC = 2, parameter int WD = 4096)(
   input logic          clk, rst_n,
   input logic          cmd_valid, cmd_ready,
   input npu_tile_cmd_t cmd,
@@ -26,8 +26,8 @@ module npu_ss_e2e_sva
 );
   default clocking cb @(posedge clk); endclocking
   default disable iff (!rst_n);
-  localparam int OC_MAX = 4 + 4 * NCU + 1 + 3;      // 與 npu_ss_sva 相同
-  localparam int TMAX = QD + OC_MAX;
+  localparam int OC_MAX = 4 + 4 * NCU + 1 + NDC + 2; // 與 npu_ss_sva 相同 (NDC 個 DMA 通道)
+  localparam int TMAX = QD + OC_MAX + 1;              // + 輸出暫存 (已移出 oc、尚未被取走的完成)
   localparam int NBIN = 28;
   // bins: [0:14] 延遲 (op 類別 * 3 + 桶), [15:19] 亂序 (op 類別), [20:24] 接受時未完成數, [25:27] 回壓情境
   wire acc = cmd_valid && cmd_ready;
@@ -114,7 +114,8 @@ module npu_ss_e2e_sva
                 else $error("npu_ss: completion id %0d was never issued (or already completed)", cpl_id);
   a_idle_empty: assert property (!busy |-> tot == 0)
                 else $error("npu_ss: busy = 0 with %0d commands still outstanding", tot);
-  a_tot_bound:  assert property (tot <= TMAX);
+  a_tot_bound:  assert property (tot <= TMAX)
+                else $error("npu_ss: %0d outstanding commands > bound %0d", tot, TMAX);
   a_no_hang:    assert property (stall < WD)
                 else $error("npu_ss: %0d outstanding commands, no progress for %0d cycles", tot, WD);
   a_id_wrap:    assert property (acc |-> pend[cmd.id] != '1);
@@ -124,7 +125,7 @@ module npu_ss_e2e_sva
   c_acc_and_cpl:  cover property (acc && cpl);
 endmodule
 
-bind orca_npu_ss npu_ss_e2e_sva #(.QD(QD), .NCU(NCU)) u_e2e (
+bind orca_npu_ss npu_ss_e2e_sva #(.QD(QD), .NCU(NCU), .NDC(NDC)) u_e2e (
   .clk, .rst_n, .cmd_valid, .cmd_ready, .cmd, .cpl_valid, .cpl_ready, .cpl_id, .busy,
   .m_rd_req, .m_rd_gnt, .m_rd_rvalid, .m_wr_req, .m_wr_gnt,
   .h_rd_req, .h_rd_gnt, .h_wr_req, .h_wr_gnt, .perf_steps, .dma_rd_wait(u_dma.g_ch[0].u_dma.iss != u_dma.g_ch[0].u_dma.wr ||
