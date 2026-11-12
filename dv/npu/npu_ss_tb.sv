@@ -792,6 +792,38 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
       end
   endtask
 
+  // directed: DMA 通道的埠選擇器鎖定 (npu_rr_lock; mutation rr_nolock 在 Nano 存活)。外部讀埠 grant 機率調低,
+  // 讓通道在等待 grant 時另一個通道開始請求:
+  //   偶數輪: LD A (→ 通道 0), 隔幾個 NOP 後 LD B (→ 通道 1): 通道 0 等待中、上次得主是 0, 通道 1 加入 (c_lock_0)
+  //   奇數輪: 短 LD (→ 通道 0) 後長 LD (→ 通道 1), 再連續送短 LD: 通道 1 等待中、上次得主是 1, 通道 0 加入 (c_lock_1)
+  task automatic rr_lock();
+    npu_tile_cmd_t c;
+    int kq [$];                            // 每個命令: > 0 = DMA_LD 的 k, 0 = NOP
+    int nrep, nq;
+    n_batch++;
+    nrep = 8;
+    p_cmd = 100; p_cpl = 100; p_rgnt = 35; p_wgnt = 100; p_rv = 100; fix_lat = -1; rlat = 2; test_en = 0;
+    for (int r = 0; r < nrep; r++) begin
+      prog.delete(); prog_pos.delete(); cpl_pos.delete(); pidx = 0; ncpl = 0;
+      kq.delete();
+      if (r % 2 == 0) begin kq.push_back(8); for (int g = 0; g < r / 2; g++) kq.push_back(0); kq.push_back(4); end
+      else begin kq.push_back(1); kq.push_back(24); for (int g = 0; g < 6; g++) kq.push_back(1); end
+      nq = kq.size();
+      for (int t = 0; t < nq; t++) begin
+        c = '0; c.id = 8'(220 + t);
+        if (kq[t] == 0) c.op = NPU_OP_NOP;
+        else begin c.op = NPU_OP_DMA_LD; c.k = 16'(kq[t]); c.a = 26'(40 + 32 * t); c.ext = pick_ext(); end
+        prog_pos[220 + t] = prog.size(); prog.push_back(c); ref_exec(c);
+      end
+      in_batch = 1;
+      while (ncpl != prog.size()) @(posedge clk);
+      in_batch = 0;
+      for (int w = 0; busy && w < 1000; w++) @(posedge clk);
+      check_state();
+      n_cmds += prog.size();
+    end
+  endtask
+
   // directed: 長的間接 ST (項數接近 2^16, 位址表 4096 個 line 在 L2 折返): 涵蓋位址表計數器 (lf / nl) 的所有位元。
   // 先以 backdoor 把整個 L2 填成位址表: 大多是略過, 少數是小偏移 (外部位址落在 pick_ext 的安全範圍內)。
   // ST 只讀 L2, 所以資料範圍與位址表重疊沒有關係。
@@ -925,7 +957,7 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
       $display("CDV: e2e bins %0d, holes %0d, closed after %0d batches", $bits(dut.u_e2e.hit), cdv_holes(), cdv_closed_at);
       for (int i = 0; i < $bits(dut.u_e2e.hit); i++) if (!dut.u_e2e.hit[i]) $display("CDV: hole bin %0d", i);
     end
-    else for (int b = 0; b < int'(nb); b++) if (b == 2) arb_lock(); else if (b == 4 && !$test$plusargs("no_big")) big_ind(); else if (b == 6) len_sweep(); else if (b == 8) cpl_all(); else if (b % 10 == 3) begin
+    else for (int b = 0; b < int'(nb); b++) if (b == 2) arb_lock(); else if (b == 4 && !$test$plusargs("no_big")) big_ind(); else if (b == 6) len_sweep(); else if (b == 7) rr_lock(); else if (b == 8) cpl_all(); else if (b % 10 == 3) begin
       // fill_all 只有一個呼叫點 (每個呼叫點都會展開一份 task 與其內嵌的參考模型)
       int pl [$];
       pl.delete(); pl.push_back((b / 10 + int'(seed)) % 5); if (b == 13) pl.push_back(5); if (b == 3) pl.push_back(6);
