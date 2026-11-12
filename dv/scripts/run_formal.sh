@@ -13,6 +13,7 @@ declare -A SRC=(
   [npu_l2_xbar]="rtl/npu/npu_l2_xbar.sv"
   [npu_core]="formal/npu_core/stubs.sv rtl/npu/npu_core.sv"
   [npu_vec]="formal/npu_vec/stubs.sv rtl/npu/npu_vec.sv"
+  [npu_topk]="rtl/npu/npu_vec.sv"
   [npu_ss_regs]="formal/npu_ss_regs/stubs.sv rtl/common/ret_shadow.sv rtl/npu/npu_ss_regs.sv"
   [npu_l2_arb2]="rtl/npu/npu_l2_arb2.sv"
   [npu_rr_lock]="rtl/npu/npu_rr_lock.sv"

@@ -36,7 +36,7 @@ PY
 }
 V=rtl/npu/npu_vec.sv D=rtl/fp/fp_small_dec.sv S=rtl/fp/fp_mx_scale.sv I=rtl/fp/fp_from_int.sv X=rtl/fp/fp_max.sv
 # ---- npu_vec: 解碼 / 交握 / 寫回 / 格式選擇 ----
-mut vec_ill_op   $V "wire illegal = (ins.op > VOP_RMAX) ||" "wire illegal = 1'b0 ||"                          # 未定義 op 不報錯
+mut vec_ill_op   $V "wire illegal = (ins.op > VOP_TOPK) ||" "wire illegal = 1'b0 ||"                          # 未定義 op 不報錯
 mut vec_ill_ld   $V "(ins.op == VOP_LD && ins.fn == 3'd7) ||" ""                                                # LD fn 7 當合法
 mut vec_ill_st   $V "(ins.op == VOP_ST && ins.fn > 3'd1)" "(ins.op == VOP_ST && ins.fn > 3'd2)"                 # ST fn 2 當合法
 mut vec_ill_sfu  $V "(ins.op == VOP_SFU && ins.fn > 3'd5)" "(ins.op == VOP_SFU && ins.fn > 3'd6)"               # SFU fn 6 當合法
@@ -55,6 +55,17 @@ mut vec_tree_m   $V ".a(tm[2*k]), .b(tm[2*k+1])" ".a(tm[2*k+1]), .b(tm[2*k+1])" 
 mut vec_gate     $V ".en(we && ins.vd == 3'(r))" ".en(we && ins.vd == 3'(r) && ins.op != VOP_SPLAT)"              # clock gate 漏開 (SPLAT 寫不進)
 mut vec_st_bf    $V ".a(b[i]), .y(st_bf[VL+i])" ".a(a[i]), .y(st_bf[VL+i])"                                       # BF16 儲存的後半取錯
 mut vec_st_fmt   $V "assign wr_data = (ins.fn == 3'd0)" "assign wr_data = (ins.fn == 3'd1)"                       # 儲存格式顛倒
+mut vec_ill_tk   $V "(ins.op == VOP_TOPK && ins.fn > 3'd1)" "(ins.op == VOP_TOPK && ins.fn > 3'd2)"               # TOPK fn 2 當合法
+mut vec_ill_tkop $V "wire illegal = (ins.op > VOP_TOPK) ||" "wire illegal = (ins.op > VOP_RMAX) ||"               # TOPK 當非法
+mut vec_tk_fn    $V "VOP_TOPK: wd = ins.fn[0] ? tk_i : tk_v;" "VOP_TOPK: wd = tk_v;"                              # 索引指令寫值
+mut vec_tk_base  $V "~(ins.imm + 32'(i))" "~(ins.imm)"                                                            # 候選索引沒加 lane
+mut vec_tk_tie   $V "~(ins.imm + 32'(i))" "(ins.imm + 32'(i))"                                                    # 同值時索引大者在前
+mut vec_tk_cur   $V "~c[i]};" "~b[i]};"                                                                           # 目前的索引表取錯暫存器
+mut vec_tk_vd    $V "c = vr[RW'(ins.vd)];" "c = vr[RW'(ins.va)];"                                                  # 索引表讀錯埠
+mut vec_tk_neg   $V "a[i][31] ? ~a[i] : {1'b1, a[i][30:0]}" "{~a[i][31], a[i][30:0]}"                              # 負數當 sign-magnitude 比較
+mut vec_tk_dec   $V "ky[i][63] ? {1'b0, ky[i][62:32]}" "ky[i][63] ? {1'b1, ky[i][62:32]}"                          # 鍵還原成值時符號錯
+mut vec_tk_dir   $V "localparam bit DN = ((i >> p) & 1) == 0;" "localparam bit DN = 1'b1;"                      # 每段都降序
+mut vec_tk_merge $V "(as[i] > bs[N-1-i]) ? as[i] : bs[N-1-i]" "(as[i] > bs[i]) ? as[i] : bs[i]"                    # 合併前沒有反轉 b
 mut vec_rsum     $V "VOP_RSUM: wd = {VL{ts[2*VL-2]}};" "VOP_RSUM: wd = {VL{ts[2*VL-3]}};"                         # 歸約少最後一層
 # ---- fp_small_dec ----
 mut dec_sub_exp  $D "8'(128 - BIAS) - 8'(sh)" "8'(127 - BIAS) - 8'(sh)"                                          # 次正規指數錯

@@ -3,7 +3,8 @@
 # npu_vec 的 kernel 程式 (transformer 的非矩陣運算) 與驗收:
 #   1. vec_ref.py 執行程式 → TB 向量檔 (RTL 必須位元一致, 由 run_vec.sh 執行)。
 #   2. 參考模型的輸出與 float64 (numpy) 的數學定義比較, 誤差須在門檻內 (輸入為同一組 FP32 值)。
-# kernel: softmax、LayerNorm、RMSNorm、GELU (tanh 近似)、SiLU、INT32 → FP32 反量化 + BF16 輸出、MXFP8 / MXFP4 解碼。
+# kernel: softmax、LayerNorm、RMSNorm、GELU (tanh 近似)、SiLU、INT32 → FP32 反量化 + BF16 輸出、MXFP8 / MXFP4 解碼、
+#   top-16 (LLM 取樣 / MoE 路由: 每 16 個 logit 一個 LD + 兩個 TOPK)。
 # 用法: vec_kernels.py <輸出目錄> [D=1024]
 import os, struct, sys
 import numpy as np
@@ -133,6 +134,15 @@ def fp8_val(c, e4m3):
     return s * (m / 4 * 2.0 ** -14 if ex == 0 else (1 + m / 4) * 2.0 ** (ex - 15))
 
 
+def topk(L):
+    """D 個 logit 的前 16 大 (值 → OUT, 索引 → OUT + 1)。v6 / v7 = 目前的前 16 值 / 索引。"""
+    p = [E('SPLAT', vd=6, imm=0xFF800000), E('SPLAT', vd=7, imm=0xFFFFFFFF)]      # (-inf, 無效索引)
+    for l in range(L):
+        p += [E('LD', vd=1, line=X + l), E('TOPK', fn=1, vd=7, va=1, vb=6, imm=VL * l),
+              E('TOPK', fn=0, vd=6, va=1, vb=6, imm=VL * l)]
+    return p + [E('ST', va=6, line=OUT), E('ST', va=7, line=OUT + 1)]
+
+
 def main():
     out = sys.argv[1]
     D = int(sys.argv[2]) if len(sys.argv) > 2 else 1024
@@ -220,6 +230,15 @@ def main():
             r = val * np.array([2.0 ** (scales[i // 32] - 127) for i in range(LL * nel)])
             return float(np.max(np.abs(y - r))), 0.0, 'max_abs_err'
         go(name, mx(LL, fn, scales), m0, ck_mx)
+    # top-16: logit 量化到 1/8 (大量同值, 由索引決定先後); 對 numpy 的穩定排序 (值降序、同值索引小者在前) 完全一致
+    x = f32(np.round(rng.normal(0, 2, D) * 8) / 8) + 0.0                        # + 0.0: 沒有 -0 (numpy 視 -0 = +0)
+    m0 = {}; put(m0, X, x)
+    def ck_tk(mem):
+        y = get(mem, OUT, VL)
+        yi = np.array([(mem[OUT + 1] >> (32 * i)) & 0xFFFFFFFF for i in range(VL)])
+        ri = np.argsort(-x, kind='stable')[:VL]
+        return float(np.sum(yi != ri) + np.sum(y != x[ri])), 0.0, 'mismatches'
+    go('topk', topk(L), m0, ck_tk)
     return 0 if ok else 1
 
 

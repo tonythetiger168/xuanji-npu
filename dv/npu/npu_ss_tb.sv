@@ -86,7 +86,7 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
         npu_vec_pkg::VOP_LD:    vreg[x.vd] = rl2[l2i(x.line)];                   // fn 0 (FP32): 原樣
         npu_vec_pkg::VOP_ST:    rl2[l2i(x.line)] = vreg[x.va];
         npu_vec_pkg::VOP_SPLAT: vreg[x.vd] = {16{x.imm}};
-        default:                e = 1;                                           // 非法 op (TB 只產生 11..15)
+        default:                e = 1;                                           // 非法 op (TB 只產生 12..15; 11 = TOPK)
       endcase
     end
     if (e) vec_err_exp++;
@@ -530,7 +530,7 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
         else begin x.op = npu_vec_pkg::VOP_LD; x.vd = 3'(i); x.line = src + 26'(i); end
         p.push_back(x);
       end
-      if (rnd(4)) begin x = '0; x.op = npu_vec_pkg::vop_e'(ur(11, 15)); p.push_back(x); end   // 非法指令
+      if (rnd(4)) begin x = '0; x.op = npu_vec_pkg::vop_e'(ur(12, 15)); p.push_back(x); end   // 非法指令
       if (rburst && i != m - 1) continue;
       x = '0; x.op = npu_vec_pkg::VOP_ST; x.va = burst ? 3'd0 : 3'(i); x.line = dst + 26'(i);
       p.push_back(x);
