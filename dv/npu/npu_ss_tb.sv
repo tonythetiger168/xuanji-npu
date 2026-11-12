@@ -86,7 +86,7 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
         npu_vec_pkg::VOP_LD:    vreg[x.vd] = rl2[l2i(x.line)];                   // fn 0 (FP32): 原樣
         npu_vec_pkg::VOP_ST:    rl2[l2i(x.line)] = vreg[x.va];
         npu_vec_pkg::VOP_SPLAT: vreg[x.vd] = {16{x.imm}};
-        default:                e = 1;                                           // 非法 op (TB 只產生 11..15)
+        default:                e = 1;                                           // 非法 op (TB 只產生 12..15; 11 = TOPK)
       endcase
     end
     if (e) vec_err_exp++;
@@ -530,7 +530,7 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
         else begin x.op = npu_vec_pkg::VOP_LD; x.vd = 3'(i); x.line = src + 26'(i); end
         p.push_back(x);
       end
-      if (rnd(4)) begin x = '0; x.op = npu_vec_pkg::vop_e'(ur(11, 15)); p.push_back(x); end   // 非法指令
+      if (rnd(4)) begin x = '0; x.op = npu_vec_pkg::vop_e'(ur(12, 15)); p.push_back(x); end   // 非法指令
       if (rburst && i != m - 1) continue;
       x = '0; x.op = npu_vec_pkg::VOP_ST; x.va = burst ? 3'd0 : 3'(i); x.line = dst + 26'(i);
       p.push_back(x);
@@ -1031,6 +1031,38 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
       end
   endtask
 
+  // directed: DMA 通道的埠選擇器鎖定 (npu_rr_lock; mutation rr_nolock 在 Nano 存活)。外部讀埠 grant 機率調低,
+  // 讓通道在等待 grant 時另一個通道開始請求:
+  //   偶數輪: LD A (→ 通道 0), 隔幾個 NOP 後 LD B (→ 通道 1): 通道 0 等待中、上次得主是 0, 通道 1 加入 (c_lock_0)
+  //   奇數輪: 短 LD (→ 通道 0) 後長 LD (→ 通道 1), 再連續送短 LD: 通道 1 等待中、上次得主是 1, 通道 0 加入 (c_lock_1)
+  task automatic rr_lock();
+    npu_tile_cmd_t c;
+    int kq [$];                            // 每個命令: > 0 = DMA_LD 的 k, 0 = NOP
+    int nrep, nq;
+    n_batch++;
+    nrep = 8;
+    p_cmd = 100; p_cpl = 100; p_rgnt = 35; p_wgnt = 100; p_rv = 100; fix_lat = -1; rlat = 2; test_en = 0;
+    for (int r = 0; r < nrep; r++) begin
+      prog.delete(); prog_pos.delete(); cpl_pos.delete(); pidx = 0; ncpl = 0;
+      kq.delete();
+      if (r % 2 == 0) begin kq.push_back(8); for (int g = 0; g < r / 2; g++) kq.push_back(0); kq.push_back(4); end
+      else begin kq.push_back(1); kq.push_back(24); for (int g = 0; g < 6; g++) kq.push_back(1); end
+      nq = kq.size();
+      for (int t = 0; t < nq; t++) begin
+        c = '0; c.id = 8'(220 + t);
+        if (kq[t] == 0) c.op = NPU_OP_NOP;
+        else begin c.op = NPU_OP_DMA_LD; c.k = 16'(kq[t]); c.a = 26'(40 + 32 * t); c.ext = pick_ext(); end
+        prog_pos[220 + t] = prog.size(); prog.push_back(c); ref_exec(c);
+      end
+      in_batch = 1;
+      while (ncpl != prog.size()) @(posedge clk);
+      in_batch = 0;
+      for (int w = 0; busy && w < 1000; w++) @(posedge clk);
+      check_state();
+      n_cmds += prog.size();
+    end
+  endtask
+
   // directed: 長的間接 ST (項數接近 2^16, 位址表 4096 個 line 在 L2 折返): 涵蓋位址表計數器 (lf / nl) 的所有位元。
   // 先以 backdoor 把整個 L2 填成位址表: 大多是略過, 少數是小偏移 (外部位址落在 pick_ext 的安全範圍內)。
   // ST 只讀 L2, 所以資料範圍與位址表重疊沒有關係。
@@ -1064,6 +1096,7 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
   //   0: X = LLM, {GEMM, LLM} → GEMM    1: X = GEMM, {GEMM, LLM} → LLM
   //   2: X = VEC, {VEC, LLM}  → LLM     3: X = VEC, {NOP, VEC}   → NOP
   //   4: X = GEMM, {DMA, LLM} → DMA     5: X = DMA, {DMA, LLM}   → LLM     6: X = GEMM, {VEC, LLM} → VEC
+  //   7: X = LLM, {LLM, LLM}  → 第二個 LLM 的完成佔住完成槽時, 第三個不得分派 (完成槽只有一格, llm_id 不可被覆蓋)
   task automatic llm_pairs();
     npu_tile_cmd_t c;
     logic [511:0] d;
@@ -1075,14 +1108,14 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
     x = '0; x.op = npu_vec_pkg::VOP_SPLAT; x.vd = 3'd0; x.imm = $urandom(); d[0 +: 77] = x;
     x = '0; x.op = npu_vec_pkg::VOP_ST; x.va = 3'd0; x.line = 26'd108; d[128 +: 77] = x;
     l2_bd_wr(l2i(26'd100), d); rl2[l2i(26'd100)] = d;
-    nsc = 7;
+    nsc = 8;
     for (int sc = 0; sc < nsc; sc++) begin
       n_batch++;
       p_cmd = 100; p_cpl = 0; p_rgnt = 100; p_wgnt = 100; p_rv = 100; fix_lat = -1; rlat = 2; test_en = 0;
       prog.delete(); prog_pos.delete(); cpl_pos.delete(); pidx = 0; ncpl = 0;
       for (int t = 0; t < 3; t++) begin
         int kind;                                          // 0 GEMM, 1 LLM, 2 VEC, 3 NOP, 4 DMA_LD
-        int ks [7][3] = '{'{1, 0, 1}, '{0, 0, 1}, '{2, 2, 1}, '{2, 3, 2}, '{0, 4, 1}, '{4, 4, 1}, '{0, 2, 1}};
+        int ks [8][3] = '{'{1, 0, 1}, '{0, 0, 1}, '{2, 2, 1}, '{2, 3, 2}, '{0, 4, 1}, '{4, 4, 1}, '{0, 2, 1}, '{1, 1, 1}};
         kind = ks[sc][t];
         c = '0; c.id = 8'(240 + t);
         case (kind)
@@ -1099,7 +1132,8 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
           if (!(cpl_valid && cpl_id == 8'(240))) begin $display("ERROR: llm_pairs %0d: X not in output register", sc); n_err++; end
         end
       end
-      want = (sc <= 1) ? 5'b10001 : (sc == 2 || sc == 6) ? 5'b11000 : (sc == 3) ? 5'b01100 : 5'b10010;
+      // sc 7: X、Y、Z 都是 LLM — X 佔住輸出暫存, Y 完成後佔住 LLM 完成槽, Z 必須等槽空出才能分派 (否則 llm_id 被覆蓋)
+      want = (sc <= 1) ? 5'b10001 : (sc == 2 || sc == 6) ? 5'b11000 : (sc == 3) ? 5'b01100 : (sc == 7) ? 5'b10000 : 5'b10010;
       for (int w = 0; w < 20000 && dut.src_v != want; w++) @(posedge clk);
       if (dut.src_v != want) begin $display("ERROR: llm_pairs %0d: src_v %b != %b", sc, dut.src_v, want); n_err++; end
       p_cpl = 100;
@@ -1217,7 +1251,7 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
       $display("CDV: e2e bins %0d, holes %0d, closed after %0d batches", $bits(dut.u_e2e.hit), cdv_holes(), cdv_closed_at);
       for (int i = 0; i < $bits(dut.u_e2e.hit); i++) if (!dut.u_e2e.hit[i]) $display("CDV: hole bin %0d", i);
     end
-    else for (int b = 0; b < int'(nb); b++) if (b == 2) arb_lock(); else if (b == 4 && !$test$plusargs("no_big")) big_ind(); else if (b == 6) len_sweep(); else if (b == 7) llm_pairs(); else if (b == 8) cpl_all(); else if (b % 10 == 3) begin
+    else for (int b = 0; b < int'(nb); b++) if (b == 2) arb_lock(); else if (b == 4 && !$test$plusargs("no_big")) big_ind(); else if (b == 6) len_sweep(); else if (b == 7) rr_lock(); else if (b == 9) llm_pairs(); else if (b == 8) cpl_all(); else if (b % 10 == 3) begin
       // fill_all 只有一個呼叫點 (每個呼叫點都會展開一份 task 與其內嵌的參考模型)
       int pl [$];
       int pr;

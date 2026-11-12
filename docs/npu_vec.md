@@ -22,7 +22,7 @@ GELU / SiLU、INT32 GEMM 結果的反量化, 以及 BF16 / FP16 / MXFP8 / MXFP4 
 - 16 lane × FP32 = 一個 64 B L2 line; 8 個向量暫存器 (參數 NV)。單發射、依序, 每拍一個指令; LD / ST 等到 L2 grant。
 - L2 介面與 `npu_gemm_cu` 相同 (讀為組合式, rd_data 與 rd_gnt 同拍; 寫在 wr_gnt 拍完成; 等待時請求保持),
   之後可直接成為 `npu_l2_xbar` 的一個主端。
-- 非法編碼當成 NOP 接受, 設定黏著的 `err` (只有 reset 清除)。暫存器檔沒有 reset (資料暫存器), 跨 reset 保持。
+- 非法編碼 (op > 11、LD fn 7、ST fn > 1、SFU fn > 5、TOPK fn > 1) 當成 NOP 接受, 設定黏著的 `err` (只有 reset 清除)。暫存器檔沒有 reset (資料暫存器), 跨 reset 保持。
 - **低功耗**: 每個向量暫存器一個 `clock_gate`, 只在寫入該暫存器的拍開啟; `test_en` 強制開啟時功能相同
   (TB 隨機切換 test_en 驗證)。
 
@@ -40,10 +40,36 @@ GELU / SiLU、INT32 GEMM 結果的反量化, 以及 BF16 / FP16 / MXFP8 / MXFP4 
 | 7 | SFU vd, va | fn 0 recip、1 rsqrt、2 exp2、3 exp、4 sinπ、5 cosπ (`sfu`) |
 | 8 | SPLAT vd, imm | 每個 lane = imm (原始位元) |
 | 9 / 10 | RSUM / RMAX vd, va | va 的 16 個 lane 歸約 (樹: 每層 x[i] = f(x[2i], x[2i+1])), 結果廣播到 vd 每個 lane |
+| 11 | TOPK vd, va, vb, imm | fn 0: vd ← 前 16 大的**值**; fn 1: vd ← 前 16 大的**索引** (見下「TOPK」) |
 
 LD 格式 (fn): 0 FP32、1 BF16、2 FP16、3 INT32、4 MXFP8 E4M3、5 MXFP8 E5M2、6 MXFP4 E2M1。
 16 / 8 / 4 bit 格式一個 line 有 32 / 64 / 128 個元素, part 選第幾組 16 個。MX 格式的共用比例 (E8M0) 在 imm[7:0]:
 OCP MX 一個區塊 32 個元素, 一個 FP8 line 是兩個區塊, 軟體以 part 0–1 / 2–3 分別給比例 (FP4 一個 line 四個區塊)。
+
+## TOPK (v6.3.14: LLM 取樣的 top-k、MoE 路由的 top-k 專家)
+
+一個 TOPK 從 32 個 (值, 索引) 取前 16 個, 降序寫入 vd:
+- 候選 = va 的 16 個 lane, 索引 = imm + lane (32 bit 回繞);
+- 目前的前 16 = vb (值) 與 vd 原內容 (索引表; 只有 fn 1 用到, fn 0 的結果與索引無關)。
+- 順序: FP32 位元的 IEEE totalOrder 降序 (+NaN > +inf > … > +0 > −0 > … > −inf > −NaN; 不做 DAZ), **同值時索引小者在前**
+  (與 `torch.topk` / 穩定排序一致)。輸入不需要已排序 (32 個全部排序後取前 16), 所以結果只由 32 個 (值, 索引) 決定。
+- 硬體: `npu_topk` (同檔), 64 bit 鍵 {totalOrder 鍵, ~索引} 的無號比較; a、b 各自 bitonic 排序, c[i] = max(a[i], b[15−i])
+  (含前 16 的 bitonic 序列), 再 bitonic 合併 — 208 個比較交換, 深度 15, 與其他指令同為單拍組合式 (合成後若時序不足,
+  可改兩拍; 尚未合成)。
+
+串流用法 (每 16 個元素 3 個指令 = 3 拍; D = 1024 的 logit 取前 16 為 196 拍, 見 kernel `topk`):
+
+```
+SPLAT v6, 0xFF800000          ; 目前的值 = -inf
+SPLAT v7, 0xFFFFFFFF          ; 目前的索引 = 無效 (同為 -inf 時排在真正的 -inf 之後)
+for l in 0 .. D/16-1:
+  LD   v1, X + l
+  TOPK.I v7, v1, v6, imm=16l  ; 先算索引 (需要舊的 v6)
+  TOPK.V v6, v1, v6, imm=16l
+ST v6 → 值, ST v7 → 索引
+```
+
+k < 16 時取前 k 個 lane 即可 (結果已降序)。
 
 ## 數值語意
 
@@ -65,19 +91,25 @@ OCP MX 一個區塊 32 個元素, 一個 FP8 line 是兩個區塊, 軟體以 par
   中途 reset), L2 grant 隨機 (70%)、指令間隨機空拍、test_en 隨機切換; 沒有 grant 時 L2 讀資料為垃圾。
   seed 1 另含**窮舉**: 256 個 FP8 碼 × 256 個比例 (E4M3 / E5M2)、FP4 碼 × 256 個比例、全部 65536 個 16 bit 碼 (BF16 / FP16)。
 - **SVA** `dv/vec/npu_vec_sva.sv`: L2 交握、ready、err、每個暫存器只在被寫入的拍改變 (clock gating 安全); covergroup:
-  每個 op / LD 格式 / ST 格式 / SFU 函式 / 每種寬度的每個 part / MX 比例類別 / 每個目的暫存器 / 每類非法編碼。
+  每個 op / LD 格式 / ST 格式 / SFU 函式 / 每種寬度的每個 part / MX 比例類別 / 每個目的暫存器 / 每類非法編碼;
+  TOPK: 結果降序 (assert)、fn、結果中來自候選的個數 (0 / 部分 / 16)、候選與目前的值相同 / 候選彼此同值 (cover)。
+  TB 另檢查 NOP 與非法指令不發出 L2 請求。
+- **TOPK 形式證明** (`formal/npu_topk`, N = 16): 0-1 原理 — 比較交換網路對所有 0/1 輸入正確即對任意寬度的鍵正確,
+  所以 W = 1 窮舉 2^32 個輸入: 輸出降序, 且 y[r] 恰為 32 個輸入中排第 r 者 (嚴格大於的 <= r 個、大於或等於的 >= r + 1 個)。
+  形式 mutation 4 / 4 (每段都降序、合併前沒反轉、少一層合併、少一層排序; 整個方向顛倒是等價 mutant)。
 - **形式證明** (`formal/npu_vec`, k-induction, 浮點元件換成任意值替身, NV = 2): 檢查器自己從指令埠解碼 —
   L2 請求只來自合法 LD / ST 且位址正確、ready 跟隨 grant、err 的下一拍值、暫存器只在接受了寫入它的指令後改變。
-  形式 mutation 7 / 7 (不等 grant、ST 寫暫存器、err 不黏著、非法 ST 當合法、位址錯、寫入所有暫存器、非法 ST 發出寫入)。
+  形式 mutation 8 / 8 (不等 grant、ST 寫暫存器、err 不黏著、非法 ST 當合法、位址錯、寫入所有暫存器、非法 ST 發出寫入、
+  非法 TOPK 當合法)。排序網路在這個證明中以任意值替身 (網路本身由 `formal/npu_topk` 證明)。
 
 ### 結果
 
 | 項目 | 結果 |
 |---|---|
-| 位元一致 | 4 seed (22,624 + 3 × 約 5,980 個指令) + 9 個 kernel, 0 錯誤 |
-| coverage | line / branch / expr / toggle 100% (唯一豁免: BF16 擴展補上的 16 個低位恆為 0 [C]); covergroup 57 / 57、SVA cover 5 / 5 |
-| mutation | 49 / 49: 單元 39 (解碼 / 非法編碼、ready、ST 寫回、err、part 選擇、SUB、格式選擇、歸約節點、clock gate、BF16 儲存、MX / FP16 解碼、比例、INT32 捨入、max) + 向量引擎 `npu_vec_eng` 10 (命令保持、slot、取指、PC、韌體寫入、完成、err 清除、ready、clock gate、L2 grant) |
-| 形式證明 | prove PASS、cover PASS; 形式 mutation 7 / 7 |
+| 位元一致 | 4 seed (23,331 + 3 × 約 6,600 個指令, 含 TOPK 串流) + 10 個 kernel, 0 錯誤 |
+| coverage | line / branch / expr / toggle 100% (唯一豁免: BF16 擴展補上的 16 個低位恆為 0 [C]); covergroup 64 / 64、SVA cover 15 / 15 |
+| mutation | 61 / 61: TOPK 12 (非法編碼 ×2、fn 選擇、索引基底、同值順序、索引表來源 ×2、負數鍵、鍵還原、排序方向、合併) + 單元 39 (解碼 / 非法編碼、ready、ST 寫回、err、part 選擇、SUB、格式選擇、歸約節點、clock gate、BF16 儲存、MX / FP16 解碼、比例、INT32 捨入、max) + 向量引擎 `npu_vec_eng` 10 (命令保持、slot、取指、PC、韌體寫入、完成、err 清除、ready、clock gate、L2 grant) |
+| 形式證明 | npu_vec prove / cover PASS、npu_topk PASS; 形式 mutation 8 / 8 + 4 / 4 |
 
 ### Kernel (`dv/vec/vec_kernels.py`, D = 1024 個 FP32, 參考: float64 numpy 的數學定義, 輸入為同一組 FP32 值)
 
@@ -92,6 +124,7 @@ RTL 與參考模型位元一致; 拍數為 `+perf` (grant 全給、無空拍) �
 | SiLU | x · 1/(1 + e^-x) | 1.4e-7 (1e-5) | 450 | 2.28 |
 | INT32 × 比例 → BF16 | 反量化 GEMM 輸出 | 3.8e-3 (BF16 半 ulp 2^-8) | 161 | 6.4 |
 | MXFP8 E4M3 / E5M2、MXFP4 E2M1 解碼 | 對 OCP 元素值表 × 2^(X−127) | 0 (精確) | 32 | 8 / 8 / 16 |
+| top-16 (logit 量化到 1/8, 大量同值) | 每 16 個: LD + TOPK.I + TOPK.V | 對 numpy 穩定排序 (值降序、同值索引小者在前) 不符 0 個 | 196 | 5.2 |
 
 softmax 的誤差主要來自 x − max 的 FP32 捨入 (|x − max| 達 60 時 ulp ≈ 4e-6, 經 exp 放大為相對誤差), 是 FP32 本身的限制。
 

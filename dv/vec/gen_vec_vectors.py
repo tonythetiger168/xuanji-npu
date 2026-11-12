@@ -46,6 +46,20 @@ def rnd_line(r):
     return sum((r.choice(sp8) if r.random() < 0.4 else r.getrandbits(8)) << (8 * i) for i in range(64))
 
 
+def topk_stream(r, lines):
+    """初始化 (-inf, 0xFFFFFFFF) 後, 幾個 chunk: LD / SPLAT 候選 → TOPK 索引 → TOPK 值 (索引基底 = 16 × chunk)。"""
+    p = [V.enc('SPLAT', vd=6, imm=0xFF800000), V.enc('SPLAT', vd=7, imm=0xFFFFFFFF)]
+    base = r.choice([0, r.randint(0, 1 << 20) * 16, 0xFFFFFFE0])
+    for c in range(r.randint(1, 6)):
+        if r.random() < 0.2:                         # 全部同值的候選 (只靠索引決定)
+            p.append(V.enc('SPLAT', vd=1, imm=r.choice([0xFF800000, 0, 0x80000000, 0x3F800000, rnd_word(r)])))
+        else:
+            p.append(V.enc('LD', fn=r.choice([0, 0, 1, 2, 4]), vd=1, part=r.getrandbits(3), imm=127, line=r.choice(lines)))
+        imm = (base + 16 * c) & 0xFFFFFFFF
+        p += [V.enc('TOPK', fn=1, vd=7, va=1, vb=6, imm=imm), V.enc('TOPK', fn=0, vd=6, va=1, vb=6, imm=imm)]
+    return p
+
+
 def main():
     base = sys.argv[1]
     seed = int(sys.argv[2]) if len(sys.argv) > 2 else 1
@@ -56,7 +70,8 @@ def main():
     mem = dict(mem0)
     scales = [0, 1, 2, 100, 120, 126, 127, 128, 133, 140, 200, 240, 250, 253, 254, 255]
     prog = [V.enc('SPLAT', vd=i, imm=rnd_word(r)) for i in range(V.NV)]
-    ops = (['LD'] * 6 + ['ST'] * 3 + ['ADD', 'SUB', 'MUL'] * 2 + ['MAX', 'SFU', 'SFU', 'SPLAT', 'RSUM', 'RMAX', 'NOP'])
+    ops = (['LD'] * 6 + ['ST'] * 3 + ['ADD', 'SUB', 'MUL'] * 2 + ['MAX', 'SFU', 'SFU', 'SPLAT', 'RSUM', 'RMAX', 'NOP']
+           + ['TOPK'] * 2)
     for _ in range(n):
         x = r.random()
         if x < 0.004:
@@ -66,15 +81,22 @@ def main():
             prog.append(V.ERRCLR)
             continue
         if x < 0.02:                                 # 非法編碼
-            k = r.randint(0, 3)
-            op, fn = [(r.randint(11, 15), r.getrandbits(3)), (1, 7), (2, r.randint(2, 7)), (7, r.randint(6, 7))][k]
+            k = r.randint(0, 4)
+            op, fn = [(r.randint(12, 15), r.getrandbits(3)), (1, 7), (2, r.randint(2, 7)), (7, r.randint(6, 7)),
+                      (11, r.randint(2, 7))][k]
             prog.append(V.enc(op, fn=fn, vd=r.getrandbits(3), va=r.getrandbits(3), vb=r.getrandbits(3),
                               part=r.getrandbits(3), imm=r.getrandbits(32), line=r.choice(lines)))
             continue
+        if x < 0.03:                                 # TOPK 串流 (正常用法): v6 / v7 = 目前的前 16 值 / 索引
+            prog += topk_stream(r, lines)
+            continue
         op = r.choice(ops)
-        fn = {'LD': r.randint(0, 6), 'ST': r.randint(0, 1), 'SFU': r.randint(0, 5)}.get(op, r.getrandbits(3))
+        fn = {'LD': r.randint(0, 6), 'ST': r.randint(0, 1), 'SFU': r.randint(0, 5), 'TOPK': r.randint(0, 1)}.get(
+            op, r.getrandbits(3))
         imm = rnd_word(r) if op == 'SPLAT' else (r.choice(scales) | (r.getrandbits(24) << 8) if r.random() < 0.8
                                                  else r.getrandbits(32))
+        if op == 'TOPK' and r.random() < 0.5:        # 索引基底: 小值 / 接近 2^32 (回繞) / 任意
+            imm = r.choice([r.randint(0, 4096) * 16, 0xFFFFFFF0 + r.randint(0, 15), r.getrandbits(32)])
         ln = r.choice(lines) if r.random() < 0.95 else r.getrandbits(26)
         prog.append(V.enc(op, fn=fn, vd=r.getrandbits(3), va=r.getrandbits(3), vb=r.getrandbits(3),
                           part=r.getrandbits(3), imm=imm, line=ln))

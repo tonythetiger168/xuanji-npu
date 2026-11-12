@@ -39,7 +39,7 @@ module npu_vec_tb;
     if (kind == 2 && wr_data !== exp) begin
       n_err++; if (n_err < 10) $display("MISMATCH st ins=%h\n  got %h\n  exp %h", ci, wr_data, exp);
     end
-    if ((kind == 0 || kind == 3) && dut.we) begin
+    if ((kind == 0 || kind == 3) && (dut.we || rd_req || wr_req)) begin      // NOP / 非法: 不寫暫存器、不存取 L2
       n_err++; if (n_err < 10) $display("MISMATCH unexpected write ins=%h", ci);
     end
   endtask

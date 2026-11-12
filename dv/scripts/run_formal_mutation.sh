@@ -154,6 +154,13 @@ mut npu_vec $V ill_st       "(ins.op == VOP_ST && ins.fn > 3'd1)" "(ins.op == VO
 mut npu_vec $V rd_line      "assign rd_line   = ins.line;" "assign rd_line   = ins.line ^ 26'd1;"
 mut npu_vec $V reg_all      "if (we && ins.vd == 3'(r)) q <= wd;" "if (we) q <= wd;"
 mut npu_vec $V st_illegal   "wire is_st = ins_valid && !illegal && ins.op == VOP_ST;" "wire is_st = ins_valid && ins.op == VOP_ST;"
+mut npu_vec $V ill_topk     "(ins.op == VOP_TOPK && ins.fn > 3'd1)" "(ins.op == VOP_TOPK && ins.fn > 3'd2)"
+# npu_topk (TOPK 的 bitonic 網路; 0-1 原理, W = 1)
+mut npu_topk $V dir          "localparam bit DN = ((i >> p) & 1) == 0;" "localparam bit DN = 1'b1;"   # 每段都降序 (不再形成 bitonic 序列)
+# (整個方向顛倒 = 等價 mutant: a、b 都升序時 c 仍是 bitonic, 最後的降序合併照樣正確)
+mut npu_topk $V merge_rev    "(as[i] > bs[N-1-i]) ? as[i] : bs[N-1-i]" "(as[i] > bs[i]) ? as[i] : bs[i]"          # 合併前沒有反轉 b
+mut npu_topk $V merge_short  "assign y = t[LG];" "assign y = t[LG-1];"                                              # 少最後一層合併
+mut npu_topk $V sort_short   "if (m == 0) begin : g_a assign as = s[NS]; end" "if (m == 0) begin : g_a assign as = s[NS-1]; end"   # a 少最後一層排序
 R=rtl/npu/npu_ss_regs.sv
 mut npu_ss_regs rtl/npu/npu_ss_regs.sv no_restore "      if (ret_restore) r_ien <= ien_ret;" ""
 mut npu_ss_regs rtl/npu/npu_ss_regs.sv rest_lost_wr "      if (ret_restore) r_ien <= ien_ret;" "      if (ret_restore && !wr) r_ien <= ien_ret;"

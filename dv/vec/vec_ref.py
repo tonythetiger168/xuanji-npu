@@ -14,7 +14,7 @@ NV = 8                                           # 向量暫存器數
 QNAN = 0x7FC00000
 
 # 指令 (npu_vec_ins_t, 77 bit): {op[3:0], fn[2:0], vd[2:0], va[2:0], vb[2:0], part[2:0], imm[31:0], line[25:0]}
-OPS = dict(NOP=0, LD=1, ST=2, ADD=3, SUB=4, MUL=5, MAX=6, SFU=7, SPLAT=8, RSUM=9, RMAX=10)
+OPS = dict(NOP=0, LD=1, ST=2, ADD=3, SUB=4, MUL=5, MAX=6, SFU=7, SPLAT=8, RSUM=9, RMAX=10, TOPK=11)
 OPN = {v: k for k, v in OPS.items()}
 LD_FMT = dict(FP32=0, BF16=1, FP16=2, INT32=3, E4M3=4, E5M2=5, E2M1=6)    # LD 的 fn
 ST_FMT = dict(FP32=0, BF16=1)                                            # ST 的 fn
@@ -41,8 +41,10 @@ def dec(v):
 
 def legal(f):
     op, fn = f['op'], f['fn']
-    if op > 10:
+    if op > 11:
         return False
+    if op == 11:
+        return fn <= 1
     if op == 1:
         return fn <= 6
     if op == 2:
@@ -129,6 +131,20 @@ def fp_max(a, b):
     return a
 
 
+def tk_key(v, idx):
+    """TOPK 的排序鍵 (大者在前): {FP32 位元的 totalOrder 鍵, ~索引} (同值時索引小者在前)。"""
+    t = (~v & 0xFFFFFFFF) if v >> 31 else (v | 0x80000000)
+    return (t << 32) | (~idx & 0xFFFFFFFF)
+
+
+def topk(a, base, b, bi):
+    """候選 a (索引 base + lane) 與目前的 (b, bi) 共 32 個取前 16, 降序 → (值, 索引)。"""
+    ks = sorted([tk_key(a[i], (base + i) & 0xFFFFFFFF) for i in range(VL)] + [tk_key(b[i], bi[i]) for i in range(VL)],
+                reverse=True)[:VL]
+    vals = [((t >> 32) & 0x7FFFFFFF) if t >> 63 else (~(t >> 32) & 0xFFFFFFFF) for t in ks]
+    return vals, [~t & 0xFFFFFFFF for t in ks]
+
+
 SFU_F = [sfu_ref.sfu_recip, sfu_ref.sfu_rsqrt, sfu_ref.sfu_exp2, sfu_ref.sfu_exp, sfu_ref.sfu_sinpi, sfu_ref.sfu_cospi]
 
 
@@ -175,6 +191,9 @@ class Vec:
             res = [tree(list(a), fp_ref.fp_add)] * VL
         elif op == 'RMAX':
             res = [tree(list(a), fp_max)] * VL
+        elif op == 'TOPK':
+            vals, idx = topk(a, f['imm'], b, self.r[f['vd']])
+            res = idx if fn & 1 else vals
         if res is not None:
             self.r[f['vd']] = res
 

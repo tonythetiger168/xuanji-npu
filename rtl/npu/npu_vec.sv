@@ -8,9 +8,11 @@
 // npu_vec: 單發射、依序; 每拍執行一個指令 (LD / ST 等到 L2 grant)。
 //   指令以 valid / ready 交握, 等待期間指令須保持不變 (SVA 假設)。
 //   L2 介面同 npu_gemm_cu: 讀為組合式 (rd_data 與 rd_gnt 同拍), 寫在 wr_gnt 拍完成; 等待時請求保持。
-//   非法編碼 (op > 10、LD fn = 7、ST fn > 1、SFU fn > 5) 當成 NOP 接受並設定黏著的 err (reset 或 err_clr 清除)。
+//   非法編碼 (op > 11、LD fn = 7、ST fn > 1、SFU fn > 5、TOPK fn > 1) 當成 NOP 接受並設定黏著的 err (reset 或 err_clr 清除)。
 //   暫存器檔無 reset (資料暫存器); TB 開始時以 SPLAT 初始化。
 // 歸約 (RSUM / RMAX) 以固定順序的樹: 每層 x[i] = f(x[2i], x[2i+1]), 結果廣播到 vd 每個 lane。
+// TOPK (v6.3.14, LLM 取樣的 top-k / MoE 路由): 32 個 (值, 索引) = 候選 va (索引 imm + lane) 與目前的前 16 (vb, 索引表 vd),
+//   取前 16 降序 (npu_topk 的 bitonic 網路); fn 0 寫值, fn 1 寫索引。
 // 低功耗: 每個向量暫存器一個 clock gate, 只在寫入該暫存器的拍開啟 (test_en 強制開啟, 功能相同)。
 module npu_vec
   import npu_vec_pkg::*;
@@ -36,10 +38,12 @@ module npu_vec
   localparam int RW = $clog2(NV);
   logic [NV-1:0][VL-1:0][31:0] vr;                 // 向量暫存器檔
   wire  [VL-1:0][31:0] a = vr[RW'(ins.va)], b = vr[RW'(ins.vb)];
+  wire  [VL-1:0][31:0] c = vr[RW'(ins.vd)];          // TOPK fn 1: 目前的索引表
 
   // ---------------- 解碼 ----------------
-  wire illegal = (ins.op > VOP_RMAX) || (ins.op == VOP_LD && ins.fn == 3'd7) ||
-                 (ins.op == VOP_ST && ins.fn > 3'd1) || (ins.op == VOP_SFU && ins.fn > 3'd5);
+  wire illegal = (ins.op > VOP_TOPK) || (ins.op == VOP_LD && ins.fn == 3'd7) ||
+                 (ins.op == VOP_ST && ins.fn > 3'd1) || (ins.op == VOP_SFU && ins.fn > 3'd5) ||
+                 (ins.op == VOP_TOPK && ins.fn > 3'd1);
   wire is_ld = ins_valid && !illegal && ins.op == VOP_LD;
   wire is_st = ins_valid && !illegal && ins.op == VOP_ST;
   assign rd_req    = is_ld;
@@ -107,6 +111,24 @@ module npu_vec
     fp_max                  u_m (.a(tm[2*k]), .b(tm[2*k+1]), .y(tm[VL+k]));
   end
 
+  // ---------------- TOPK ----------------
+  // 排序鍵 (64 bit, 無號比較, 大者在前) = {FP32 的 totalOrder 鍵, ~索引}: 值相同時索引小者較大。
+  // totalOrder 鍵: 正數 (含 +0 / +inf / +NaN) 設最高位, 負數全部取反 → −NaN < −inf < … < −0 < +0 < … < +inf < +NaN。
+  logic [VL-1:0][63:0] ka, kb, ky;
+  logic [VL-1:0][31:0] tk_v, tk_i;
+  for (genvar i = 0; i < VL; i++) begin : g_tk
+    assign ka[i] = {a[i][31] ? ~a[i] : {1'b1, a[i][30:0]}, ~(ins.imm + 32'(i))};
+    assign kb[i] = {b[i][31] ? ~b[i] : {1'b1, b[i][30:0]}, ~c[i]};
+    assign tk_v[i] = ky[i][63] ? {1'b0, ky[i][62:32]} : ~ky[i][63:32];
+    assign tk_i[i] = ~ky[i][31:0];
+  end
+`ifdef FORMAL_TOP_npu_vec
+  (* anyseq *) logic [VL-1:0][63:0] f_ky;                // 控制證明: 排序網路以任意值替身 (網路本身見 formal/npu_topk)
+  assign ky = f_ky;
+`else
+  npu_topk #(.N(VL), .W(64)) u_topk (.a(ka), .b(kb), .y(ky));
+`endif
+
   // ---------------- 寫回 ----------------
   logic [VL-1:0][31:0] wd;
   always_comb
@@ -119,6 +141,7 @@ module npu_vec
       VOP_SFU:  wd = sfu_v;
       VOP_SPLAT: wd = {VL{ins.imm}};
       VOP_RSUM: wd = {VL{ts[2*VL-2]}};
+      VOP_TOPK: wd = ins.fn[0] ? tk_i : tk_v;
       default:  wd = {VL{tm[2*VL-2]}};              // RMAX (NOP / ST / 非法不寫入)
     endcase
 
@@ -153,8 +176,8 @@ module npu_vec
     end
   wire [3:0] f_op = ins[76:73];
   wire [2:0] f_fn = ins[72:70];
-  wire       f_ill = f_op > 4'd10 || (f_op == 4'd1 && f_fn == 3'd7) || (f_op == 4'd2 && f_fn > 3'd1) ||
-                     (f_op == 4'd7 && f_fn > 3'd5);
+  wire       f_ill = f_op > 4'd11 || (f_op == 4'd1 && f_fn == 3'd7) || (f_op == 4'd2 && f_fn > 3'd1) ||
+                     (f_op == 4'd7 && f_fn > 3'd5) || (f_op == 4'd11 && f_fn > 3'd1);
   wire f_ld   = ins_valid && !f_ill && f_op == 4'd1;
   wire f_st   = ins_valid && !f_ill && f_op == 4'd2;
   wire f_fire = ins_valid && ins_ready;
@@ -185,3 +208,78 @@ module npu_vec
   end
 `endif
 endmodule : npu_vec
+
+// npu_topk: 兩組各 N 個 W bit 鍵 (無號, 大者優先) 取前 N 個, 降序輸出。輸入不需要已排序。
+//   a、b 各自以 bitonic 排序 (降序), c[i] = max(a_s[i], b_s[N-1-i]) 為含前 N 個的 bitonic 序列, 再 bitonic 合併 (降序)。
+//   N = 16: 比較交換 2 × 80 + 16 + 32 = 208 個, 深度 10 + 1 + 4 = 15 (組合式, 與其他向量指令同拍)。
+/* verilator lint_off DECLFILENAME */            // 與 npu_vec 同檔 (所有檔案清單不用改)
+module npu_topk #(parameter int N = 16, parameter int W = 64) (
+  input  logic [N-1:0][W-1:0] a, b,
+  output logic [N-1:0][W-1:0] y
+);
+  localparam int LG = $clog2(N);
+  localparam int NS = LG * (LG + 1) / 2;               // bitonic 排序的層數
+  logic [N-1:0][W-1:0] as, bs, c;
+  for (genvar m = 0; m < 2; m++) begin : g_s
+    logic [NS:0][N-1:0][W-1:0] s;
+    if (m == 0) begin : g_ia assign s[0] = a; end
+    else begin : g_ib assign s[0] = b; end
+    for (genvar p = 1; p <= LG; p++) begin : g_p          // 子序列長度 2^p
+      for (genvar q = p - 1; q >= 0; q--) begin : g_q     // 比較距離 2^q
+        localparam int ST = p * (p - 1) / 2 + (p - 1 - q);
+        for (genvar i = 0; i < N; i++) begin : g_i
+          if ((i ^ (1 << q)) > i) begin : g_cas
+            localparam int L = i ^ (1 << q);
+            localparam bit DN = ((i >> p) & 1) == 0;        // 這段降序 (大者在 i); 最後一層 (p = LG) 全部降序
+            wire sw = DN ? (s[ST][L] > s[ST][i]) : (s[ST][i] > s[ST][L]);
+            assign s[ST+1][i] = sw ? s[ST][L] : s[ST][i];
+            assign s[ST+1][L] = sw ? s[ST][i] : s[ST][L];
+          end
+        end
+      end
+    end
+    if (m == 0) begin : g_a assign as = s[NS]; end
+    else begin : g_b assign bs = s[NS]; end
+  end
+  for (genvar i = 0; i < N; i++) begin : g_c
+    assign c[i] = (as[i] > bs[N-1-i]) ? as[i] : bs[N-1-i];
+  end
+  logic [LG:0][N-1:0][W-1:0] t;                        // bitonic 合併 (降序)
+  assign t[0] = c;
+  for (genvar q = LG - 1; q >= 0; q--) begin : g_m
+    localparam int ST = LG - 1 - q;
+    for (genvar i = 0; i < N; i++) begin : g_i
+      if ((i ^ (1 << q)) > i) begin : g_cas
+        localparam int L = i ^ (1 << q);
+        wire sw = t[ST][L] > t[ST][i];
+        assign t[ST+1][i] = sw ? t[ST][L] : t[ST][i];
+        assign t[ST+1][L] = sw ? t[ST][i] : t[ST][L];
+      end
+    end
+  end
+  assign y = t[LG];
+`ifdef FORMAL_TOP_npu_topk
+  // ---------------- 形式驗證 (formal/npu_topk; 組合式) ----------------
+  // y[r] 是 2N 個輸入中排第 r 的鍵: 嚴格大於 y[r] 的輸入 <= r 個, 且大於或等於 y[r] 的輸入 >= r + 1 個 (重複的鍵也成立)。
+  logic [N-1:0][$clog2(2*N+1)-1:0] f_gt, f_ge;
+  always_comb
+    for (int r = 0; r < N; r++) begin
+      f_gt[r] = '0; f_ge[r] = '0;
+      for (int j = 0; j < N; j++) begin
+        f_gt[r] = f_gt[r] + (a[j] > y[r]) + (b[j] > y[r]);
+        f_ge[r] = f_ge[r] + (a[j] >= y[r]) + (b[j] >= y[r]);
+      end
+    end
+  // 一個形式驗證用的狀態位元 (ABC 的 BMC 不接受純組合式網路); 第 2 拍起檢查, 輸入每拍任意
+  (* gclk *) wire f_clk;
+  logic f_s;
+  initial f_s = 1'b0;
+  always @(posedge f_clk) f_s <= 1'b1;
+  always @(*) if (f_s)
+    for (int r = 0; r < N; r++) begin
+      assert (32'(f_gt[r]) <= r && 32'(f_ge[r]) >= r + 1);
+      if (r > 0) assert (y[r-1] >= y[r]);
+    end
+`endif
+endmodule : npu_topk
+/* verilator lint_on DECLFILENAME */

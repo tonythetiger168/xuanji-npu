@@ -19,7 +19,7 @@ def main():
     r = random.Random(seed)
     lines = [r.getrandbits(26) for _ in range(8)] + list(range(100, 116)) + [M26 - i for i in range(4)]
     mem0 = {ln: G.rnd_line(r) for ln in lines}
-    ops = ['LD'] * 6 + ['ST'] * 3 + ['ADD', 'SUB', 'MUL'] * 2 + ['MAX', 'SFU', 'SPLAT', 'RSUM', 'RMAX', 'NOP']
+    ops = ['LD'] * 6 + ['ST'] * 3 + ['ADD', 'SUB', 'MUL'] * 2 + ['MAX', 'SFU', 'SPLAT', 'RSUM', 'RMAX', 'NOP', 'TOPK']
     cmds, progs = [], []
     used = set(lines)
     first = True
@@ -38,10 +38,10 @@ def main():
                 prog.append(V.enc('NOP'))
                 continue
             if r.random() < 0.03:
-                prog.append(V.enc(r.randint(11, 15), vd=r.getrandbits(3)))
+                prog.append(V.enc(r.randint(12, 15), vd=r.getrandbits(3)))
                 continue
             op = r.choice(ops)
-            fn = {'LD': r.randint(0, 6), 'ST': r.randint(0, 1), 'SFU': r.randint(0, 5)}.get(op, r.getrandbits(3))
+            fn = {'LD': r.randint(0, 6), 'ST': r.randint(0, 1), 'SFU': r.randint(0, 5), 'TOPK': r.randint(0, 1)}.get(op, r.getrandbits(3))
             imm = G.rnd_word(r) if op == 'SPLAT' else r.choice([120, 126, 127, 128, 135, 255]) | (r.getrandbits(24) << 8)
             prog.append(V.enc(op, fn=fn, vd=r.getrandbits(3), va=r.getrandbits(3), vb=r.getrandbits(3),
                               part=r.getrandbits(3), imm=imm, line=r.choice(lines)))
