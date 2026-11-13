@@ -1036,6 +1036,34 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
   // 讓通道在等待 grant 時另一個通道開始請求:
   //   偶數輪: LD A (→ 通道 0), 隔幾個 NOP 後 LD B (→ 通道 1): 通道 0 等待中、上次得主是 0, 通道 1 加入 (c_lock_0)
   //   奇數輪: 短 LD (→ 通道 0) 後長 LD (→ 通道 1), 再連續送短 LD: 通道 1 等待中、上次得主是 1, 通道 0 加入 (c_lock_1)
+  // directed: K = 0 的 VEC 不得送進向量引擎 (只回報完成, L2 不變)。程式 line 100 含 SPLAT + ST → line 108:
+  // 若 K = 0 的命令被執行, line 108 會被改寫 / 引擎的 SVA 失敗。之後再送一個 K = 2 的 VEC 確認同一段程式確實會寫。
+  // 放在所有隨機 batch 之後 (不改變先前 batch 的隨機序列)。
+  task automatic vec_k0();
+    npu_tile_cmd_t c;
+    logic [511:0] d;
+    npu_vec_pkg::npu_vec_ins_t x;
+    n_batch++;
+    p_cmd = 100; p_cpl = 100; p_rgnt = 100; p_wgnt = 100; p_rv = 100; fix_lat = -1; rlat = 2; test_en = 0;
+    d = '0;
+    x = '0; x.op = npu_vec_pkg::VOP_SPLAT; x.vd = 3'd0; x.imm = $urandom(); d[0 +: 77] = x;
+    x = '0; x.op = npu_vec_pkg::VOP_ST; x.va = 3'd0; x.line = 26'd108; d[128 +: 77] = x;
+    l2_bd_wr(l2i(26'd100), d); rl2[l2i(26'd100)] = d;
+    prog.delete(); prog_pos.delete(); cpl_pos.delete(); pidx = 0; ncpl = 0;
+    for (int t = 0; t < 3; t++) begin
+      c = '0; c.id = 8'(230 + t);
+      if (t == 1) c.op = NPU_OP_NOP;
+      else begin c.op = NPU_OP_VEC; c.k = (t == 0) ? 16'd0 : 16'd2; c.a = 26'd100; end
+      prog_pos[230 + t] = prog.size(); prog.push_back(c); ref_exec(c);
+    end
+    in_batch = 1;
+    while (ncpl != prog.size()) @(posedge clk);
+    in_batch = 0;
+    for (int w = 0; busy && w < 1000; w++) @(posedge clk);
+    check_state();
+    n_cmds += prog.size();
+  endtask
+
   task automatic rr_lock();
     npu_tile_cmd_t c;
     int kq [$];                            // 每個命令: > 0 = DMA_LD 的 k, 0 = NOP
@@ -1260,6 +1288,7 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
       pl.delete(); pl.push_back(pr == 5 ? 7 : pr); if (b == 13) pl.push_back(5); if (b == 3) pl.push_back(6);
       foreach (pl[i]) fill_all(pl[i]);
     end else batch((b % 5 == 0) ? 1 + ur(0, 3) : ur(nc / 2, nc), b == 1 && !$test$plusargs("no_big"));
+    vec_k0();
     $display("NPUSS: N=%0d NCU=%0d NB=%0d seed=%0d batches=%0d cmds=%0d (KV %0d MOE %0d) resets=%0d errors=%0d",
              N, NCU, NB, seed, n_batch, n_cmds, n_kv, n_moe, n_rst, n_err);
     if (n_err == 0) $display("TB PASS"); else $display("TB FAIL");
