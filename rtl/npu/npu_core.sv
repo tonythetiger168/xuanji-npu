@@ -10,7 +10,7 @@
 //   Xuanji-X1-Pro   N=16, NCU=8, NB=16  2048 MAC/拍
 //
 // host 介面:
-//   命令: cmd_valid / cmd_ready + {id, A / B / C line 位址, K, 有號性} (語意見 npu_gemm_cu), 先進 QD 項佇列,
+//   命令: cmd_valid / cmd_ready + {id, A / B / C line 位址, K, 有號性, 累加} (語意見 npu_gemm_cu), 先進 QD 項佇列,
 //         依序分派: 優先給編號最小的完全閒置 CU, 沒有時給編號最小的可接受命令 CU (輸入端閒置, 前一個命令
 //         還在輸出 / 寫回: 命令重疊, v6.3.12); 不同命令可同時在不同 CU 執行, 完成順序不保證。
 //         命令的 id 當作 tag 隨命令進入 CU, 完成時由 CU 帶回 (一個 CU 最多持有 3 個, 依序完成)。
@@ -40,6 +40,7 @@ module npu_core
   input  logic [25:0] cmd_a_line, cmd_b_line, cmd_c_line,
   input  logic [15:0] cmd_k,
   input  logic        cmd_a_signed, cmd_b_signed,
+  input  logic        cmd_acc,           // v6.3.14: C += A × B (寫回前讀舊的 C 相加; 見 npu_gemm_cu)
   // 完成
   output logic        cpl_valid,
   input  logic        cpl_ready,
@@ -72,6 +73,7 @@ module npu_core
     logic [25:0] a, b, c;
     logic [15:0] k;
     logic        sa, sb;
+    logic        acc;
   } cmd_t;
 
   // ---------------- 命令佇列 ----------------
@@ -104,7 +106,7 @@ module npu_core
       q <= '0; q_rd <= '0; q_wr <= '0; q_cnt <= '0;
     end else begin
       if (q_push) begin
-        q[q_wr] <= '{id: cmd_id, a: cmd_a_line, b: cmd_b_line, c: cmd_c_line, k: cmd_k, sa: cmd_a_signed, sb: cmd_b_signed};
+        q[q_wr] <= '{id: cmd_id, a: cmd_a_line, b: cmd_b_line, c: cmd_c_line, k: cmd_k, sa: cmd_a_signed, sb: cmd_b_signed, acc: cmd_acc};
         q_wr <= q_wr + 1'b1;
       end
       if (q_pop) q_rd <= q_rd + 1'b1;
@@ -138,7 +140,7 @@ module npu_core
       .clk(gclk), .rst_n(rst_n), .test_en(test_en),
       .cmd_valid(cu_v[i]), .cmd_ready(cu_ready[i]),
       .cmd_a_line(head.a), .cmd_b_line(head.b), .cmd_c_line(head.c), .cmd_k(head.k),
-      .cmd_a_signed(head.sa), .cmd_b_signed(head.sb), .cmd_tag(head.id),
+      .cmd_a_signed(head.sa), .cmd_b_signed(head.sb), .cmd_acc(head.acc), .cmd_tag(head.id),
       .done(cu_done[i]), .done_ready(cu_dack[i]), .done_tag(cu_dtag[i]), .busy(cu_busy[i]), .feeding(cu_feed[i]),
       .rd_req(c_rq), .rd_line(c_rl), .rd_gnt(c_rg), .rd_data(c_rd),
       .wr_req(wr_req[i]), .wr_line(wr_line[i]), .wr_data(wr_data[i]), .wr_gnt(wr_gnt[i]));

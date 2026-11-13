@@ -6,4 +6,5 @@ files: rtl/common/orca_pkg.sv rtl/common/clock_gate.sv rtl/npu/npu_mma.sv rtl/np
 free: npu_mma
 params: N=4
 reset: rst_n
-prove: wst != 2'd2 || lr
+# 累加模式: W_OUT -> W_RD -> W_WR, W_RD 期間 lr 不變, 所以把 W_RD 一起納入才是歸納不變式
+prove: (wst != 3'd2 && wst != 3'd4) || lr

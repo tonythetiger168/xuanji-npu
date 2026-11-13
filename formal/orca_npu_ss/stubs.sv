@@ -18,6 +18,7 @@ module npu_core #(parameter int N = 8, NCU = 4, NB = 4, DEPTH = 1024, QD = 4) (
   input  logic cmd_valid, output logic cmd_ready, input logic [7:0] cmd_id,
   input  logic [25:0] cmd_a_line, cmd_b_line, cmd_c_line, input logic [15:0] cmd_k,
   input  logic cmd_a_signed, cmd_b_signed,
+  input  logic cmd_acc,
   output logic cpl_valid, input logic cpl_ready, output logic [7:0] cpl_id,
   input  logic h_rd_req, input logic [25:0] h_rd_line, output logic h_rd_gnt, output logic [511:0] h_rd_data,
   input  logic h_wr_req, input logic [25:0] h_wr_line, input logic [511:0] h_wr_data, output logic h_wr_gnt,

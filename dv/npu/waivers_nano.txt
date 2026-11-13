@@ -1,5 +1,5 @@
 # Xuanji-X1-Nano (N=4): 結構常數
-branch npu_gemm_cu\.sv:\d+ \S* cond_else # [C] N=4: C (4x4 INT32 = 64 B) 只佔 1 個 line, 寫回的 line 必含最後一列 (lr 恆 1)
-expr npu_gemm_cu\.sv:\d+ \S* \(lr==0\) => 0 # [C] 同上
+# [C] N=4: C (4x4 INT32 = 64 B) 只佔 1 個 line, 寫回的 line 必含最後一列 (lr 恆 1)
 covergroup npu_gemm_cu_sva\.sv:\d+ .*mid_line # [C] 同上: 沒有「還有下一個 C line」的寫回
+toggle npu_gemm_cu\.sv:\d+\s+w_nxt\[[02]\]: # [C] N <= 16: W_WR 拿到 grant 後只會到 W_OUT (3'd1) / W_DONE (3'd3); W_RD 只在 N = 32 的前半之後
 fsm_arc fsm_npu_gemm_cu\.sv:\d+ .*fsmA_wst_W_WR_to_W_OUT # [U:npu_gemm_cu_n4] 同上 (Yosys 證明 wst==W_WR -> lr, 見 dv/formal_cov/npu_gemm_cu_n4.prove)

@@ -27,7 +27,7 @@ module npu_core_tb #(parameter int N = 8, parameter int NCU = 4, parameter int N
   localparam int LB = $clog2(LINES);
 
   logic clk = 1'b0, rst_n = 1'b0, test_en = 1'b0;
-  logic cmd_valid = 1'b0, cmd_ready, cmd_a_signed = 1'b0, cmd_b_signed = 1'b0;
+  logic cmd_valid = 1'b0, cmd_ready, cmd_a_signed = 1'b0, cmd_b_signed = 1'b0, cmd_acc = 1'b0;
   logic [7:0] cmd_id = '0;
   logic [25:0] cmd_a_line = '0, cmd_b_line = '0, cmd_c_line = '0;
   logic [15:0] cmd_k = 16'd1;
@@ -44,7 +44,7 @@ module npu_core_tb #(parameter int N = 8, parameter int NCU = 4, parameter int N
   npu_core #(.N(N), .NCU(NCU), .NB(NB), .DEPTH(DEPTH)) dut (.*);
 
   // ---------------- 命令記錄 ----------------
-  typedef struct { int k; bit sa, sb; int slot, ns; logic [25:0] a, b, c; logic [31:0] C []; } rec_t;
+  typedef struct { int k; bit sa, sb, acc; int slot, ns; logic [25:0] a, b, c; logic [31:0] C []; } rec_t;
   rec_t inflight [int];                 // id -> 記錄
   bit   pend_ids [int];                 // 已準備、尚未送出的 id
   bit   slot_busy [NSLOT];
@@ -110,7 +110,7 @@ module npu_core_tb #(parameter int N = 8, parameter int NCU = 4, parameter int N
     for (int i = 0; i < ns; i++) slot_busy[s + i] = 1;
     r.ns = ns;
     off = ur(0, ns * SLOT - 2 * al - CL);                // slot 內隨機起點: A / B / C 落在不同 bank
-    r.k = k; r.sa = 1'($urandom()); r.sb = 1'($urandom()); r.slot = s;
+    r.k = k; r.sa = 1'($urandom()); r.sb = 1'($urandom()); r.slot = s; r.acc = (ur(0, 2) == 0);   // 1/3 累加 (C += A × B)
     // 低位: slot 內位置; 高位 (xbar 只解碼低 LB bit) 各自隨機 — 涵蓋 CU / xbar 位址的所有位元
     r.a = 26'(s * SLOT + off); r.b = r.a + 26'(al); r.c = r.b + 26'(al);
     r.a[25:LB] = (25 - LB + 1)'($urandom()); r.b[25:LB] = (25 - LB + 1)'($urandom()); r.c[25:LB] = (25 - LB + 1)'($urandom());
@@ -129,8 +129,14 @@ module npu_core_tb #(parameter int N = 8, parameter int NCU = 4, parameter int N
       host_write(r.b + 26'(l), ln);
     end
     r.C = new[N * N];
+    if (r.acc) for (int l = 0; l < CL; l++) begin                   // 累加: 舊的 C = 隨機
+      ln = {16{$urandom()}};
+      for (int e = 0; e < 16; e++) ln[32 * e +: 32] = $urandom();
+      host_write(r.c + 26'(l), ln);
+      for (int e = 0; e < 16 && 16 * l + e < N * N; e++) r.C[16 * l + e] = ln[32 * e +: 32];
+    end
     for (int i = 0; i < N; i++) for (int j = 0; j < N; j++) begin
-      longint acc = 0;
+      longint acc = r.acc ? longint'(r.C[i * N + j]) : 0;
       for (int kk = 0; kk < k; kk++)
         acc += (r.sa ? longint'($signed(A[i][kk])) : longint'(A[i][kk])) * (r.sb ? longint'($signed(B[kk][j])) : longint'(B[kk][j]));
       r.C[i * N + j] = 32'(acc);
@@ -142,7 +148,7 @@ module npu_core_tb #(parameter int N = 8, parameter int NCU = 4, parameter int N
   task automatic issue(rec_t r, logic [7:0] id);
     inflight[id] = r; pend_ids.delete(id);
     cmd_valid = 1'b1; cmd_id = id; cmd_a_line = r.a; cmd_b_line = r.b; cmd_c_line = r.c; cmd_k = 16'(r.k);
-    cmd_a_signed = r.sa; cmd_b_signed = r.sb;
+    cmd_a_signed = r.sa; cmd_b_signed = r.sb; cmd_acc = r.acc;
     do begin #4; if (cmd_ready) break; @(posedge clk); #1; end while (1);
     @(posedge clk); #1;
     cmd_valid = 1'b0; cmd_id = 8'($urandom()); cmd_a_line = 26'($urandom()); cmd_k = 16'($urandom());
@@ -235,7 +241,7 @@ module npu_core_tb #(parameter int N = 8, parameter int NCU = 4, parameter int N
   task automatic abort_burst();
     for (int c = 0; c < QD + NCU; c++) begin
       rec_t r; logic [7:0] id;
-      r.k = ur(256, 65535); r.sa = 1'($urandom()); r.sb = 1'($urandom()); r.slot = -1; r.ns = 0;
+      r.k = ur(256, 65535); r.sa = 1'($urandom()); r.sb = 1'($urandom()); r.acc = 1'($urandom()); r.slot = -1; r.ns = 0;
       r.a = 26'($urandom()); r.b = 26'($urandom()); r.c = 26'($urandom());
       do id = 8'($urandom()); while (inflight.exists(id));
       issue(r, id);                       // inflight 記錄讓「只寫 C 區」檢查接受其寫入
@@ -322,7 +328,7 @@ module npu_core_tb #(parameter int N = 8, parameter int NCU = 4, parameter int N
     rec_t r; logic [511:0] ln;
     int k = ur(32768, 65535);
     for (int b = 0; b < NB; b++) for (int d = 0; d < DEPTH; d++) dut.u_l2.mem[b][d] = {16{$urandom()}};
-    r.k = k; r.sa = 1'($urandom()); r.sb = 1'($urandom()); r.slot = 0; r.ns = 1;
+    r.k = k; r.sa = 1'($urandom()); r.sb = 1'($urandom()); r.acc = 1'b0; r.slot = 0; r.ns = 1;
     r.a = 26'($urandom()); r.b = 26'($urandom()); r.c = 26'($urandom());
     r.C = new[N * N];
     for (int i = 0; i < N; i++) for (int j = 0; j < N; j++) begin
