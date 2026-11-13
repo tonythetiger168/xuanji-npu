@@ -76,6 +76,7 @@ npu_core 加上命令前端與 DMA, 成為可以直接下命令的子系統 (由
 命令 ──► 命令佇列 (QD=8) ──► 依序分派 ──┬─► npu_core (GEMM, 多個 CU 同時執行)
                                        ├─► npu_ss_dma (外部記憶體 ⇄ L2, 64 B line) ─┐ npu_l2_arb2: 共用
                                        ├─► npu_vec_eng (VEC: 向量程式)  ──────────┘ npu_core 的 host L2 埠
+                                       ├─► npu_llm_eng (KV / MOE 表格) ──────────── (第二個 npu_l2_arb2)
                                        └─► NOP (wt=1 時即 fence)
                     完成合併 (round-robin, 輸出暫存保持) ◄┘──► cpl_valid + id, irq
 ```
@@ -85,7 +86,9 @@ npu_core 加上命令前端與 DMA, 成為可以直接下命令的子系統 (由
 | `GEMM` | C = A × B (INT8 → INT32, 資料已在 L2); ext[0] = 1 (v6.3.14) 時 **C += A × B** (累加, 見下「GEMM 累加」); K = 0 時只回報完成 |
 | `DMA_LD` / `DMA_ST` | 外部記憶體 → L2 / L2 → 外部記憶體, k 個 line (k = 0 時立即完成); 位址模數環繞。2D (v6.3.11): b[15:0] = 每列 line 數 (0 = 1D), c = 外部列距 (line) — 第 i 個 line 的外部位址 = ext + (i / cols) × c + i % cols, L2 端連續。載入時解碼 (v6.3.13, 只對 LD): b[17:16] = 0 COPY / 1 INT4 / 2 UINT4 / 3 MXFP4。間接 gather / scatter (v6.3.13): b[18] = 1, c = 位址表的 L2 line, b[15:0] = 每項 line 數; 見下方「DMA 引擎 npu_dma」 |
 | `VEC` (op 4) | 執行 L2 line `a` 起的 `k` 個向量指令 (每 line 4 個; `docs/npu_vec.md`); k = 0 時只回報完成; 遇到非法指令時 `vec_err` 一拍 |
-| `NOP` (op 3; 保留的 op 5–7 同 NOP) | 只回報完成 |
+| `KV` (op 5, v6.3.13) | paged KV cache 頁管理 (ALLOC / FREE / FREE_SEQ / SHARE) 與 MAP (區塊表 → 間接 DMA 的位址表); 欄位與結果見 `docs/npu_llm.md` |
+| `MOE` (op 6, v6.3.13) | 從 L2 的 top-k 結果產生 MoE gather 位址表、combine 表、各 expert 數量; 見 `docs/npu_llm.md` |
+| `NOP` (op 3; 保留的 op 7 同 NOP) | 只回報完成 |
 
 - **等待旗標 `wt`**: 先前所有命令完成 (結果已寫入, 完成已移入輸出暫存) 後才分派。沒有 `wt` 的命令可與先前的命令並行
   (例如 GEMM 執行時 DMA 載入下一批資料); 軟體須保證並行命令的 L2 / 外部區域不重疊, 否則設 `wt`。

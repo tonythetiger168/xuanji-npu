@@ -23,7 +23,8 @@ SRC="-Irtl/common -Irtl/fp rtl/common/orca_pkg.sv rtl/common/clock_gate.sv rtl/n
   rtl/fp/fp_mx_scale.sv rtl/fp/fp_from_int.sv rtl/npu/npu_vec.sv dv/vec/npu_vec_sva.sv rtl/npu/npu_vec_eng.sv dv/vec/npu_vec_eng_sva.sv
   rtl/npu/npu_l2_arb2.sv dv/npu/npu_l2_arb2_sva.sv dv/npu/npu_rr_lock_sva.sv
   rtl/npu/npu_gemm_cu.sv dv/npu/npu_gemm_cu_sva.sv rtl/npu/npu_l2_xbar.sv dv/npu/npu_l2_xbar_sva.sv
-  rtl/npu/npu_core.sv dv/npu/npu_core_sva.sv rtl/npu/npu_dma.sv rtl/npu/npu_rr_lock.sv rtl/npu/npu_dma_mc.sv rtl/npu/orca_npu_ss.sv
+  rtl/npu/npu_core.sv dv/npu/npu_core_sva.sv rtl/npu/npu_dma.sv rtl/npu/npu_rr_lock.sv rtl/npu/npu_dma_mc.sv rtl/npu/orca_npu_ss.sv rtl/npu/npu_kv_pager.sv rtl/npu/npu_moe_disp.sv rtl/npu/npu_llm_eng.sv
+  dv/npu_kv/npu_kv_pager_sva.sv dv/npu_moe/npu_moe_disp_sva.sv dv/npu_llm/npu_llm_eng_sva.sv
   dv/npu/npu_ss_sva.sv dv/npu/npu_ss_e2e_sva.sv dv/npu/npu_ss_tb.sv"
 if [ "${REPORT_ONLY:-0}" != 1 ]; then
 # 建置印記: 參數 + 原始碼內容的雜湊; RESUME 時相同就不重建

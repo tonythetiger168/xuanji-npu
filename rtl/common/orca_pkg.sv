@@ -469,7 +469,9 @@ package orca_pkg;
     NPU_OP_DMA_LD = 3'd1,   // 外部 ext.. → L2 a.., k 個 line
     NPU_OP_DMA_ST = 3'd2,   // L2 a.. → 外部 ext.., k 個 line
     NPU_OP_NOP    = 3'd3,   // 只回報完成 (wt = 1 時即 fence)
-    NPU_OP_VEC    = 3'd4    // 向量程式: 從 L2 line a 起的 k 個指令 (npu_vec_eng); 5..7 保留 (當 NOP)
+    NPU_OP_VEC    = 3'd4,   // 向量程式: 從 L2 line a 起的 k 個指令 (npu_vec_eng)
+    NPU_OP_KV     = 3'd5,   // v6.3.13: paged KV cache 頁管理 / 間接 DMA 索引表 (npu_llm_eng, docs/npu_llm.md)
+    NPU_OP_MOE    = 3'd6    // v6.3.13: MoE dispatch 表 (npu_llm_eng); 7 保留 (當 NOP)
   } npu_op_e;
   typedef struct packed {
     npu_op_e     op;
