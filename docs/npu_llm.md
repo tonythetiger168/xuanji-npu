@@ -8,7 +8,7 @@ KV 資料與 token activation 的搬移由 DMA 間接模式 (`rtl/npu/npu_dma.sv
 已接進 `orca_npu_ss` (v6.3.13): KV / MOE 命令依序分派到引擎 (一次一個; 引擎閒置且完成槽空時), 完成合併多一個來源
 (5 個來源 round-robin), host L2 埠以第二個 `npu_l2_arb2` 與 DMA / VEC 共用; 子系統 CRV 的參考模型含 KV 頁管理狀態與
 MOE dispatch, 形式證明 (orca_npu_ss 前端) 含 LLM 引擎的契約替身。
-**尚未**: 端到端 (attention / MoE 層對照 numpy)。尚未合成。
+端到端 (paged attention 的 KV cache 與 MoE 層, 對照 numpy) 見文末。**尚未**: 合成; MoE expert GEMM 直接使用收集結果 (見文末限制)。
 
 子系統參數 (orca_npu_ss): `KV_NP` 256 頁、`KV_NSEQ` 16 序列、`KV_NSLOT` 64 區塊 / 序列、`KV_BS` 16 token / 區塊、
 `KV_RW` 3 (共享上限 7)、`MOE_NEXP` 64 expert、`MOE_PW` 14 (每個命令 < 16384 個項目)、`MOE_TW` 12 (每個命令 < 4096 個 token)。
@@ -81,3 +81,20 @@ GL 依 pos 寫入 (讀 − 改 − 寫), 其他區依序累積成整個 line 再
   tr_hit 本來就是 0) → RTL 拿掉多餘的條件, mutant 改為「超出範圍時仍送轉換」(slot 回繞)。
 - RTL: 寬度依合法命令的界限重新決定 (MAP 的 k ≤ NSLOT、MOE 的 T < 2^TW), toggle coverage 才能收斂;
   原本 32 bit 的計數器高位永遠不動。
+
+## 端到端 (`dv/scripts/run_npu_llm_e2e.sh`, `dv/npu_llm/llm_e2e.py`)
+
+在 `orca_npu_ss` 上依序執行一段命令程式 (情境檔由 numpy 產生, TB `dv/npu_llm/npu_llm_e2e_tb.sv` 只負責執行與輸出外部記憶體),
+期望值由 numpy 獨立計算。外部記憶體的讀 / 寫 grant 與完成 ready 隨機。
+
+| 情境 | 命令流程 | 比對 |
+|---|---|---|
+| paged attention (KV cache) | KV ALLOC 序列 0 的 5 頁; SHARE 序列 1 共享前 3 頁 (prefix); ALLOC 序列 1 自己的 2 頁; DMA_LD 連續的 K (GEMM 的 B 運算元 layout, 1 頁 = N 個 token) → KV MAP (mult = 每頁 line 數) → 間接 DMA_ST 把 K 散到外部記憶體的頁; decode: MAP 序列 1 的 6 個 slot (最後一個未映射) → 間接 DMA_LD gather 回 L2 → 每頁一個 GEMM 算 Q·K^T; 最後 FREE_SEQ / FREE / ALLOC (FIFO 重複使用) 與錯誤命令 | 外部記憶體中每頁的內容、16 個 KV 結果 line、3 個位址表與其結果 line、gather 結果 (未映射的頁 = 0)、注意力分數 (int32, numpy matmul) |
+| MoE 層 | numpy router (偏斜, 每 token top-2 / 8 expert, softmax 權重 FP32, 含一個超出範圍的 id) → DMA_LD top-k → MOE (容量模式 cap 5, 與無丟棄模式各一次) → 間接 DMA_LD 依 GL 收集 token | GL / CT / CN / 狀態 line (以 numpy 另外實作的規格); 收集結果; MoE 層輸出: 以硬體的 CT + 收集結果 + 每個 expert 的運算 (numpy, f_e(x) = (e + 1)·x) 算出 y_t, 與 numpy 直接計算的 Σ_k w_k·f_e(x_t) (容量模式排除被丟棄的項) 完全相同 |
+
+nano / x1 / pro 各 3 個 seed 全部通過 (CI: x1 3 個 seed)。
+
+**限制 (後續工作)**: 每個 expert 的 GEMM 還不能直接用收集結果 — GEMM 的 A / B 運算元 layout 是「一個 line 放 SPL 個
+k × N 列」交錯排列, 以 token 為單位 (一個 token = 連續的 line) gather 出來的資料不是這個 layout。需要在 DMA 加一個
+「token 列 → GEMM 運算元」的轉置格式, 或以向量核轉置; 目前 expert 的運算在 numpy 端。paged attention 不受影響: KV 頁
+直接以 B 運算元 layout 存放 (1 頁 = N 個 token)。
