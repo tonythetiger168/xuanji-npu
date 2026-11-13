@@ -41,7 +41,7 @@ PY
     -GN=$N -GNCU=$NCU -GNB=$NB -GDEPTH=$DEPTH -GOUT=$TILE_OUT --Mdir "$M/$n.obj" -Irtl/common -Irtl/fp \
     rtl/common/orca_pkg.sv rtl/common/clock_gate.sv rtl/npu/npu_mma.sv dv/npu/npu_mma_sva.sv $FP $arb dv/npu/npu_l2_arb2_sva.sv dv/npu/npu_rr_lock_sva.sv \
     rtl/npu/npu_gemm_cu.sv dv/npu/npu_gemm_cu_sva.sv rtl/npu/npu_l2_xbar.sv dv/npu/npu_l2_xbar_sva.sv \
-    rtl/npu/npu_core.sv dv/npu/npu_core_sva.sv $dma $rr $mc $tile dv/npu/npu_ss_sva.sv dv/npu/npu_ss_e2e_sva.sv dv/npu/npu_ss_tb.sv \
+    rtl/npu/npu_core.sv dv/npu/npu_core_sva.sv $dma $rr $mc $tile rtl/npu/npu_kv_pager.sv rtl/npu/npu_moe_disp.sv rtl/npu/npu_llm_eng.sv dv/npu/npu_ss_sva.sv dv/npu/npu_ss_e2e_sva.sv dv/npu/npu_ss_tb.sv \
     --top-module npu_ss_tb > "$M/$n.build" 2>&1 || { echo "$n: BUILD FAIL"; rm -rf "$M/$n.obj"; surv=1; return; }
   timeout 1800 "$M/$n.obj/Vnpu_ss_tb" +seed=7 +batches=$NBT +no_big > "$M/$n.log" 2>&1
   # 全 0 上電通過時, 再以隨機上電狀態 (未 reset 的儲存為隨機值) 執行
@@ -65,7 +65,7 @@ mut oc_early     $TILE "oc <= oc + OCW'(q_pop) - OCW'(load);" "oc <= oc + OCW'(q
 mut dma_slot     $MC "wire [NDC-1:0] c_free = c_ready & ~cv;" "wire [NDC-1:0] c_free = c_ready;"     # 通道完成槽未空就分派
 mut k0_to_core   $TILE "((head.op == NPU_OP_GEMM || head.op == NPU_OP_VEC) && head.k == '0)" "(head.op == NPU_OP_VEC && head.k == '0)"                                               # K = 0 送進 npu_core
 mut cpl_no_hold  $TILE "wire load = (src_v != '0) && (!cpl_valid || cpl_ready);" "wire load = (src_v != '0);"         # 完成輸出不保持
-mut cpl_fixed    $TILE "last      <= sel[0] ? 2'd0 : sel[1] ? 2'd1 : sel[2] ? 2'd2 : 2'd3;" "last      <= 2'd3;"                       # 完成合併固定優先權
+mut cpl_fixed    $TILE "last      <= sel[0] ? 3'd0 : sel[1] ? 3'd1 : sel[2] ? 3'd2 : sel[3] ? 3'd3 : 3'd4;" "last      <= 3'd4;"                       # 完成合併固定優先權
 mut dma_id       $MC "if (c_take[i]) c_id[i] <= cmd_id;" "if (cmd_valid) c_id[i] <= cmd_id;"          # DMA 通道忙碌時 id 被覆蓋
 mut q_full       $TILE "assign cmd_ready = (q_cnt != (QW+1)'(QD));" "assign cmd_ready = 1'b1;"                         # 佇列滿仍收命令
 mut dma_gate     $MC ".en(c_busy[i] || c_take[i] || !rst_n)" ".en(c_busy[i] || !rst_n)"              # 閘控未涵蓋分派拍
@@ -128,11 +128,20 @@ mut ind_n        $DMA "n <= cmd_ind ? cmd_n * ((cmd_cols == '0) ? 16'd1 : cmd_co
 # ---- VEC 分派 / 完成槽 / host 埠共用 (v6.3.10) ----
 mut vec_no_wait  $TILE "wire g_vec  = go && head.op == NPU_OP_VEC && !h_nop && !vec_cv;" "wire g_vec  = go && head.op == NPU_OP_VEC && !h_nop;"   # 完成槽被佔用仍分派 (覆蓋 vec_id)
 mut vec_k0       $TILE "((head.op == NPU_OP_GEMM || head.op == NPU_OP_VEC) && head.k == '0);" "(head.op == NPU_OP_GEMM && head.k == '0);"   # K = 0 的 VEC 送引擎
-mut rsvd_op      $TILE "wire h_nop  = head.op == NPU_OP_NOP || head.op > NPU_OP_VEC ||" "wire h_nop  = head.op == NPU_OP_NOP ||"   # 保留 op 卡住
+mut rsvd_op      $TILE "wire h_nop  = head.op == NPU_OP_NOP || head.op > NPU_OP_MOE ||" "wire h_nop  = head.op == NPU_OP_NOP ||"   # 保留 op 卡住
 mut vec_id       $TILE "      if (v_take) vec_id <= head.id;" "      if (g_vec) vec_id <= head.id;"                                    # 引擎忙碌時也覆寫 id
 mut vec_err_gate $TILE "assign vec_err = v_done && v_derr;" "assign vec_err = v_derr;"                                                  # vec_err 不只在完成拍
-mut vec_sel      $TILE "cpl_id    <= sel[0] ? c_cpl_id : sel[1] ? d_cpl_id : sel[2] ? nop_id : vec_id;" "cpl_id    <= sel[0] ? c_cpl_id : sel[1] ? d_cpl_id : nop_id;"   # VEC 完成回報錯的 id
-mut rr4          $TILE "automatic int s = (int'(last) + 1 + i) % 4;" "automatic int s = (int'(last) + 1 + i) % 3;"                          # round-robin 漏掉 VEC
+mut vec_sel      $TILE "sel[2] ? nop_id : sel[3] ? vec_id : llm_id;" "sel[2] ? nop_id : sel[3] ? nop_id : llm_id;"   # VEC 完成回報錯的 id
+mut rr4          $TILE "automatic int s = (int'(last) + 1 + i) % NSRC;" "automatic int s = (int'(last) + 1 + i) % (NSRC - 1);"            # round-robin 漏掉 LLM
+# ---- LLM 引擎 (KV / MOE, v6.3.13) 的接入 ----
+mut llm_slot     $TILE "&& !llm_cv && !l_busy;" "&& !l_busy;"                                                   # 完成槽被佔用仍分派 (覆蓋 llm_id)
+mut llm_id       $TILE "if (g_llm) llm_id <= head.id;" "if (l_done) llm_id <= head.id;"                         # id 在完成時才記 (已是別的命令)
+mut llm_sel      $TILE "sel[3] ? vec_id : llm_id;" "sel[3] ? vec_id : vec_id;"                                  # LLM 完成回報錯的 id
+mut llm_rsvd     $TILE "head.op > NPU_OP_MOE ||" "head.op > NPU_OP_VEC ||"                                      # KV / MOE 當 NOP
+mut llm_op       $TILE ".cmd_op(head.op == NPU_OP_MOE)" ".cmd_op(head.op[0])"                                   # KV / MOE 解碼錯
+mut llm_rd_line  $TILE ".rd_line({l_rd_line, p_rd_line})" ".rd_line({p_rd_line, p_rd_line})"                    # host 讀埠: LLM 的位址沒有送出
+mut llm_wr_data  $TILE ".wr_data({l_wr_data, p_wr_data})" ".wr_data({p_wr_data, p_wr_data})"                    # host 寫埠: LLM 的資料錯
+mut llm_clr      $TILE "else if (load && sel[4]) llm_cv <= 1'b0;" "else if (load) llm_cv <= 1'b0;"              # 別的來源被選中時 LLM 完成遺失
 # (busy 拿掉 v_busy 是等價 mutant: 形式證明的不變式 oc = core 內 + DMA + NOP + (v_busy || vec_cv), v_busy ⇒ oc != 0 ⇒ busy)
 mut arb_nolock   $ARB "wire  r_sel  = r_lock ? r_own : r_pick;" "wire  r_sel  = r_pick;"                                               # 等待中換主端 (違反保持)
 mut arb_nolock_w $ARB "wire  w_sel  = w_lock ? w_own : w_pick;" "wire  w_sel  = w_pick;"                                               # 寫入等待中換主端

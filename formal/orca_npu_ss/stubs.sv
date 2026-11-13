@@ -6,6 +6,7 @@
 //   npu_dma_mc (v6.3.13): 最多 NDC 個未回報命令; 執行中的命令任意一拍完成, 進入待回報 (cpl_valid, id 任意)。
 //             npu_dma_mc / npu_dma 本身另外形式證明。
 //   npu_vec_eng: 同 DMA (只在 idle 接受; done 在忙碌中任意一拍; derr 任意); L2 埠不發請求 (仲裁器另外形式證明)。
+//   npu_llm_eng (v6.3.13): 同 VEC (只在 idle 接受; done 一拍, 在忙碌中任意一拍; busy 含 done 那一拍); L2 埠不發請求。
 //   clock_gate: 直通 (閘控安全以 orca_npu_ss 內的組合性質檢查 en)。
 `include "orca_pkg.sv"
 module clock_gate (input logic clk, en, test_en, output logic clk_out);
@@ -85,6 +86,27 @@ module npu_vec_eng #(parameter int NV = 8) (
   (* anyseq *) logic fin_any, err_any;
   logic act;
   assign cmd_ready = !act && !done; assign busy = act || done; assign derr = err_any;
+  assign rd_req = 0; assign rd_line = 0; assign wr_req = 0; assign wr_line = 0; assign wr_data = 0;
+  always @(posedge clk or negedge rst_n)
+    if (!rst_n) begin act <= 0; done <= 0; end
+    else begin
+      done <= act && fin_any;
+      if (cmd_valid && cmd_ready) act <= 1;
+      else if (act && fin_any) act <= 0;
+    end
+endmodule
+
+module npu_llm_eng #(parameter int NP = 64, NSEQ = 8, NSLOT = 16, BS = 16, RW = 3, NEXP = 16, PW = 14, TW = 12) (
+  input  logic clk, rst_n, test_en,
+  input  logic cmd_valid, output logic cmd_ready, input logic cmd_op,
+  input  logic [25:0] cmd_a, cmd_b, cmd_c, input logic [31:0] cmd_ext, input logic [15:0] cmd_k,
+  output logic done, busy,
+  output logic rd_req, output logic [25:0] rd_line, input logic rd_gnt, input logic [511:0] rd_data,
+  output logic wr_req, output logic [25:0] wr_line, output logic [511:0] wr_data, input logic wr_gnt
+);
+  (* anyseq *) logic fin_any;
+  logic act;
+  assign cmd_ready = !act; assign busy = act || done;
   assign rd_req = 0; assign rd_line = 0; assign wr_req = 0; assign wr_line = 0; assign wr_data = 0;
   always @(posedge clk or negedge rst_n)
     if (!rst_n) begin act <= 0; done <= 0; end
