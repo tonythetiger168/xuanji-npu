@@ -17,7 +17,8 @@ module npu_gemm_cu_sva #(parameter int N = 8,
   input logic [2:0] wst,
   input logic pend, lr, take, feed_last,
   input logic cmd_acc, x_w, w_rq, w_sel, w_gnt, lk_f, f_rq0,
-  input logic [25:0] c_ptr,
+  input logic cmd_mx, m_w, m_pend,
+  input logic [25:0] c_ptr, s_w,
   input logic [15:0] k_left,
   input logic [$clog2((65535 + 64 / N - 1) / (64 / N) + 1)-1:0] fa, fb,
   input logic [$clog2(64 / N)-1:0] step,
@@ -28,7 +29,7 @@ module npu_gemm_cu_sva #(parameter int N = 8,
 );
   localparam int SPL = 64 / N;
   localparam logic F_IDLE = 1'b0, F_RUN = 1'b1;
-  localparam logic [2:0] W_IDLE = 3'd0, W_OUT = 3'd1, W_WR = 3'd2, W_DONE = 3'd3, W_RD = 3'd4;
+  localparam logic [2:0] W_IDLE = 3'd0, W_OUT = 3'd1, W_WR = 3'd2, W_DONE = 3'd3, W_RD = 3'd4, W_SC = 3'd5;
   default clocking cb @(posedge clk); endclocking
   // clk 可能是閘控時脈: 非同步 reset 若落在兩個取樣沿之間, 取樣時 rst_n 已回到 1, 但 $past 跨過了 reset。
   // rst_seen 在 reset 時非同步設定、下一個取樣沿清除, 讓跨過 reset 的嘗試被停用。
@@ -94,21 +95,35 @@ module npu_gemm_cu_sva #(parameter int N = 8,
   // ---- 累加 (v6.3.14): 寫回器讀舊的 C ----
   // 埠 0 的佔用: 取線器已發出未拿到 grant 的請求先完成 (請求保持另由 a_rd_hold 檢查); 寫回器讀的是正要寫的 line
   a_lk_f:        assert property (lk_f |-> !w_sel);
-  a_wrd_line:    assert property (w_sel |-> rd_req[0] && rd_line[0] == c_ptr);
-  a_wrd_only:    assert property (w_rq |-> x_w);                            // 只有累加命令讀舊的 C
+  a_wrd_line:    assert property (w_sel |-> rd_req[0] && rd_line[0] == ((wst == W_SC) ? s_w : c_ptr));
+  a_wrd_only:    assert property (wst == W_RD |-> x_w);                     // 只有累加命令讀舊的 C
+  a_wsc_only:    assert property (wst == W_SC |-> m_w);                     // 只有 MX 命令讀比例 line
+  a_w_rq:        assert property (w_rq == (wst == W_RD || wst == W_SC));
   // 每個累加寫回之前, 剛讀過同一個 line (檢查器記錄寫回器的讀取 grant)
   logic        f_rv;
   logic [25:0] f_rl;
   always_ff @(posedge clk or negedge rst_n)
     if (!rst_n) begin f_rv <= 1'b0; f_rl <= '0; end
-    else if (w_gnt) begin f_rv <= 1'b1; f_rl <= rd_line[0]; end
+    else if (w_gnt && wst == W_RD) begin f_rv <= 1'b1; f_rl <= rd_line[0]; end
     else if (wr_gnt) f_rv <= 1'b0;
   a_acc_rmw:     assert property (wr_req && x_w |-> f_rv && f_rl == wr_line);
   a_noacc_nord:  assert property (wr_req && !x_w |-> !f_rv);
   c_acc_wait_f:  cover property (w_rq && lk_f);                             // 寫回器等取線器的請求完成
   c_acc_block:   cover property (w_sel && f_rq0);                           // 取線器被寫回器擋住
   c_acc_stall:   cover property (w_sel && !rd_gnt[0]);
-  c_acc_ovl:     cover property (w_gnt && fst == F_RUN);                    // 讀舊 C 與下一個命令的取線重疊
+  c_acc_ovl:     cover property (w_gnt && wst == W_RD && fst == F_RUN);     // 讀舊 C 與下一個命令的取線重疊
+  // MX: 寫回器取得命令後先讀比例 line (一次), 收到 npu_mma 的輸出之前必已讀到
+  logic f_sv;
+  always_ff @(posedge clk or negedge rst_n)
+    if (!rst_n) f_sv <= 1'b0;
+    else if (take) f_sv <= 1'b0;
+    else if (w_gnt && wst == W_SC) f_sv <= 1'b1;
+  a_mx_sc_first: assert property (mma_out_valid && mma_out_ready && m_w |-> f_sv);
+  a_mx_sc_once:  assert property (wst == W_SC |-> !f_sv);
+  a_mx_take:     assert property (take |=> wst == ($past(m_pend) ? W_SC : W_OUT));
+  c_sc_wait_f:   cover property (wst == W_SC && lk_f);
+  c_sc_ovl:      cover property (w_gnt && wst == W_SC && fst == F_RUN);     // 讀比例與下一個命令的取線重疊
+  c_sc_stall:    cover property (wst == W_SC && w_sel && !rd_gnt[0]);
   // done 只在含最後一列的 line 寫回 grant 之後出現
   a_done_after_wr: assert property (done && !$past(done) |-> $past(wst == W_WR && wr_gnt && lr));
 
@@ -152,10 +167,31 @@ module npu_gemm_cu_sva #(parameter int N = 8,
     cp_wr: coverpoint {wr_gnt, lr} { bins stall = {2'b00, 2'b01}; bins mid_line = {2'b10}; bins last_line = {2'b11}; }
     cp_ovl: coverpoint {fst, pend} { bins none = {2'b00}; bins feeding = {2'b10}; bins pending = {2'b01}; bins both = {2'b11}; }
     cp_acc: coverpoint x_w { bins plain = {1'b0}; bins acc = {1'b1}; }
+    cp_mx:  coverpoint m_w { bins int32 = {1'b0}; bins mx = {1'b1}; }
+    x_acc_mx: cross cp_acc, cp_mx;
+  endgroup
+  // MX 寫回的 FP32 結果類別 (任一 lane): 溢位 → inf、FTZ / 相消 → 0、NaN、負數、正規數
+  logic [15:0] l_inf, l_zero, l_nan, l_neg, l_norm;
+  for (genvar e = 0; e < 16; e++) begin : g_cls
+    wire [31:0] v = wr_data[32 * e +: 32];
+    assign l_inf[e]  = v[30:23] == 8'hFF && v[22:0] == '0;
+    assign l_nan[e]  = v[30:23] == 8'hFF && v[22:0] != '0;
+    assign l_zero[e] = v[30:0] == '0;
+    assign l_neg[e]  = v[31] && v[30:23] != 8'hFF;
+    assign l_norm[e] = v[30:23] != 8'hFF && v[30:23] != '0;
+  end
+  covergroup cg_mx @(posedge clk iff (rst_n && wr_req && wr_gnt && m_w));
+    cp_inf:  coverpoint (l_inf != '0)  { bins yes = {1'b1}; }
+    cp_zero: coverpoint (l_zero != '0) { bins yes = {1'b1}; }
+    cp_nan:  coverpoint (l_nan != '0)  { bins yes = {1'b1}; }
+    cp_neg:  coverpoint (l_neg != '0)  { bins yes = {1'b1}; }
+    cp_norm: coverpoint (l_norm == '1) { bins all = {1'b1}; }
+    cp_acc:  coverpoint x_w;
   endgroup
   cg_cmd u_cg_cmd = new;
   cg_buf u_cg_buf = new;
   cg_wr  u_cg_wr  = new;
+  cg_mx  u_cg_mx  = new;
 endmodule
 
 bind npu_gemm_cu npu_gemm_cu_sva #(.N(N)) u_sva (.*);

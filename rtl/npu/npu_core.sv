@@ -41,6 +41,8 @@ module npu_core
   input  logic [15:0] cmd_k,
   input  logic        cmd_a_signed, cmd_b_signed,
   input  logic        cmd_acc,           // v6.3.14: C += A × B (寫回前讀舊的 C 相加; 見 npu_gemm_cu)
+  input  logic        cmd_mx,            // v6.3.15: MX 區塊比例, C 為 FP32 (見 npu_gemm_cu)
+  input  logic [25:0] cmd_s_line,        // MX: 比例 line
   // 完成
   output logic        cpl_valid,
   input  logic        cpl_ready,
@@ -74,6 +76,8 @@ module npu_core
     logic [15:0] k;
     logic        sa, sb;
     logic        acc;
+    logic        mx;
+    logic [25:0] sl;
   } cmd_t;
 
   // ---------------- 命令佇列 ----------------
@@ -106,7 +110,7 @@ module npu_core
       q <= '0; q_rd <= '0; q_wr <= '0; q_cnt <= '0;
     end else begin
       if (q_push) begin
-        q[q_wr] <= '{id: cmd_id, a: cmd_a_line, b: cmd_b_line, c: cmd_c_line, k: cmd_k, sa: cmd_a_signed, sb: cmd_b_signed, acc: cmd_acc};
+        q[q_wr] <= '{id: cmd_id, a: cmd_a_line, b: cmd_b_line, c: cmd_c_line, k: cmd_k, sa: cmd_a_signed, sb: cmd_b_signed, acc: cmd_acc, mx: cmd_mx, sl: cmd_s_line};
         q_wr <= q_wr + 1'b1;
       end
       if (q_pop) q_rd <= q_rd + 1'b1;
@@ -140,7 +144,7 @@ module npu_core
       .clk(gclk), .rst_n(rst_n), .test_en(test_en),
       .cmd_valid(cu_v[i]), .cmd_ready(cu_ready[i]),
       .cmd_a_line(head.a), .cmd_b_line(head.b), .cmd_c_line(head.c), .cmd_k(head.k),
-      .cmd_a_signed(head.sa), .cmd_b_signed(head.sb), .cmd_acc(head.acc), .cmd_tag(head.id),
+      .cmd_a_signed(head.sa), .cmd_b_signed(head.sb), .cmd_acc(head.acc), .cmd_mx(head.mx), .cmd_s_line(head.sl), .cmd_tag(head.id),
       .done(cu_done[i]), .done_ready(cu_dack[i]), .done_tag(cu_dtag[i]), .busy(cu_busy[i]), .feeding(cu_feed[i]),
       .rd_req(c_rq), .rd_line(c_rl), .rd_gnt(c_rg), .rd_data(c_rd),
       .wr_req(wr_req[i]), .wr_line(wr_line[i]), .wr_data(wr_data[i]), .wr_gnt(wr_gnt[i]));

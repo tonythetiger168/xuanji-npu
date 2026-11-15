@@ -14,7 +14,7 @@ module npu_gemm_cu #(parameter int N = 8, localparam int RP = (N == 32) ? 2 : 1)
   input  logic cmd_valid, output logic cmd_ready,
   input  logic [25:0] cmd_a_line, cmd_b_line, cmd_c_line, input logic [15:0] cmd_k,
   input  logic cmd_a_signed, cmd_b_signed,
-  input  logic cmd_acc,
+  input  logic cmd_acc, cmd_mx, input logic [25:0] cmd_s_line,
   input  logic [7:0] cmd_tag,
   output logic done, input logic done_ready, output logic [7:0] done_tag,
   output logic busy, feeding,

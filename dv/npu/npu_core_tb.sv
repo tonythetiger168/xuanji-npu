@@ -8,6 +8,7 @@
 //   隨機 test_en; 偶爾在 batch 中途 reset (丟棄在途命令後重新開始)。
 //   burst: 先準備數個命令的資料再連續送出 (填滿命令佇列; host 寫入與 CU 讀取重疊)。
 //   +long: 單一長命令 (K >= 32768, A / B 位址超出 L2 容量而折返), 參考值由 L2 行為模型後門讀取計算。
+//   v6.3.15: 約 1/4 的命令為 MX (FP32 C, 比例 line 緊接在 C 之後; 參考函式 dv/npu/npu_mx_ref.svh)。
 //   效能計數器寫入: 每個 batch 前隨機寫入 (含接近 2^48 的值, 驗證進位與環繞), 檢查之後的增量。
 //   +perf: 效能量測 — 預先載入 2×NCU 個長命令 (K 取 slot 能容納的最大值) 後一次送出,
 //          量測 MAC 利用率 = perf_steps / (perf_busy × NCU), 須 >= +min_util (百分比, 預設 0)。
@@ -15,6 +16,7 @@
 //          (同一命令同時在兩個 CU 執行時寫入相同的 C, 結果仍可比對)。
 // plusargs: +seed=N  +cmds=N (預設 200)  +perf [+perf_k=K]  +min_util=P  +long  +smoke (+cmds=N 筆的單一 batch)
 //=============================================================================
+`include "npu_mx_ref.svh"
 module npu_core_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB = 4, parameter int DEPTH = 1024);
   import npu_pkg::*;
   localparam int QD = 4;                                  // 與 npu_core 預設一致
@@ -27,7 +29,8 @@ module npu_core_tb #(parameter int N = 8, parameter int NCU = 4, parameter int N
   localparam int LB = $clog2(LINES);
 
   logic clk = 1'b0, rst_n = 1'b0, test_en = 1'b0;
-  logic cmd_valid = 1'b0, cmd_ready, cmd_a_signed = 1'b0, cmd_b_signed = 1'b0, cmd_acc = 1'b0;
+  logic cmd_valid = 1'b0, cmd_ready, cmd_a_signed = 1'b0, cmd_b_signed = 1'b0, cmd_acc = 1'b0, cmd_mx = 1'b0;
+  logic [25:0] cmd_s_line = '0;
   logic [7:0] cmd_id = '0;
   logic [25:0] cmd_a_line = '0, cmd_b_line = '0, cmd_c_line = '0;
   logic [15:0] cmd_k = 16'd1;
@@ -44,7 +47,7 @@ module npu_core_tb #(parameter int N = 8, parameter int NCU = 4, parameter int N
   npu_core #(.N(N), .NCU(NCU), .NB(NB), .DEPTH(DEPTH)) dut (.*);
 
   // ---------------- 命令記錄 ----------------
-  typedef struct { int k; bit sa, sb, acc; int slot, ns; logic [25:0] a, b, c; logic [31:0] C []; } rec_t;
+  typedef struct { int k; bit sa, sb, acc, mx; int slot, ns; logic [25:0] a, b, c, s; logic [31:0] C []; } rec_t;
   rec_t inflight [int];                 // id -> 記錄
   bit   pend_ids [int];                 // 已準備、尚未送出的 id
   bit   slot_busy [NSLOT];
@@ -56,6 +59,17 @@ module npu_core_tb #(parameter int N = 8, parameter int NCU = 4, parameter int N
   bit perf_mode = 0;                    // 效能量測中: 完成檢查不做 bank hammer
 
   function automatic int ur(int lo, int hi); return lo + int'($urandom_range(hi - lo, 0)); endfunction
+  function automatic logic [7:0] pick_sc();                                 // E8M0 比例 (同 npu_gemm_cu_tb)
+    case (ur(0, 15))
+      0: return 8'(ur(0, 30));
+      1: return 8'(ur(225, 254));
+      2: return (ur(0, 3) == 0) ? 8'hFF : 8'(ur(0, 254));
+      default: return 8'(ur(100, 154));
+    endcase
+  endfunction
+  function automatic logic [31:0] pick_old();
+    return (ur(0, 3) == 0) ? $urandom() : {1'($urandom()), 8'(ur(110, 175)), 23'($urandom())};
+  endfunction
   function automatic logic [7:0] pick(int mode);
     case (mode)
       1: case (ur(0, 4)) 0: return 8'h00; 1: return 8'h7F; 2: return 8'h80; 3: return 8'hFF; default: return 8'($urandom()); endcase
@@ -105,15 +119,18 @@ module npu_core_tb #(parameter int N = 8, parameter int NCU = 4, parameter int N
   task automatic prepare(int k, output rec_t r, output logic [7:0] id, input int ns = 1);   // ns: 佔用連續 ns 個 slot
     int s, al = (k + SPL - 1) / SPL, mode = ur(0, 2), off;
     logic [7:0] A [][], B [][];
-    logic [511:0] ln;
+    logic [511:0] ln, sl;
     do begin s = ns * ur(0, NSLOT / ns - 1); if (slot_busy[s]) @(posedge clk); end while (slot_busy[s]);
     for (int i = 0; i < ns; i++) slot_busy[s + i] = 1;
     r.ns = ns;
-    off = ur(0, ns * SLOT - 2 * al - CL);                // slot 內隨機起點: A / B / C 落在不同 bank
+    off = ur(0, ns * SLOT - 2 * al - CL - 1);            // slot 內隨機起點: A / B / C / 比例 line 落在不同 bank
     r.k = k; r.sa = 1'($urandom()); r.sb = 1'($urandom()); r.slot = s; r.acc = (ur(0, 2) == 0);   // 1/3 累加 (C += A × B)
+    r.mx = (ur(0, 3) == 0);
     // 低位: slot 內位置; 高位 (xbar 只解碼低 LB bit) 各自隨機 — 涵蓋 CU / xbar 位址的所有位元
     r.a = 26'(s * SLOT + off); r.b = r.a + 26'(al); r.c = r.b + 26'(al);
+    r.s = r.c + 26'(CL);
     r.a[25:LB] = (25 - LB + 1)'($urandom()); r.b[25:LB] = (25 - LB + 1)'($urandom()); r.c[25:LB] = (25 - LB + 1)'($urandom());
+    r.s[25:LB] = (25 - LB + 1)'($urandom());
     A = new[N]; B = new[k];
     foreach (A[i]) begin A[i] = new[k]; foreach (A[i][kk]) A[i][kk] = pick(mode); end
     foreach (B[kk]) begin B[kk] = new[N]; foreach (B[kk][j]) B[kk][j] = pick(mode); end
@@ -129,9 +146,14 @@ module npu_core_tb #(parameter int N = 8, parameter int NCU = 4, parameter int N
       host_write(r.b + 26'(l), ln);
     end
     r.C = new[N * N];
+    if (r.mx) begin                                                  // 比例 line: byte i = sa[i], 32 + j = sb[j]
+      ln = {16{$urandom()}};
+      for (int i = 0; i < N; i++) begin ln[8 * i +: 8] = pick_sc(); ln[256 + 8 * i +: 8] = pick_sc(); end
+      host_write(r.s, ln); sl = ln;
+    end
     if (r.acc) for (int l = 0; l < CL; l++) begin                   // 累加: 舊的 C = 隨機
       ln = {16{$urandom()}};
-      for (int e = 0; e < 16; e++) ln[32 * e +: 32] = $urandom();
+      for (int e = 0; e < 16; e++) ln[32 * e +: 32] = r.mx ? pick_old() : $urandom();
       host_write(r.c + 26'(l), ln);
       for (int e = 0; e < 16 && 16 * l + e < N * N; e++) r.C[16 * l + e] = ln[32 * e +: 32];
     end
@@ -139,7 +161,9 @@ module npu_core_tb #(parameter int N = 8, parameter int NCU = 4, parameter int N
       longint acc = r.acc ? longint'(r.C[i * N + j]) : 0;
       for (int kk = 0; kk < k; kk++)
         acc += (r.sa ? longint'($signed(A[i][kk])) : longint'(A[i][kk])) * (r.sb ? longint'($signed(B[kk][j])) : longint'(B[kk][j]));
-      r.C[i * N + j] = 32'(acc);
+      if (r.mx) r.C[i * N + j] = mx_elem(32'(acc - (r.acc ? longint'(r.C[i * N + j]) : 0)), sl[8 * i +: 8], sl[256 + 8 * j +: 8],
+                                         r.acc, r.C[i * N + j]);
+      else r.C[i * N + j] = 32'(acc);
     end
     do id = 8'($urandom()); while (inflight.exists(id) || pend_ids.exists(id));   // 在途命令之間 id 唯一
     pend_ids[id] = 1;
@@ -148,7 +172,7 @@ module npu_core_tb #(parameter int N = 8, parameter int NCU = 4, parameter int N
   task automatic issue(rec_t r, logic [7:0] id);
     inflight[id] = r; pend_ids.delete(id);
     cmd_valid = 1'b1; cmd_id = id; cmd_a_line = r.a; cmd_b_line = r.b; cmd_c_line = r.c; cmd_k = 16'(r.k);
-    cmd_a_signed = r.sa; cmd_b_signed = r.sb; cmd_acc = r.acc;
+    cmd_a_signed = r.sa; cmd_b_signed = r.sb; cmd_acc = r.acc; cmd_mx = r.mx; cmd_s_line = r.s;
     do begin #4; if (cmd_ready) break; @(posedge clk); #1; end while (1);
     @(posedge clk); #1;
     cmd_valid = 1'b0; cmd_id = 8'($urandom()); cmd_a_line = 26'($urandom()); cmd_k = 16'($urandom());
@@ -166,7 +190,7 @@ module npu_core_tb #(parameter int N = 8, parameter int NCU = 4, parameter int N
       host_read(r.c + 26'(l), ln);
       for (int e = 0; e < 16 && l * 16 + e < N * N; e++)
         if (ln[e * 32 +: 32] !== r.C[l * 16 + e]) begin
-          if (n_err < 20) $display("MISMATCH id=%0d k=%0d C[%0d] dut=%h ref=%h", id, r.k, l * 16 + e, ln[e * 32 +: 32], r.C[l * 16 + e]);
+          if (n_err < 20) $display("MISMATCH id=%0d k=%0d acc=%0d mx=%0d C[%0d] dut=%h ref=%h", id, r.k, r.acc, r.mx, l * 16 + e, ln[e * 32 +: 32], r.C[l * 16 + e]);
           n_err++;
         end
     end
@@ -242,7 +266,7 @@ module npu_core_tb #(parameter int N = 8, parameter int NCU = 4, parameter int N
     for (int c = 0; c < QD + NCU; c++) begin
       rec_t r; logic [7:0] id;
       r.k = ur(256, 65535); r.sa = 1'($urandom()); r.sb = 1'($urandom()); r.acc = 1'($urandom()); r.slot = -1; r.ns = 0;
-      r.a = 26'($urandom()); r.b = 26'($urandom()); r.c = 26'($urandom());
+      r.a = 26'($urandom()); r.b = 26'($urandom()); r.c = 26'($urandom()); r.mx = 1'($urandom()); r.s = 26'($urandom());
       do id = 8'($urandom()); while (inflight.exists(id));
       issue(r, id);                       // inflight 記錄讓「只寫 C 區」檢查接受其寫入
     end
@@ -276,8 +300,8 @@ module npu_core_tb #(parameter int N = 8, parameter int NCU = 4, parameter int N
     logic [511:0] junk = {16{$urandom()}};
     wait (!busy);
     prepare(ur(1, 2 * SPL), x, id, 2);
-    // C 區之後第一個與 C 第一個 line 同 bank 的 line (雜湊對應; 仍在本命令的 slot 內)
-    scr = x.c + 26'(CL);
+    // C 區與比例 line 之後第一個與 C 第一個 line 同 bank 的 line (雜湊對應; 仍在本命令的 slot 內)
+    scr = x.c + 26'(CL + 1);
     while (npu_l2_bank(scr, $clog2(NB), $clog2(DEPTH)) != npu_l2_bank(x.c, $clog2(NB), $clog2(DEPTH))) scr++;
     fork
       begin issue(x, id); end
@@ -328,7 +352,7 @@ module npu_core_tb #(parameter int N = 8, parameter int NCU = 4, parameter int N
     rec_t r; logic [511:0] ln;
     int k = ur(32768, 65535);
     for (int b = 0; b < NB; b++) for (int d = 0; d < DEPTH; d++) dut.u_l2.mem[b][d] = {16{$urandom()}};
-    r.k = k; r.sa = 1'($urandom()); r.sb = 1'($urandom()); r.acc = 1'b0; r.slot = 0; r.ns = 1;
+    r.k = k; r.sa = 1'($urandom()); r.sb = 1'($urandom()); r.acc = 1'b0; r.mx = 1'b0; r.slot = 0; r.ns = 1;
     r.a = 26'($urandom()); r.b = 26'($urandom()); r.c = 26'($urandom());
     r.C = new[N * N];
     for (int i = 0; i < N; i++) for (int j = 0; j < N; j++) begin
