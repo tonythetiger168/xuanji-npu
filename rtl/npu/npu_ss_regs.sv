@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Xuanji - NPU Subsystem 的 APB4 設定暫存器 (v6.3.11: 共用表頭, 與 IMS 統一)。暫存器表與 APB 慣例見 docs/apb.md。
-`include "orca_pkg.sv"
+`include "npu_pkg.sv"
 
 // npu_ss_regs: SoC CPU 經 APB4 對 orca_npu_ss 下命令、取完成、讀狀態 / 效能計數、設定中斷。
 //   - APB4 從端, 零等待 (PREADY 恆 1); 讀資料在存取階段 (PSEL && PENABLE) 由位址組合產生。
@@ -16,7 +16,7 @@
 //   - 效能計數: 讀 *_LO 時把同一計數器的 [47:32] 存入影子暫存器, 之後讀 *_HI 得到同一時刻的值 (48 bit 一致讀取)。
 //   APB 與 NPU Subsystem 在同一時脈域 (跨時脈域橋接不在本模組)。
 module npu_ss_regs
-  import orca_pkg::*;
+  import npu_pkg::*;
 #(
   parameter int TILE_ID = 0,
   parameter int N     = 8,             // 只用來產生 CFG 唯讀暫存器 (與 orca_npu_ss 的參數相同)

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Xuanji - NPU 多通道 DMA (v6.3.13): NDC 個 npu_dma 通道共用 L2 host 埠與外部記憶體埠。
-`include "orca_pkg.sv"
+`include "npu_pkg.sv"
 
 // npu_dma_mc: 讓多個 DMA 命令同時執行 (例: 載入下一層權重的同時 gather KV / 寫回結果)。
 //   命令: cmd_valid / cmd_ready; 有空閒通道 (閒置且完成槽空) 時接受, 交給編號最小的空閒通道。
@@ -10,7 +10,7 @@
 //   外部讀回應依請求順序回來 (無回壓): 以 tag FIFO (深度 NDC × OUT) 記錄每個讀取屬於哪個通道, 回應送給 FIFO 頭的通道。
 //   每個通道一個 ICG (閒置且沒有分派時停止時脈)。
 module npu_dma_mc
-  import orca_pkg::*;
+  import npu_pkg::*;
 #(
   parameter int NDC = 2,                // 通道數
   parameter int OUT = 8,                // 每個通道的在途上限 (2 的冪)

@@ -9,7 +9,7 @@
 //   隨機 test_en; 偶爾在命令中途 reset (模型同步清空 KV 狀態)。
 // plusargs: +seed=N  +cmds=N (預設 400)
 //=============================================================================
-`include "orca_pkg.sv"
+`include "npu_pkg.sv"
 module npu_llm_eng_tb
   import npu_kv_pkg::*;
 #(parameter int NP = 16, NSEQ = 4, NSLOT = 32, BS = 4, RW = 2, NEXP = 16, PW = 9, TW = 6);

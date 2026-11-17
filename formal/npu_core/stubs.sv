@@ -4,7 +4,7 @@
 //                保持到 done_ready) 由 npu_core.sv 的 FORMAL 區塊 assume。CU 本身由 NPU flow 驗證。
 //   npu_l2_xbar: grant 任意但只給有請求者 (已另外形式證明); 資料任意。
 //   clock_gate:  直通 (閘控安全由模擬 SVA 與 orca_npu_ss 的證明涵蓋)。
-`include "orca_pkg.sv"
+`include "npu_pkg.sv"
 module clock_gate (input logic clk, en, test_en, output logic clk_out);
   assign clk_out = clk;
 endmodule

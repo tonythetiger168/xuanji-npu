@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Xuanji (原 ORCA v6.3) - NPU 產品組態 (v6.3.8)
-`include "orca_pkg.sv"
+`include "npu_pkg.sv"
 
 // 四款產品 = 同一份 npu_core RTL 的三組參數 (見 docs/npu.md 的效能與驗證結果)。
 //   峰值 INT8 = N² × NCU MAC/拍 × 2 op; 例如 1 GHz 時 Nano 32 GOPS / X1 512 GOPS / Pro 4.1 TOPS / Max 49 TOPS

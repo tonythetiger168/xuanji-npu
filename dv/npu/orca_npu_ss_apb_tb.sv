@@ -7,7 +7,7 @@
 // 外部記憶體模型: 讀 grant 隨機, 資料在 2 拍後依序回傳。
 //=============================================================================
 module orca_npu_ss_apb_tb;
-  import orca_pkg::*;
+  import npu_pkg::*;
   logic clk = 0, rst_n = 0;
   always #5 clk = ~clk;
   logic psel = 0, penable = 0, pwrite = 0, pready, pslverr, irq;

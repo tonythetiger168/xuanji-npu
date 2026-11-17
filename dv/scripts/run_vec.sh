@@ -11,10 +11,10 @@ NS=${1:-4}; NI=${2:-6000}
 B=build/vec_cov; rm -rf "$B"; mkdir -p "$B"
 FP="rtl/fp/fp_add.sv rtl/fp/fp_mul.sv rtl/fp/fp_narrow.sv rtl/fp/fp_widen.sv rtl/fp/sfu.sv rtl/fp/fp_max.sv rtl/fp/fp_small_dec.sv rtl/fp/fp_mx_scale.sv rtl/fp/fp_from_int.sv"
 verilator --binary --timing -j "${JOBS:-4}" --assert --coverage -Wno-fatal -Wno-lint -Wno-style -Irtl/common -Irtl/fp --Mdir "$B/obj" \
-  rtl/common/orca_pkg.sv rtl/common/clock_gate.sv $FP rtl/npu/npu_vec.sv dv/vec/npu_vec_sva.sv dv/vec/npu_vec_tb.sv \
+  rtl/common/npu_pkg.sv rtl/common/clock_gate.sv $FP rtl/npu/npu_vec.sv dv/vec/npu_vec_sva.sv dv/vec/npu_vec_tb.sv \
   --top-module npu_vec_tb > "$B/build.log" 2>&1 || { tail -20 "$B/build.log"; echo "BUILD FAIL"; exit 1; }
 verilator --binary --timing -j "${JOBS:-4}" --assert --coverage -Wno-fatal -Wno-lint -Wno-style -Irtl/common -Irtl/fp --Mdir "$B/eobj" \
-  rtl/common/orca_pkg.sv rtl/common/clock_gate.sv $FP rtl/npu/npu_vec.sv dv/vec/npu_vec_sva.sv rtl/npu/npu_vec_eng.sv \
+  rtl/common/npu_pkg.sv rtl/common/clock_gate.sv $FP rtl/npu/npu_vec.sv dv/vec/npu_vec_sva.sv rtl/npu/npu_vec_eng.sv \
   dv/vec/npu_vec_eng_sva.sv dv/vec/npu_vec_eng_tb.sv --top-module npu_vec_eng_tb > "$B/build_eng.log" 2>&1 \
   || { tail -20 "$B/build_eng.log"; echo "BUILD FAIL eng"; exit 1; }
 fail=0

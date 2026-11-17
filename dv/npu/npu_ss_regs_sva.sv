@@ -3,7 +3,7 @@
 // cpl_ready 只在讀 CPL_POP 的存取拍、FIFO 數量守恆; 功能 coverage (每個暫存器的讀 / 寫、位元組寫入、溢位、W1C、中斷來源)。
 // 以 bind 掛到 DUT, .* 連接同名訊號。
 module npu_ss_regs_sva
-  import orca_pkg::*;
+  import npu_pkg::*;
 #(parameter int CQ = 4) (
   input logic clk, rst_n,
   input logic psel, penable, pwrite, pready, pslverr, irq,

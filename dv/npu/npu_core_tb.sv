@@ -16,7 +16,7 @@
 // plusargs: +seed=N  +cmds=N (預設 200)  +perf [+perf_k=K]  +min_util=P  +long  +smoke (+cmds=N 筆的單一 batch)
 //=============================================================================
 module npu_core_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB = 4, parameter int DEPTH = 1024);
-  import orca_pkg::*;
+  import npu_pkg::*;
   localparam int QD = 4;                                  // 與 npu_core 預設一致
   localparam int SPL = 64 / N, CL = (4 * N * N + 63) / 64;
   // slot 數 > NCU + QD (全部 CU 同時忙碌且佇列滿); 2 的冪, 至少 16 (Max: NCU + QD = 28 → 32)

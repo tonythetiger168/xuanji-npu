@@ -8,7 +8,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 NS=${1:-4}; NC=${2:-400}
 B=build/npu_llm; rm -rf "$B"; mkdir -p "$B"
-SRC="rtl/common/orca_pkg.sv rtl/common/clock_gate.sv rtl/npu/npu_kv_pager.sv rtl/npu/npu_moe_disp.sv rtl/npu/npu_llm_eng.sv
+SRC="rtl/common/npu_pkg.sv rtl/common/clock_gate.sv rtl/npu/npu_kv_pager.sv rtl/npu/npu_moe_disp.sv rtl/npu/npu_llm_eng.sv
      dv/npu_kv/npu_kv_pager_sva.sv dv/npu_moe/npu_moe_disp_sva.sv dv/npu_llm/npu_llm_eng_sva.sv dv/npu_llm/npu_llm_eng_tb.sv"
 verilator --binary --timing -j "${JOBS:-4}" --assert --coverage -Wno-fatal -Wno-lint -Wno-style -Irtl/common --Mdir "$B/obj" \
   $SRC --top-module npu_llm_eng_tb > "$B/build.log" 2>&1 || { tail -20 "$B/build.log"; echo "BUILD FAIL"; exit 1; }

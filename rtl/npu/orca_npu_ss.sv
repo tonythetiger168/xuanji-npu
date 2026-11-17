@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Xuanji (原 ORCA v6.3) - NPU Subsystem (v6.3.9: 由舊 AI tile 以 npu_core 重建)
-`include "orca_pkg.sv"
+`include "npu_pkg.sv"
 
 // orca_npu_ss: 命令佇列 + 分派 (等待旗標) + npu_core (GEMM) + npu_dma (外部記憶體 <-> L2, 載入時解碼) + 完成合併。
 //
@@ -19,7 +19,7 @@
 // 效能計數: npu_core 的 perf_busy / perf_steps 直通。
 // 低功耗: DMA 每個通道一個 ICG (閒置停止時脈); 向量引擎、LLM 引擎各一個 ICG; npu_core 內每個 CU 一個 ICG。
 module orca_npu_ss
-  import orca_pkg::*;
+  import npu_pkg::*;
 #(
   parameter int TILE_ID = 0,
   parameter int N     = 8,              // 產品組態 (見 rtl/npu/npu_products.sv; 預設 Xuanji-X1)

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // ORCA v6.3 - low power v1.0
-`include "orca_pkg.sv"
+`include "npu_pkg.sv"
 
 // 整合式時脈閘控單元 (ICG): 低電平鎖存 enable, 下降沿後閘控
 // en=0 時 clk_out 停在高電平 (標準 ICG 行為, 無毛刺)
@@ -10,7 +10,7 @@ module clock_gate (
   input  logic test_en,     // DFT 測試使能 (強制開啟)
   output logic clk_out
 );
-  import orca_pkg::*;
+  import npu_pkg::*;
   logic en_latch;
   always_latch begin
     if (!clk) en_latch <= en | test_en;
@@ -27,7 +27,7 @@ module power_switch (
   output logic power_on,   // 域電源良好
   output logic ack
 );
-  import orca_pkg::*;
+  import npu_pkg::*;
   logic [3:0] cnt;
   typedef enum logic [1:0] {SW_ON, SW_RAMP_DN, SW_OFF, SW_RAMP_UP} sw_t;
   sw_t st;

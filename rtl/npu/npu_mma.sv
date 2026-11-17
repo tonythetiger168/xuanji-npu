@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Xuanji (原 ORCA v6.3) - NPU 矩陣乘法引擎 (v6.3.7; v6.3.12 tile 管線化)
-`include "orca_pkg.sv"
+`include "npu_pkg.sv"
 
 // npu_mma: N×N output-stationary systolic INT8 GEMM tile, C[N][N] (INT32) = A[N][K] × B[K][N]
 //
@@ -21,7 +21,7 @@
 // 低功耗: 每列 PE 經 ICG (rtl/common/clock_gate.sv), 只有該列有 token 在流動時才有時脈; 暫存器另有相同的
 //         資料致能, 功能不依賴 clock gating (test_en 強制開啟時結果相同)。
 module npu_mma
-  import orca_pkg::*;
+  import npu_pkg::*;
 #(parameter int N = 8)
 (
   input  logic clk, rst_n,

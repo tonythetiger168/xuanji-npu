@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Xuanji (原 ORCA v6.3) - NPU Subsystem DMA (v6.3.9)
-`include "orca_pkg.sv"
+`include "npu_pkg.sv"
 
 // npu_ss_dma: 外部記憶體 <-> NPU L2 的 64 B line 搬移, 一次一個命令。
 //   LD (st=0): 讀外部 ext..ext+n-1 → 寫 L2 l2..l2+n-1;  ST (st=1): 讀 L2 → 寫外部。n = 0 時立即完成。
@@ -13,7 +13,7 @@
 //   第 i 個 line 的外部位址 = ext + (i / cols) × stride + i % cols, L2 端仍連續 (l2 + i)。cmd_cols = 0 為 1D
 //   (外部連續, 與 v6.3.10 相同)。n 不必是 cols 的倍數 (最後一列不滿)。LD 時外部是讀端, ST 時是寫端。
 module npu_ss_dma
-  import orca_pkg::*;
+  import npu_pkg::*;
 #(
   parameter int OUT = 8,                // 在途上限 / FIFO 深度 (2 的冪)
   parameter int DW  = 512               // line 資料寬度 (DMA 只搬移資料, 形式驗證以較窄的 DW 證明)

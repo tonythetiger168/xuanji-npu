@@ -17,7 +17,7 @@
 //
 // 時序: 命令開始時以 NEXP 拍清除計數 (busy), 之後接受輸入; 輸出暫存一級 (in_ready = 輸出暫存可用)。
 // 低功耗: 閒置時 ICG 關閉。
-`include "orca_pkg.sv"
+`include "npu_pkg.sv"
 
 module npu_moe_disp #(
   parameter int NEXP = 16,                    // expert 數上限 (2 的冪)

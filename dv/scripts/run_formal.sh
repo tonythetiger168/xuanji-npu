@@ -19,17 +19,12 @@ declare -A SRC=(
   [npu_rr_lock]="rtl/npu/npu_rr_lock.sv"
   [npu_dma_mc]="formal/npu_dma_mc/stubs.sv rtl/npu/npu_rr_lock.sv rtl/npu/npu_dma_mc.sv"
   [npu_vec_eng]="formal/npu_vec_eng/stubs.sv rtl/npu/npu_vec_eng.sv"
-  [orca_apb_xbar]="rtl/soc/orca_apb_xbar.sv"
-  [orca_sys_regs]="formal/orca_sys_regs/stubs.sv rtl/soc/orca_sys_regs.sv"
-  [orca_pmu_regs]="formal/orca_pmu_regs/stubs.sv rtl/soc/orca_pmu_regs.sv"
-  [orca_pmu]="rtl/soc/orca_pmu.sv"
-  [gs_raster_regs]="formal/gs_raster_regs/stubs.sv rtl/common/ret_shadow.sv rtl/sis/gs_raster_regs.sv"
 )
 blocks=${*:-${!SRC[@]}}
 rc=0
 for b in $blocks; do
   d=formal/$b
-  sv2v -DFORMAL -DFORMAL_TOP_$b -E Assert -Irtl/common rtl/common/orca_pkg.sv ${SRC[$b]} > $d/$b.v || { echo "$b: sv2v FAIL"; rc=1; continue; }
+  sv2v -DFORMAL -DFORMAL_TOP_$b -E Assert -Irtl/common rtl/common/npu_pkg.sv ${SRC[$b]} > $d/$b.v || { echo "$b: sv2v FAIL"; rc=1; continue; }
   # sv2v 預設會刪除 assertion (-E Assert 保留); 轉出的設計沒有 assert 時整個證明是空的
   grep -q "assert" $d/$b.v || { echo "$b: no assertions after sv2v (vacuous)"; rc=1; continue; }
   (cd $d && sby -f $b.sby > sby_run.log 2>&1) || rc=1

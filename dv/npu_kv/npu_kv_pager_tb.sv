@@ -10,7 +10,7 @@
 //   隨機 test_en; 偶爾在 FREE_SEQ 或回應等待中 reset。
 // plusargs: +seed=N  +cycles=N (預設 40000)
 //=============================================================================
-`include "orca_pkg.sv"
+`include "npu_pkg.sv"
 module npu_kv_pager_tb
   import npu_kv_pkg::*;
 #(parameter int NP = 16, NSEQ = 4, NSLOT = 8, BS = 4, RW = 2, POSW = 7);

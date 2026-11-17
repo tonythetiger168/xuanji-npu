@@ -1,0 +1,197 @@
+name: Xuanji NPU CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+# Verilator 由 actions/cache 還原時, 建置當下偵測到的 ccache 不一定存在於本次 runner
+# (ci/install_verilator.sh 只在 cache miss 時安裝) — 關閉 verilated.mk 的 OBJCACHE
+env:
+  OBJCACHE: ""
+
+jobs:
+  # NPU 子系統 lint (含 APB 包裝, 全部 RTL 一次編譯)
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache Verilator v5.052
+        uses: actions/cache@v4
+        with:
+          path: ~/verilator-v5.052
+          key: verilator-v5.052-ubuntu-24.04
+      - name: Install Verilator v5.052
+        run: |
+          bash ci/install_verilator.sh v5.052
+          echo "$HOME/verilator-v5.052/bin" >> "$GITHUB_PATH"
+      - name: Verilator lint (orca_npu_ss_apb)
+        run: bash dv/scripts/lint.sh
+
+
+  # NPU 三款產品組態 (Xuanji-X1-Nano / X1 / X1-Pro): 各自的 CRV + SVA + coverage 100% (含效能門檻) 與 mutation 測試
+  npu:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        cfg: [nano, x1, pro]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache Verilator v5.052
+        uses: actions/cache@v4
+        with:
+          path: ~/verilator-v5.052
+          key: verilator-v5.052-ubuntu-24.04
+      - name: Install Verilator v5.052 / pyslang (FSM coverage 產生器)
+        run: |
+          bash ci/install_verilator.sh v5.052
+          echo "$HOME/verilator-v5.052/bin" >> "$GITHUB_PATH"
+          python3 -m pip install --user --break-system-packages pyslang==12.1.0
+      - name: Coverage closure + performance (${{ matrix.cfg }})
+        run: JOBS=4 bash dv/scripts/run_npu_cov.sh ${{ matrix.cfg }} 4 200
+      - name: Mutation test (${{ matrix.cfg }})
+        run: JOBS=4 bash dv/scripts/run_npu_mutation.sh ${{ matrix.cfg }}
+
+  # NPU Subsystem (npu_core + DMA + 命令前端): 三款組態各自 coverage 100% + DMA 吞吐量 + mutation
+  npu-ss:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        cfg: [nano, x1, pro]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache Verilator v5.052
+        uses: actions/cache@v4
+        with:
+          path: ~/verilator-v5.052
+          key: verilator-v5.052-ubuntu-24.04
+      - name: Install Verilator v5.052
+        run: |
+          bash ci/install_verilator.sh v5.052
+          echo "$HOME/verilator-v5.052/bin" >> "$GITHUB_PATH"
+      - name: Coverage closure + DMA throughput (${{ matrix.cfg }})
+        run: JOBS=4 bash dv/scripts/run_npu_ss_cov.sh ${{ matrix.cfg }} 6 30
+
+  # NPU Subsystem mutation: 每個 mutant 重建整個子系統 (約 5–6 分鐘), 全部約 50–90 個, 一個 job 會超過時限 →
+  # 組態 × 6 片 (SHARD=i/6: 第 k 個 mutant 屬於第 k mod 6 片), 每片都必須全部抓到
+  npu-ss-mut:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        cfg: [nano, x1, pro]
+        shard: [0, 1, 2, 3, 4, 5]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache Verilator v5.052
+        uses: actions/cache@v4
+        with:
+          path: ~/verilator-v5.052
+          key: verilator-v5.052-ubuntu-24.04
+      - name: Install Verilator v5.052
+        run: |
+          bash ci/install_verilator.sh v5.052
+          echo "$HOME/verilator-v5.052/bin" >> "$GITHUB_PATH"
+      - name: Mutation test (${{ matrix.cfg }}, shard ${{ matrix.shard }} / 6)
+        run: SHARD=${{ matrix.shard }}/6 JOBS=4 bash dv/scripts/run_npu_ss_mutation.sh ${{ matrix.cfg }}   # 預設 20 batch (12 batch 時 X1 的 arb_fixed 存活)
+
+  # Xuanji-X1-Max: 前端記憶體 ~9 GB、單一測試 >30 分鐘, 標準 runner 跑不完 coverage closure。
+  # CI 只做 max 的編譯 (無 coverage, 加 swap) + 短 smoke; 100% coverage / mutation 由 nano/x1/pro 負責
+  # (同一份參數化 RTL)。
+  npu-max-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Add swap
+        run: |
+          # 無 coverage 的 max 建置約 2.8 GB; 多墊 4 GB swap 防尖峰 (放 /mnt 臨時碟, 不占根目錄空間)
+          d=/mnt; [ -w /mnt ] || d=$HOME
+          sudo fallocate -l 4G $d/swapfile2 && sudo chmod 600 $d/swapfile2
+          sudo mkswap $d/swapfile2 && sudo swapon $d/swapfile2
+          free -g; df -h / /mnt || true
+      - name: Cache Verilator v5.052
+        uses: actions/cache@v4
+        with:
+          path: ~/verilator-v5.052
+          key: verilator-v5.052-ubuntu-24.04
+      - name: Install Verilator v5.052
+        run: |
+          bash ci/install_verilator.sh v5.052
+          echo "$HOME/verilator-v5.052/bin" >> "$GITHUB_PATH"
+      - name: npu_core max build + smoke
+        run: JOBS=2 bash dv/scripts/run_npu_smoke.sh core max
+      - name: npu_ss max build + smoke
+        run: JOBS=2 bash dv/scripts/run_npu_smoke.sh ss max
+
+  # 共用浮點函式庫: 位元精確向量 + coverage 100% + mutation
+  fp:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache Verilator v5.052
+        uses: actions/cache@v4
+        with:
+          path: ~/verilator-v5.052
+          key: verilator-v5.052-ubuntu-24.04
+      - name: Install Verilator v5.052
+        run: |
+          sudo apt-get update && sudo apt-get install -y python3-numpy
+          bash ci/install_verilator.sh v5.052
+          echo "$HOME/verilator-v5.052/bin" >> "$GITHUB_PATH"
+      - name: FP coverage
+        run: bash dv/scripts/run_fp.sh 4 20000
+      - name: FP mutation
+        run: bash dv/scripts/run_fp_mutation.sh
+      - name: NPU vector core (bit-exact + coverage + kernels)
+        run: bash dv/scripts/run_vec.sh 4 6000
+      - name: NPU vector core mutation
+        run: bash dv/scripts/run_vec_mutation.sh
+      - name: NPU paged KV cache (CRV + coverage)
+        run: bash dv/scripts/run_npu_kv.sh 4 40000
+      - name: NPU paged KV cache mutation
+        run: bash dv/scripts/run_npu_kv_mutation.sh
+      - name: NPU SS APB registers (coverage + integration)
+        run: bash dv/scripts/run_npu_ss_regs.sh
+      - name: NPU SS APB registers mutation
+        run: bash dv/scripts/run_npu_ss_regs_mutation.sh
+      - name: NPU MoE dispatch (CRV + coverage)
+        run: bash dv/scripts/run_npu_moe.sh 4 300
+      - name: NPU MoE dispatch mutation
+        run: bash dv/scripts/run_npu_moe_mutation.sh
+      - name: NPU LLM engine (KV / MOE commands, CRV + coverage)
+        run: bash dv/scripts/run_npu_llm.sh 4 400
+      - name: NPU LLM engine mutation
+        run: bash dv/scripts/run_npu_llm_mutation.sh
+      - name: NPU LLM end-to-end (paged attention KV / MoE layer vs numpy, X1)
+        run: bash dv/scripts/run_npu_llm_e2e.sh x1 3
+
+  # 形式驗證: SymbiYosys k-induction 證明 + 形式 mutation (植入錯誤的 RTL 必須無法證明)
+  formal:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90      # 證明 + 全部 mutant 約 60 分鐘 (v6.3.13 orca_npu_ss 加了 LLM 引擎的 mutant)
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Yosys / SymbiYosys / sv2v / z3
+        run: |
+          sudo apt-get update && sudo apt-get install -y yosys
+          git clone -q --depth 1 --branch yosys-0.33 https://github.com/YosysHQ/sby.git /tmp/sby && sudo make -C /tmp/sby install PREFIX=/usr/local
+          curl -sSL -o /tmp/sv2v.zip https://github.com/zachjs/sv2v/releases/download/v0.0.13/sv2v-Linux.zip && unzip -qo /tmp/sv2v.zip -d /tmp && sudo cp /tmp/sv2v-Linux/sv2v /usr/local/bin/
+          pip install z3-solver   # z3 >= 4.12 (Ubuntu 24.04 的 4.8 會當掉)
+      - name: Proofs
+        run: bash dv/scripts/run_formal.sh
+      - name: Formal mutation
+        run: bash dv/scripts/run_formal_mutation.sh
+      - name: Unreachability proofs for coverage waivers (Yosys)
+        run: |
+          pip install yowasp-yosys==0.70.0.0.post1259
+          python3 dv/scripts/prove_unreachable.py dv/formal_cov/*.prove

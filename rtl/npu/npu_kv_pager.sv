@@ -22,7 +22,7 @@
 // 空閒表: 從未配發過的頁由水位 hw (0 → NP) 依序配發, 釋放的頁進 FIFO; 配發優先用 FIFO。重置後不需要初始化週期。
 // 儲存: 區塊表有效位元 = flop (需重置); 區塊表頁號、參考計數、FIFO 可對應 SRAM (只在有效 / 已配發時讀)。
 // 低功耗: 沒有命令 / 回應 / 轉換時停止時脈 (ICG)。
-`include "orca_pkg.sv"
+`include "npu_pkg.sv"
 
 package npu_kv_pkg;
   typedef enum logic [1:0] { KV_ALLOC = 2'd0, KV_FREE = 2'd1, KV_FREE_SEQ = 2'd2, KV_SHARE = 2'd3 } kv_op_e;

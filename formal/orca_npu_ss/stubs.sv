@@ -8,7 +8,7 @@
 //   npu_vec_eng: 同 DMA (只在 idle 接受; done 在忙碌中任意一拍; derr 任意); L2 埠不發請求 (仲裁器另外形式證明)。
 //   npu_llm_eng (v6.3.13): 同 VEC (只在 idle 接受; done 一拍, 在忙碌中任意一拍; busy 含 done 那一拍); L2 埠不發請求。
 //   clock_gate: 直通 (閘控安全以 orca_npu_ss 內的組合性質檢查 en)。
-`include "orca_pkg.sv"
+`include "npu_pkg.sv"
 module clock_gate (input logic clk, en, test_en, output logic clk_out);
   assign clk_out = clk;
 endmodule

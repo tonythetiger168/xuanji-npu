@@ -28,7 +28,7 @@ PY
   case $f in
     $MMA) mma=$M/$n.sv ;; $CU) cu=$M/$n.sv ;; $XB) xb=$M/$n.sv ;; $CORE) core=$M/$n.sv ;;
   esac
-  local src="rtl/common/orca_pkg.sv rtl/common/clock_gate.sv $mma dv/npu/npu_mma_sva.sv"
+  local src="rtl/common/npu_pkg.sv rtl/common/clock_gate.sv $mma dv/npu/npu_mma_sva.sv"
   case $f in
     $MMA) top=npu_mma_tb; src="$src dv/npu/npu_mma_tb.sv"; args="+tiles=$((NT * 2))" ;;
     $CU)  top=npu_gemm_cu_tb; src="$src $cu dv/npu/npu_gemm_cu_sva.sv dv/npu/npu_gemm_cu_tb.sv"; args="+cmds=$NT" ;;

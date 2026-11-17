@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Xuanji (原 ORCA v6.3) - NPU banked L2 + crossbar (v6.3.8)
-`include "orca_pkg.sv"
+`include "npu_pkg.sv"
 
 // npu_l2_xbar: NM 個讀取主端 / NW 個寫入主端 (計算單元 + host) 共用 NB 個 L2 bank
-//   (line 交錯 + XOR 摺疊雜湊: bank = orca_pkg::npu_l2_bank, 列 = line[BW +: DW])。
+//   (line 交錯 + XOR 摺疊雜湊: bank = npu_pkg::npu_l2_bank, 列 = line[BW +: DW])。
 //   NW 預設 = NM; 雙讀取埠的 CU (N = 32) 讓讀取主端多於寫入主端。
 //   每個 bank 每拍 1 讀 + 1 寫 (1R1W SRAM 行為模型, 組合式讀取), 讀 / 寫各自 round-robin 仲裁。
 //   主端介面與 npu_gemm_cu 相同: req 保持到 gnt; 讀資料與 gnt 同拍有效; 寫在 gnt 拍完成。
@@ -15,7 +15,7 @@
 //   接 SRAM 的 LS 腳: 保留內容、不可存取); 有請求指向睡眠中的 bank 時喚醒, 喚醒後 LS_WAKE 拍內不給 grant
 //   (SRAM 的喚醒時間; 主端的 req 本來就保持到 gnt)。LS_IDLE = 0 時不睡 (與 v6.3.10 相同)。
 module npu_l2_xbar
-  import orca_pkg::*;
+  import npu_pkg::*;
 #(
   parameter int NM    = 5,             // 讀取主端數
   parameter int NW    = NM,            // 寫入主端數 (<= NM)
@@ -51,7 +51,7 @@ module npu_l2_xbar
   logic [NB-1:0]         rd_rq, wr_rq;           // bank 本拍有讀 / 寫請求 (不論是否醒著)
   logic [NB-1:0]         b_rdy;                  // bank 醒著 (可存取)
 
-  // line → (bank, 列): orca_pkg::npu_l2_bank (XOR 摺疊雜湊) / npu_l2_row
+  // line → (bank, 列): npu_pkg::npu_l2_bank (XOR 摺疊雜湊) / npu_l2_row
   function automatic logic [BW-1:0] bank_of(logic [25:0] l); return BW'(npu_l2_bank(l, BW, DW)); endfunction
   function automatic logic [DW-1:0] row_of(logic [25:0] l);  return DW'(npu_l2_row(l, BW, DW)); endfunction
 

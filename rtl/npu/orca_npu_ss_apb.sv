@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Xuanji - NPU Subsystem + APB4 設定暫存器 (v6.3.10)。暫存器表見 docs/apb.md。
-`include "orca_pkg.sv"
+`include "npu_pkg.sv"
 
 // orca_npu_ss_apb: orca_npu_ss + npu_ss_regs 的純接線 (SoC 以此接 CPU 的 APB 與外部記憶體)。
 // 只有接線: 由整合測試 dv/npu/orca_npu_ss_apb_tb.sv 驗證 (只經 APB 下命令、DMA 搬移資料、取回完成)。
 module orca_npu_ss_apb
-  import orca_pkg::*;
+  import npu_pkg::*;
 #(
   parameter int TILE_ID = 0,
   parameter int N     = 8,

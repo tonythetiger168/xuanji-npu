@@ -21,7 +21,7 @@
 //=============================================================================
 module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB = 4, parameter int DEPTH = 1024,
                     parameter int OUT = 32, parameter int NDC = 2);
-  import orca_pkg::*;
+  import npu_pkg::*;
   localparam int QD = 8;                                  // 與 orca_npu_ss 預設一致
   localparam int LINES = NB * DEPTH, SPL = 64 / N, CL = (4 * N * N + 63) / 64;
   localparam int LB = $clog2(LINES);

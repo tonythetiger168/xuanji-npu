@@ -28,7 +28,7 @@
 //     CN (各 expert) ⌈nexp/8⌉ lines, 每 expert 2 字組 {n, off}
 //     狀態 line: w0 = {ovf, 錯誤 id 數 (31 bit)}, w1 = 有效項目數, w2 = P
 //   expert id ≥ nexp (含 top-k 未用的 0xFFFFFFFF) → 錯誤項目 (drop)。
-`include "orca_pkg.sv"
+`include "npu_pkg.sv"
 
 module npu_llm_eng
   import npu_kv_pkg::*;

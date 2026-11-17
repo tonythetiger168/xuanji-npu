@@ -2,7 +2,7 @@
 // npu_l2_xbar 的 SVA: grant 合法性 (每 bank 每拍最多一讀一寫、只給有請求者)、work-conserving、
 // round-robin 有界等待, 以及衝突情境的 cover。以 bind 掛到 DUT, .* 連接同名訊號。
 module npu_l2_xbar_sva
-  import orca_pkg::*;
+  import npu_pkg::*;
 #(parameter int NM = 5, parameter int NW = NM, parameter int NB = 4, parameter int DEPTH = 1024,
   parameter int LS_IDLE = 64, parameter int LS_WAKE = 2) (
   input logic clk, rst_n,

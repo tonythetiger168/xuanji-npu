@@ -8,7 +8,7 @@
 //   輸入隨機空拍、輸出與數量回壓隨機; 隨機 test_en; 偶爾在命令中途 reset。
 // plusargs: +seed=N  +cmds=N (預設 300)
 //=============================================================================
-`include "orca_pkg.sv"
+`include "npu_pkg.sv"
 module npu_moe_disp_tb #(parameter int NEXP = 8, TW = 8, PW = 9, WW = 16);
   localparam int EW = $clog2(NEXP), CW = PW - EW, MAXE = (1 << PW) - 1;
   logic clk = 1'b0, rst_n = 1'b0, test_en = 1'b0;

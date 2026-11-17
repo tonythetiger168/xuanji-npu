@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Xuanji - NPU Subsystem: 兩個主端共用一組 L2 讀 / 寫埠 (v6.3.10: DMA 與向量引擎共用 npu_core 的 host 埠)。
-`include "orca_pkg.sv"
+`include "npu_pkg.sv"
 
 // npu_l2_arb2: 讀、寫各自獨立仲裁。L2 介面規則: 請求與位址 (寫入時含資料) 保持到 grant, 讀資料與 grant 同拍。
 //   - 選中者在等待 grant 期間不變 (lock), 所以送往下游的請求 / 位址也保持; 下游 grant 只轉給選中者。

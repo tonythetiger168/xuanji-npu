@@ -6,7 +6,7 @@
 // 另有中途 reset。plusargs: +seed=N  +cycles=N (預設 200000)
 //=============================================================================
 module npu_ss_regs_tb;
-  import orca_pkg::*;
+  import npu_pkg::*;
   localparam int CQ = 4;
   logic clk = 0, rst_n = 0;
   always #5 clk = ~clk;

@@ -7,7 +7,7 @@ cd "$(dirname "$0")/../.."
 M=build/vec_mut; rm -rf $M; mkdir -p $M
 python3 dv/vec/gen_vec_vectors.py $M/v1 1 6000 > /dev/null
 python3 dv/vec/gen_vec_vectors.py $M/v2 2 6000 > /dev/null
-FILES="rtl/common/orca_pkg.sv rtl/common/clock_gate.sv rtl/fp/fp_add.sv rtl/fp/fp_mul.sv rtl/fp/fp_narrow.sv rtl/fp/fp_widen.sv rtl/fp/sfu.sv
+FILES="rtl/common/npu_pkg.sv rtl/common/clock_gate.sv rtl/fp/fp_add.sv rtl/fp/fp_mul.sv rtl/fp/fp_narrow.sv rtl/fp/fp_widen.sv rtl/fp/sfu.sv
        rtl/fp/fp_max.sv rtl/fp/fp_small_dec.sv rtl/fp/fp_mx_scale.sv rtl/fp/fp_from_int.sv rtl/npu/npu_vec.sv"
 nk=0; nt=0; surv=0
 mut() {   # name file old new

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Xuanji (原 ORCA v6.3) - NPU 子系統 (v6.3.12)
-`include "orca_pkg.sv"
+`include "npu_pkg.sv"
 
 // npu_core: NCU 個 GEMM 計算單元 (各含 N×N npu_mma) + NB bank 的共用 L2 + 命令佇列 / 分派 / 完成佇列。
 //
@@ -21,7 +21,7 @@
 //            perf_wr 時兩者載入 perf_wdata_* (該拍不計數)。
 // 低功耗: 每個 CU 一個 ICG — 閒置 (且沒有分派 / 完成脈衝) 時整個 CU 停止時脈; CU 內 npu_mma 另有列級閘控。
 module npu_core
-  import orca_pkg::*;
+  import npu_pkg::*;
 #(
   parameter int N     = 8,
   parameter int NCU   = 4,

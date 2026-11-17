@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Xuanji - NPU 向量核 (v6.3.10): 與矩陣核分開的 FP32 SIMD 單元, 做 transformer 中矩陣乘以外的運算
 // (softmax、LayerNorm / RMSNorm、GELU / SiLU、INT32 GEMM 結果的反量化)。語意見 docs/npu_vec.md。
-`include "orca_pkg.sv"
+`include "npu_pkg.sv"
 
 `include "npu_vec_pkg.sv"
 

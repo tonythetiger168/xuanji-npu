@@ -20,7 +20,7 @@ fi
 npu_cfg "$CFG"
 B=build/npu_cov_$CFG; [ "${RESUME:-0}${REPORT_ONLY:-0}" = 00 ] && rm -rf "$B"; mkdir -p "$B"
 echo "##### NPU config $CFG: N=$N NCU=$NCU NB=$NB DEPTH=$DEPTH (peak $((N * N * NCU)) MAC/cycle)"
-SRC_FILES="rtl/common/orca_pkg.sv rtl/common/clock_gate.sv rtl/npu/npu_mma.sv dv/npu/npu_mma_sva.sv"
+SRC_FILES="rtl/common/npu_pkg.sv rtl/common/clock_gate.sv rtl/npu/npu_mma.sv dv/npu/npu_mma_sva.sv"
 SRC="-Irtl/common $SRC_FILES"
 CU="rtl/npu/npu_gemm_cu.sv dv/npu/npu_gemm_cu_sva.sv"
 build() {   # top -G... -- sources...
@@ -39,7 +39,7 @@ build() {   # top -G... -- sources...
 fail=0
 if [ "${REPORT_ONLY:-0}" != 1 ]; then
 # FSM coverage (state / arc): pyslang 依本組態的參數抽出各 DUT 的狀態機, 產生 SVA cover (dv/scripts/gen_fsm_cov.py)
-NPU_RTL="rtl/common/orca_pkg.sv rtl/common/clock_gate.sv rtl/npu/npu_mma.sv rtl/npu/npu_gemm_cu.sv rtl/npu/npu_l2_xbar.sv rtl/npu/npu_core.sv"
+NPU_RTL="rtl/common/npu_pkg.sv rtl/common/clock_gate.sv rtl/npu/npu_mma.sv rtl/npu/npu_gemm_cu.sv rtl/npu/npu_l2_xbar.sv rtl/npu/npu_core.sv"
 python3 dv/scripts/gen_fsm_cov.py -I rtl/common $NPU_RTL --top npu_core -GN=$N -GNCU=$NCU -GNB=$NB -GDEPTH=$DEPTH \
   --split -o "$B" --json "$B/fsm.json" > "$B/fsm.txt"
 F=$B/fsm_npu_mma.sv; FC="$F $B/fsm_npu_gemm_cu.sv"

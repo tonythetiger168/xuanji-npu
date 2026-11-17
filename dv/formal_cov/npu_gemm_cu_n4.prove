@@ -2,7 +2,7 @@
 # mma_out_row == N-1 (最後一列) 時進入 W_WR, 同時 lr <= 1, 所以 W_WR -> W_OUT 不可達 (寫完必為 W_DONE)。
 # npu_mma 設為 free: out_row / out_valid 任意, 性質仍成立 (只依賴寫回器本身的邏輯)。N = 8 以上此弧可達。
 top: npu_gemm_cu
-files: rtl/common/orca_pkg.sv rtl/common/clock_gate.sv rtl/npu/npu_mma.sv rtl/npu/npu_gemm_cu.sv
+files: rtl/common/npu_pkg.sv rtl/common/clock_gate.sv rtl/npu/npu_mma.sv rtl/npu/npu_gemm_cu.sv
 free: npu_mma
 params: N=4
 reset: rst_n

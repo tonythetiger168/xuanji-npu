@@ -13,7 +13,7 @@
 //=============================================================================
 module npu_llm_e2e_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB = 4, parameter int DEPTH = 1024,
                          parameter int OUT = 64);
-  import orca_pkg::*;
+  import npu_pkg::*;
   logic clk = 1'b0, rst_n = 1'b0, test_en = 1'b0;
   logic cmd_valid = 1'b0, cmd_ready;
   npu_tile_cmd_t cmd = '0;

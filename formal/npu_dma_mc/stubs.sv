@@ -2,7 +2,7 @@
 // npu_dma_mc 形式驗證用的替身: npu_dma 通道只遵守介面契約 (請求 / 位址 / 資料保持到 grant; 只在 idle 接受命令;
 // 完成前在途的外部讀取都已回來 — 由 npu_dma_mc 的 FORMAL 區塊以 assume 約束), 其餘輸出任意。
 // npu_dma 本身另外形式證明 (formal/npu_dma); npu_rr_lock 用真的 (另外形式證明)。clock_gate: 直通。
-`include "orca_pkg.sv"
+`include "npu_pkg.sv"
 module clock_gate (input logic clk, en, test_en, output logic clk_out);
   assign clk_out = clk;
 endmodule

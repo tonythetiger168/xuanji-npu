@@ -17,7 +17,7 @@ open(out, 'w').write(s.replace(o, nw, 1))
 PY
   nt=$((nt + 1))
   verilator --binary --timing -j "${JOBS:-4}" --assert -Wno-fatal -Wno-lint -Wno-style -Irtl/common --Mdir $M/$n.obj \
-    rtl/common/orca_pkg.sv rtl/common/clock_gate.sv rtl/npu/npu_kv_pager.sv rtl/npu/npu_moe_disp.sv $M/$n.sv \
+    rtl/common/npu_pkg.sv rtl/common/clock_gate.sv rtl/npu/npu_kv_pager.sv rtl/npu/npu_moe_disp.sv $M/$n.sv \
     dv/npu_kv/npu_kv_pager_sva.sv dv/npu_moe/npu_moe_disp_sva.sv dv/npu_llm/npu_llm_eng_sva.sv dv/npu_llm/npu_llm_eng_tb.sv \
     --top-module npu_llm_eng_tb > $M/$n.build 2>&1 || { echo "$n: BUILD FAIL"; rm -rf $M/$n.obj; surv=1; return; }
   local why=""

@@ -1,6 +1,6 @@
 #!/bin/bash
 # NPU paged KV cache 管理 (rtl/npu/npu_kv_pager.sv) 驗證 (issue #2 P0):
-#   1. 舊 RTL (rtl/legacy/ai/cloud/npu_kv_cache.sv) 的失敗重現: 預期 FAIL (舊 RTL 未修), 印出各項 BUG 供參考。
+#   1. 舊 RTL (legacy npu_kv_cache) 的失敗重現留在 xuanji-core (dv/scripts/run_legacy_kv_repro.sh)。
 #   2. 新 RTL 兩組參數: 小 (NP 16 / NSEQ 4 / NSLOT 8 / BS 4 / RW 2, 碰撞與耗盡頻繁) 與預設 (NP 64 / NSEQ 8 / NSLOT 16 / BS 16 / RW 3);
 #      CRV + scoreboard + 後門不變式, 多個 seed + 隨機上電狀態。
 #   3. coverage: line / branch / expr / toggle (小組態) + covergroup + SVA cover, 套用 dv/npu_kv/waivers.txt 後要求 100%。
@@ -11,13 +11,8 @@ cd "$(dirname "$0")/../.."
 NS=${1:-4}; NC=${2:-40000}
 B=build/npu_kv; rm -rf "$B"; mkdir -p "$B"
 VFLAGS="--binary --timing -j ${JOBS:-4} --assert -Wno-fatal -Wno-lint -Wno-style -Irtl/common"
-SRC="rtl/common/orca_pkg.sv rtl/common/clock_gate.sv rtl/npu/npu_kv_pager.sv dv/npu_kv/npu_kv_pager_sva.sv dv/npu_kv/npu_kv_pager_tb.sv"
+SRC="rtl/common/npu_pkg.sv rtl/common/clock_gate.sv rtl/npu/npu_kv_pager.sv dv/npu_kv/npu_kv_pager_sva.sv dv/npu_kv/npu_kv_pager_tb.sv"
 fail=0
-
-echo "=== 舊 RTL 失敗重現 (預期: TB FAIL) ==="
-verilator $VFLAGS --Mdir "$B/legacy" rtl/common/orca_pkg.sv rtl/legacy/ai/cloud/npu_kv_cache.sv dv/npu_kv/legacy_kv_repro_tb.sv \
-  --top-module legacy_kv_repro_tb > "$B/legacy_build.log" 2>&1 || { tail -20 "$B/legacy_build.log"; echo "BUILD FAIL legacy"; exit 1; }
-"$B/legacy/Vlegacy_kv_repro_tb" | grep -E '^(BUG|TB)' || true
 
 verilator $VFLAGS --coverage --Mdir "$B/small" $SRC --top-module npu_kv_pager_tb > "$B/build_small.log" 2>&1 \
   || { tail -20 "$B/build_small.log"; echo "BUILD FAIL small"; exit 1; }

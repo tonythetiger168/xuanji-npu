@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Xuanji - NPU 向量引擎 (v6.3.10): 從 L2 取向量程式, 依序交給 npu_vec 執行。NPU Subsystem 的 VEC 命令由此執行。
-`include "orca_pkg.sv"
+`include "npu_pkg.sv"
 `include "npu_vec_pkg.sv"
 
 // npu_vec_eng: 命令 = {程式起始 line, 指令數 n (>= 1)}。

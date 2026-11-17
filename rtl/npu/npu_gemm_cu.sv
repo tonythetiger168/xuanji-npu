@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Xuanji (原 ORCA v6.3) - NPU GEMM 計算單元 (v6.3.12)
-`include "orca_pkg.sv"
+`include "npu_pkg.sv"
 
 // npu_gemm_cu: 一個 GEMM 命令 = 從 L2 讀 A / B, 經 npu_mma 計算, 把 C 寫回 L2。
 //
@@ -27,7 +27,7 @@
 //   軟體規則不變: 一個命令的 C 區不可與在途命令的 A / B / C 區重疊 (同一個 C 的累加命令須等前一個完成, wt = 1)。
 // 低功耗: 緩衝只在讀取 grant 拍更新; npu_mma 列級 clock gating (test_en 強制開啟)。
 module npu_gemm_cu
-  import orca_pkg::*;
+  import npu_pkg::*;
 #(parameter int N = 8,
   localparam int RP = (N == 32) ? 2 : 1     // L2 讀取埠數 (npu_core 依同一公式接線)
 )(

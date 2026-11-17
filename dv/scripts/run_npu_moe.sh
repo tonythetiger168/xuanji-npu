@@ -8,7 +8,7 @@ cd "$(dirname "$0")/../.."
 NS=${1:-4}; NC=${2:-300}
 B=build/npu_moe; rm -rf "$B"; mkdir -p "$B"
 VFLAGS="--binary --timing -j ${JOBS:-4} --assert -Wno-fatal -Wno-lint -Wno-style -Irtl/common"
-SRC="rtl/common/orca_pkg.sv rtl/common/clock_gate.sv rtl/npu/npu_moe_disp.sv dv/npu_moe/npu_moe_disp_sva.sv dv/npu_moe/npu_moe_disp_tb.sv"
+SRC="rtl/common/npu_pkg.sv rtl/common/clock_gate.sv rtl/npu/npu_moe_disp.sv dv/npu_moe/npu_moe_disp_sva.sv dv/npu_moe/npu_moe_disp_tb.sv"
 verilator $VFLAGS --coverage --Mdir "$B/small" $SRC --top-module npu_moe_disp_tb > "$B/build_small.log" 2>&1 \
   || { tail -20 "$B/build_small.log"; echo "BUILD FAIL small"; exit 1; }
 verilator $VFLAGS --Mdir "$B/big" -GNEXP=64 -GTW=12 -GPW=14 $SRC --top-module npu_moe_disp_tb > "$B/build_big.log" 2>&1 \

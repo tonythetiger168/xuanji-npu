@@ -9,9 +9,9 @@
 //   (cg_acc, 樣本於每個命令握手): 接受時的未完成數; 另有回壓情境的 cover property。
 // hit[]: 與 coverage bins 一一對應的命中位元, 供 npu_ss_tb 的 +cdv (coverage-driven) 模式選擇下一個 batch 的激勵。
 //=============================================================================
-`include "orca_pkg.sv"
+`include "npu_pkg.sv"
 module npu_ss_e2e_sva
-  import orca_pkg::*;
+  import npu_pkg::*;
 #(parameter int QD = 8, parameter int NCU = 4, parameter int NDC = 2, parameter int WD = 4096)(
   input logic          clk, rst_n,
   input logic          cmd_valid, cmd_ready,
