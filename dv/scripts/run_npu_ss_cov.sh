@@ -18,7 +18,7 @@ fi
 npu_cfg "$CFG"
 B=build/npu_ss_cov_$CFG; [ "${RESUME:-0}${REPORT_ONLY:-0}" = 00 ] && rm -rf "$B"; mkdir -p "$B"
 echo "##### NPU subsystem config $CFG: N=$N NCU=$NCU NB=$NB DEPTH=$DEPTH DMA OUT=$TILE_OUT"
-SRC="-Irtl/common -Irtl/fp rtl/common/npu_pkg.sv rtl/common/clock_gate.sv rtl/npu/npu_mma.sv dv/npu/npu_mma_sva.sv
+SRC="-Irtl/common -Idv/npu -Irtl/fp rtl/common/npu_pkg.sv rtl/common/clock_gate.sv rtl/npu/npu_mma.sv dv/npu/npu_mma_sva.sv
   rtl/fp/fp_add.sv rtl/fp/fp_mul.sv rtl/fp/fp_narrow.sv rtl/fp/fp_widen.sv rtl/fp/sfu.sv rtl/fp/fp_max.sv rtl/fp/fp_small_dec.sv
   rtl/fp/fp_mx_scale.sv rtl/fp/fp_from_int.sv rtl/npu/npu_vec.sv dv/vec/npu_vec_sva.sv rtl/npu/npu_vec_eng.sv dv/vec/npu_vec_eng_sva.sv
   rtl/npu/npu_l2_arb2.sv dv/npu/npu_l2_arb2_sva.sv dv/npu/npu_rr_lock_sva.sv

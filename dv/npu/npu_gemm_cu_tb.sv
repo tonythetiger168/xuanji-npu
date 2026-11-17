@@ -5,10 +5,13 @@
 //   每個命令隨機 K (含 >= 32768 的長命令, 累加器模 2^32 環繞)、有號性、A / B / C line 位址 (互不重疊;
 //   高位元隨機 — 模型只解碼低 15 bit), 以整數 GEMM 參考模型比對寫回的 C, 並檢查 C 區以外沒有被寫。
 //   命令之間隨機間隔, 偶爾在運算中途 reset。v6.3.14: 約 1/3 的命令為累加 (C += A × B, 舊的 C = 隨機背景值)。
+//   v6.3.15: 約 1/3 的命令為 MX (FP32 C, E8M0 比例 line; 參考函式 dv/npu/npu_mx_ref.svh): 比例多在 2^±27 內,
+//   偶爾極端值 (溢位 / FTZ) 與 0xFF (NaN); 累加時舊的 C 多為與結果量級相近的 FP32, 偶爾任意位元 (NaN / inf / 次正規)。
 //   v6.3.12 命令重疊: 命令一受理就準備下一個 (CU 最多同時持有 3 個), 每個命令放在獨立的 slot 區域;
 //   done_ready 隨機回壓; 完成依受理順序並以 tag 比對。長命令 (K >= 32768) 用整個記憶體, 串行執行。
 // plusargs: +seed=N  +cmds=N (預設 200)
 //=============================================================================
+`include "npu_mx_ref.svh"
 module npu_gemm_cu_tb #(parameter int N = 8);
   localparam int RP = (N == 32) ? 2 : 1;         // CU 讀取埠數 (與 npu_gemm_cu 相同公式)
   localparam int KMAX = 65535;
@@ -22,7 +25,8 @@ module npu_gemm_cu_tb #(parameter int N = 8);
   logic [7:0] cmd_tag = '0, done_tag;
   logic [25:0] cmd_a_line = '0, cmd_b_line = '0, cmd_c_line = '0;
   logic [15:0] cmd_k = 16'd1;
-  logic cmd_a_signed = 1'b0, cmd_b_signed = 1'b0, cmd_acc = 1'b0;
+  logic cmd_a_signed = 1'b0, cmd_b_signed = 1'b0, cmd_acc = 1'b0, cmd_mx = 1'b0;
+  logic [25:0] cmd_s_line = '0;
   logic [RP-1:0] rd_req, rd_gnt;
   logic wr_req, wr_gnt;
   logic [RP-1:0][25:0] rd_line;
@@ -54,9 +58,9 @@ module npu_gemm_cu_tb #(parameter int N = 8);
   localparam int KO = 600;                     // 重疊命令的 K 上限
   localparam int NSLOT = 8;                    // slot 輪用 (在途命令最多 3 + 1 個 < NSLOT)
   typedef struct {
-    logic [25:0] a, b, c;
+    logic [25:0] a, b, c, s;                   // s: MX 比例 line
     int          k;
-    bit          sa, sb, acc, serial, whole;   // whole: 用整個記憶體 (長命令)
+    bit          sa, sb, acc, mx, serial, whole;   // whole: 用整個記憶體 (長命令)
     logic [7:0]  tag;
     logic [31:0] C [N][N];
   } rec_t;
@@ -70,6 +74,8 @@ module npu_gemm_cu_tb #(parameter int N = 8);
     case (mode)
       1: case (ur(0, 4)) 0: return 8'h00; 1: return 8'h7F; 2: return 8'h80; 3: return 8'hFF; default: return 8'($urandom()); endcase
       2: return (ur(0, 5) == 0) ? 8'($urandom()) : 8'h00;
+      3: return (ur(0, 3) != 0) ? 8'h00 : (ur(0, 1) == 0) ? 8'h01 : 8'hFF;   // 稀疏 0 / ±1: 部分和常為 ±1 (MX 轉換的指數 127)
+      4: return (ur(0, 7) != 0) ? 8'hFF : 8'($urandom());   // 接近最大的無號值: 中長 K 時部分和 > 2^23 (FP32 尾數最低位有效)
       default: return 8'($urandom());
     endcase
   endfunction
@@ -79,11 +85,22 @@ module npu_gemm_cu_tb #(parameter int N = 8);
   function automatic logic [31:0] get32(int unsigned line, int unsigned off);
     return mem[(line + off / 64) % LINES][(off % 64) * 8 +: 32];
   endfunction
+  function automatic logic [7:0] pick_sc();                                 // E8M0 比例
+    case (ur(0, 15))
+      0: return 8'(ur(0, 30));
+      1: return 8'(ur(225, 254));
+      2: return (ur(0, 3) == 0) ? 8'hFF : 8'(ur(0, 254));
+      default: return 8'(ur(100, 154));
+    endcase
+  endfunction
+  function automatic logic [31:0] pick_old();                               // 累加的舊 C (FP32)
+    return (ur(0, 3) == 0) ? $urandom() : {1'($urandom()), 8'(ur(110, 175)), 23'($urandom())};
+  endfunction
 
   // 準備一個命令: 寫入 A / B、背景垃圾, 算出參考 C。serial: 長命令, 用整個記憶體的三塊區域;
   // 否則放在 slot 區域 (A / B / C 在 slot 內的順序隨機)
   function automatic void make_cmd(int k, bit serial, int slot, int unsigned t);
-    int mode = ur(0, 2);
+    int mode = ur(0, 4);
     int al = (k * N + 63) / 64;                // A / B 各佔的 line 數
     int perm = ur(0, 5);
     int ra = (perm < 2) ? 0 : (perm < 4) ? 1 : 2;
@@ -95,25 +112,41 @@ module npu_gemm_cu_tb #(parameter int N = 8);
       cur.a = {(26-LW)'($urandom()), LW'(ur(base[ra], base[ra] + RS - 2 - al))};
       cur.b = {(26-LW)'($urandom()), LW'(ur(base[rb], base[rb] + RS - 2 - al))};
       cur.c = {(26-LW)'($urandom()), LW'(ur(base[rc], base[rc] + RS - 2 - CL))};
+      cur.s = {(26-LW)'($urandom()), LW'(base[rc] + RS - 1)};
     end else begin
       // slot 內: A / B 各 (SL - CL) / 2 line (先後隨機), C 在最後 CL line
       bit sw = 1'($urandom());
       cur.a = {(26-LW)'($urandom()), LW'(slot * SL + (sw ? (SL - CL) / 2 : 0))};
       cur.b = {(26-LW)'($urandom()), LW'(slot * SL + (sw ? 0 : (SL - CL) / 2))};
       cur.c = {(26-LW)'($urandom()), LW'(slot * SL + SL - CL)};
+      cur.s = {(26-LW)'($urandom()), LW'(slot * SL + SL - CL - 1)};
     end
-    cur.k = k; cur.sa = 1'($urandom()); cur.sb = 1'($urandom()); cur.acc = (ur(0, 2) == 0); cur.serial = serial; cur.whole = serial; cur.tag = 8'(t);
+    cur.k = k; cur.sa = 1'($urandom()); cur.sb = 1'($urandom()); cur.acc = (ur(0, 2) == 0); cur.mx = (ur(0, 2) == 0); cur.serial = serial; cur.whole = serial; cur.tag = 8'(t);
     for (int l = 0; l < al + 1; l++) begin mem[(cur.a[LW-1:0] + l) % LINES] = {16{$urandom()}}; mem[(cur.b[LW-1:0] + l) % LINES] = {16{$urandom()}}; end
     for (int l = 0; l < CL; l++) mem[(cur.c[LW-1:0] + l) % LINES] = {16{$urandom()}};
+    mem[cur.s[LW-1:0]] = {16{$urandom()}};
+    if (cur.mx) begin
+      for (int i = 0; i < N; i++) begin put8(cur.s[LW-1:0], i, pick_sc()); put8(cur.s[LW-1:0], 32 + i, pick_sc()); end
+      for (int e = 0; e < N * N; e++) mem[(cur.c[LW-1:0] + e / 16) % LINES][(e % 16) * 32 +: 32] = pick_old();
+    end
     for (int kk = 0; kk < k; kk++) for (int i = 0; i < N; i++) begin
       A[i][kk] = pick(mode); B[kk][i] = pick(mode);
       put8(cur.a[LW-1:0], kk * N + i, A[i][kk]); put8(cur.b[LW-1:0], kk * N + i, B[kk][i]);
+    end
+    if (cur.mx && ur(0, 3) == 0) for (int i = 0; i < N; i++) begin   // 邊界: 對角元素 C[i][i] 縮放後的指數落在溢位 / 下溢邊界
+      logic [7:0] ea, eb;
+      s = 0;
+      for (int kk = 0; kk < k; kk++)
+        s += (cur.sa ? longint'($signed(A[i][kk])) : longint'(A[i][kk])) * (cur.sb ? longint'($signed(B[kk][i])) : longint'(B[kk][i]));
+      if (mx_edge_sc(32'(s), (ur(0, 1) == 0) ? ur(-1, 2) : ur(253, 256), ea, eb)) begin put8(cur.s[LW-1:0], i, ea); put8(cur.s[LW-1:0], 32 + i, eb); end
     end
     for (int i = 0; i < N; i++) for (int j = 0; j < N; j++) begin
       s = 0;
       for (int kk = 0; kk < k; kk++)
         s += (cur.sa ? longint'($signed(A[i][kk])) : longint'(A[i][kk])) * (cur.sb ? longint'($signed(B[kk][j])) : longint'(B[kk][j]));
-      cur.C[i][j] = 32'(s) + (cur.acc ? get32(cur.c[LW-1:0], 4 * (i * N + j)) : 32'd0);
+      if (cur.mx) cur.C[i][j] = mx_elem(32'(s), 8'(get32(cur.s[LW-1:0], i)), 8'(get32(cur.s[LW-1:0], 32 + j)), cur.acc,
+                                        get32(cur.c[LW-1:0], 4 * (i * N + j)));
+      else cur.C[i][j] = 32'(s) + (cur.acc ? get32(cur.c[LW-1:0], 4 * (i * N + j)) : 32'd0);
     end
   endfunction
 
@@ -122,7 +155,7 @@ module npu_gemm_cu_tb #(parameter int N = 8);
     if (done_tag !== q[0].tag) begin $display("ERROR: done_tag %h expected %h", done_tag, q[0].tag); n_err++; end
     for (int i = 0; i < N; i++) for (int j = 0; j < N; j++)
       if (get32(q[0].c[LW-1:0], 4 * (i * N + j)) !== q[0].C[i][j]) begin
-        if (n_err < 20) $display("MISMATCH k=%0d sa=%0d sb=%0d acc=%0d C[%0d][%0d] dut=%h ref=%h", q[0].k, q[0].sa, q[0].sb, q[0].acc, i, j,
+        if (n_err < 20) $display("MISMATCH k=%0d sa=%0d sb=%0d acc=%0d mx=%0d C[%0d][%0d] dut=%h ref=%h", q[0].k, q[0].sa, q[0].sb, q[0].acc, q[0].mx, i, j,
                                  get32(q[0].c[LW-1:0], 4 * (i * N + j)), q[0].C[i][j]);
         n_err++;
       end
@@ -163,6 +196,7 @@ module npu_gemm_cu_tb #(parameter int N = 8);
       cmd_c_line = cmd_valid ? cur.c : 26'($urandom()); cmd_k = cmd_valid ? 16'(cur.k) : 16'($urandom());
       cmd_a_signed = cmd_valid ? cur.sa : 1'($urandom()); cmd_b_signed = cmd_valid ? cur.sb : 1'($urandom());
       cmd_tag = cmd_valid ? cur.tag : 8'($urandom()); cmd_acc = cmd_valid ? cur.acc : 1'($urandom());
+      cmd_mx = cmd_valid ? cur.mx : 1'($urandom()); cmd_s_line = cmd_valid ? cur.s : 26'($urandom());
       if (dr_hold != 0) begin done_ready = 1'b0; dr_hold--; end
       else begin done_ready = (ur(0, 9) != 0); if (ur(0, 49) == 0) dr_hold = ur(1, 40); end
       // ---- 邊沿前取樣握手 (#2: 避開 negedge 的 grant 亂數) ----

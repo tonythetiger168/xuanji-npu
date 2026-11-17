@@ -28,7 +28,7 @@ PY
   case $f in
     $MMA) mma=$M/$n.sv ;; $CU) cu=$M/$n.sv ;; $XB) xb=$M/$n.sv ;; $CORE) core=$M/$n.sv ;;
   esac
-  local src="rtl/common/npu_pkg.sv rtl/common/clock_gate.sv $mma dv/npu/npu_mma_sva.sv"
+  local src="rtl/common/npu_pkg.sv rtl/common/clock_gate.sv rtl/fp/fp_from_int.sv rtl/fp/fp_add.sv $mma dv/npu/npu_mma_sva.sv"
   case $f in
     $MMA) top=npu_mma_tb; src="$src dv/npu/npu_mma_tb.sv"; args="+tiles=$((NT * 2))" ;;
     $CU)  top=npu_gemm_cu_tb; src="$src $cu dv/npu/npu_gemm_cu_sva.sv dv/npu/npu_gemm_cu_tb.sv"; args="+cmds=$NT" ;;
@@ -37,7 +37,7 @@ PY
   esac
   nt=$((nt + 1))
   verilator --binary --timing -j "${JOBS:-4}" --output-groups 64 --assert -Wno-fatal -Wno-lint -Wno-style -GN=$N \
-    $([ $top = npu_core_tb ] && echo "-GNCU=$NCU -GNB=$NB -GDEPTH=$DEPTH") --Mdir "$M/$n.obj" -Irtl/common \
+    $([ $top = npu_core_tb ] && echo "-GNCU=$NCU -GNB=$NB -GDEPTH=$DEPTH") --Mdir "$M/$n.obj" -Irtl/common -Idv/npu \
     $src --top-module $top > "$M/$n.build" 2>&1 || { echo "$n: BUILD FAIL"; rm -rf "$M/$n.obj"; surv=1; return; }
   "$M/$n.obj/V$top" +seed=7 $args > "$M/$n.log" 2>&1
   # 全 0 上電通過時, 再以隨機上電狀態 (未 reset 的儲存為隨機值) 執行
@@ -77,16 +77,33 @@ mut first_stuck   $MMA "        first <= 1'b0;" "        first <= first;"       
 # ---- npu_gemm_cu ----
 mut cu_aptr_stuck $CU "a_ptr <= a_ptr + 1'b1; fa <= fa - 1'b1; end" "a_ptr <= a_ptr; fa <= fa - 1'b1; end"   # A line 指標不前進
 mut cu_pop_early  $CU "wire pop  = feed && (step == SW'(SPL - 1) || mma_in_last);" "wire pop  = feed && (step == SW'(SPL - 2) || mma_in_last);"  # 提早換 line
-mut cu_no_wgnt    $CU "W_WR: if (wr_gnt) begin c_ptr <= c_ptr + 1'b1; wst <= w_nxt; end" "W_WR: begin c_ptr <= c_ptr + 1'b1; if (wr_gnt) wst <= w_nxt; end"                          # C 指標不等寫入 grant
+mut cu_no_wgnt    $CU "W_WR: if (wr_gnt) begin c_ptr <= c_ptr + 1'b1; w_ln <= w_ln + 1'b1; wst <= w_nxt; end" "W_WR: begin c_ptr <= c_ptr + 1'b1; w_ln <= w_ln + 1'b1; if (wr_gnt) wst <= w_nxt; end"                          # C 指標不等寫入 grant
 mut cu_wr_early   $CU "W_WR: if (wr_gnt) begin" "W_WR: if (wr_gnt || wr_req) begin"                         # 未拿到寫入 grant 就結束該 line
 # ---- 累加 (v6.3.14) ----
-mut cu_acc_nosum  $CU "assign wr_data   = x_w ? wr_sum : wr_d;" "assign wr_data   = wr_d;"                        # 累加命令不加舊值
+mut cu_acc_nosum  $CU "assign wr_data   = m_w ? wr_mx : x_w ? wr_sum : wr_d;" "assign wr_data   = m_w ? wr_mx : wr_d;"                        # 累加命令不加舊值
 mut cu_acc_pend   $CU "x_pend <= x_cmd;" "x_pend <= cmd_acc;"                                                     # 累加旗標取自埠上 (下一個命令)
 mut cu_acc_lock   $CU "assign w_sel = w_rq && !lk_f;" "assign w_sel = w_rq;"                                       # 搶走取線器未完成的請求
 mut cu_acc_skiprd $CU "          wst <= o_nxt;" "          wst <= (o_nxt == W_RD) ? W_WR : o_nxt;"             # 累加不讀舊值 (o_line 為上一次的)
 mut cu_acc_rdgnt  $CU "W_RD: if (w_gnt) begin" "W_RD: if (rd_gnt[0]) begin"                                         # 把取線器的 grant 當成自己的
 mut cu_acc_fb     $CU "else if (g0f) f_b <= ~f_b;" "else if (rd_gnt[0]) f_b <= ~f_b;"                               # 寫回器的 grant 也切換 A / B
-mut cu_acc_line   $CU "assign rd_line = w_sel ? c_ptr : f_ln0;" "assign rd_line = f_ln0;"                           # 讀舊值的位址錯
+mut cu_acc_line   $CU "assign rd_line = w_sel ? w_line : f_ln0;" "assign rd_line = f_ln0;"                           # 讀舊值的位址錯
+# MX 區塊比例 (v6.3.15)
+mut cu_mx_off     $CU "assign wr_data   = m_w ? wr_mx : x_w ? wr_sum : wr_d;" "assign wr_data   = x_w ? wr_sum : wr_d;"   # MX 命令不轉 FP32
+mut cu_mx_pend    $CU "m_pend <= m_cmd;" "m_pend <= cmd_mx;"                                                   # MX 旗標取自埠上 (下一個命令)
+mut cu_mx_spend   $CU "s_pend <= s_cmd;" "s_pend <= cmd_s_line;"                                               # 比例 line 取自埠上
+mut cu_mx_nosc    $CU "W_IDLE: if (take) wst <= m_pend ? W_SC : W_OUT;" "W_IDLE: if (take) wst <= W_OUT;"       # 閒置後的 MX 命令不讀比例
+mut cu_mx_nosc2   $CU "W_DONE: if (take) wst <= m_pend ? W_SC : W_OUT;" "W_DONE: if (take) wst <= W_OUT;"       # 連續命令時不讀比例 (用上一個的)
+mut cu_mx_scgnt   $CU "W_SC: if (w_gnt) begin" "W_SC: if (rd_gnt[0]) begin"                                     # 把取線器的 grant 當成比例讀取
+mut cu_mx_line    $CU "wire [25:0]  w_line = (wst == W_SC) ? s_w : c_ptr;" "wire [25:0]  w_line = c_ptr;"       # 比例 line 位址錯
+mut cu_mx_sb      $CU "sc_b[i] <= rd_data[0][256 + 8 * i +: 8];" "sc_b[i] <= rd_data[0][8 * i +: 8];"           # sb 取錯 byte
+mut cu_mx_ij      $CU "sc_a[RW'({w_ln, 4'(e)} >> RW)], eb = sc_b[RW'({w_ln, 4'(e)})];" "sc_a[RW'({w_ln, 4'(e)})], eb = sc_b[RW'({w_ln, 4'(e)} >> RW)];"  # 列 / 欄比例對調
+# (take 時 w_ln 不歸零是等價 mutant: 每個命令恰好寫 N*N/16 個 line, w_ln 為 log2 寬, 寫完自然回到 0; 中途 reset 也清除)
+mut cu_mx_bias    $CU "- 11'sd254;" "- 11'sd253;"                                                              # 指數偏差錯
+mut cu_mx_nan     $CU "if (ea == 8'hFF || eb == 8'hFF)" "if (ea == 8'hFF)"                                     # sb = NaN 未處理
+mut cu_mx_ovf     $CU "else if (be > 11'sd254)" "else if (be > 11'sd255)"                                      # 溢位邊界錯 (指數 255 → NaN 樣式)
+mut cu_mx_unf     $CU "else if (be < 11'sd1)" "else if (be < 11'sd0)"                                          # 下溢邊界錯 (指數 0 → 非正規)
+mut cu_mx_zero    $CU "else if (f[30:23] == '0)        g = f;" "else if (1'b0)        g = f;"                   # 部分和 0 被縮放成非 0
+mut cu_mx_acc     $CU "assign wr_mx[e] = x_w ? y : g;" "assign wr_mx[e] = g;"                                   # MX 累加不加舊值
 mut cu_pend_tag   $CU "c_pend <= c_cmd; t_pend <= t_cmd;" "c_pend <= c_cmd; t_pend <= cmd_tag;"                  # tag 取自埠上 (下一個命令) 而非本命令
 mut cu_take_early $CU "(wst == W_DONE && done_ready)" "(wst == W_DONE)"                                       # 完成未握手就換下一個 tile
 mut cu_done_noack $CU "else if (done_ready) wst <= W_IDLE;" "else wst <= W_IDLE;"                           # 完成不等握手
@@ -128,6 +145,8 @@ mut core_cpl_hold  $CORE "wire cpl_load = (cpl_pend != '0) && (!cpl_valid || cpl
 mut core_gate      $CORE "assign cu_en[i] = cu_busy[i] || cu_v[i];" "assign cu_en[i] = cu_busy[i];"              # 閘控未涵蓋分派拍
 mut core_dack      $CORE "assign cu_dack    = ~cpl_pend;" "assign cu_dack    = '1;"                              # 待回報槽未空就接受完成 (遺失)
 [ $NCU -gt 1 ] && mut core_idle_1st  $CORE "assign cu_cand    = (cu_idle != '0) ? cu_idle : cu_free;" "assign cu_cand    = cu_free;"  # 不優先閒置 CU (NCU = 1 時等價)
+mut core_mx        $CORE ".cmd_mx(head.mx)," ".cmd_mx(1'b0),"                                       # MX 旗標未傳到 CU
+mut core_sl        $CORE ".cmd_s_line(head.sl)," ".cmd_s_line(head.c),"                               # 比例 line 傳錯
 mut core_q_full    $CORE "assign cmd_ready = (q_cnt != (QW+1)'(QD));" "assign cmd_ready = 1'b1;"                # 佇列滿仍收命令
 mut core_tag       $CORE "cpl_tag[i] <= cu_dtag[i];" "cpl_tag[i] <= cu_dtag[i] ^ 8'h01;"                       # 完成 id 錯
 mut core_perf_wr   $CORE "perf_busy <= perf_wdata_busy; perf_steps <= perf_wdata_steps;" "perf_busy <= perf_wdata_busy; perf_steps <= perf_steps;"  # 計數器寫入無效

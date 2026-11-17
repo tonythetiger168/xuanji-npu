@@ -13,16 +13,17 @@ KIND=${1:?core|ss}; CFG=${2:?cfg}; NSEED=${3:-1000}; NBT=${4:-10}
 npu_cfg "$CFG" || exit 1
 P=${JOBS:-$(nproc)}
 B=build/npu_seeds_${KIND}_$CFG; mkdir -p "$B"
-CU="rtl/npu/npu_gemm_cu.sv dv/npu/npu_gemm_cu_sva.sv"
+CU0="rtl/npu/npu_gemm_cu.sv dv/npu/npu_gemm_cu_sva.sv"
+CU="rtl/fp/fp_from_int.sv rtl/fp/fp_add.sv $CU0"   # npu_gemm_cu 的 MX 寫回用到 fp_from_int / fp_add (npu_ss 的檔案清單已含)
 if [ "$KIND" = core ]; then
-  SRC="-Irtl/common rtl/common/npu_pkg.sv rtl/common/clock_gate.sv rtl/npu/npu_mma.sv dv/npu/npu_mma_sva.sv $CU
+  SRC="-Irtl/common -Idv/npu rtl/common/npu_pkg.sv rtl/common/clock_gate.sv rtl/npu/npu_mma.sv dv/npu/npu_mma_sva.sv $CU
        rtl/npu/npu_l2_xbar.sv dv/npu/npu_l2_xbar_sva.sv rtl/npu/npu_core.sv dv/npu/npu_core_sva.sv dv/npu/npu_core_tb.sv"
   TOP=npu_core_tb; TAG=NPUCORE; ARGS="+cmds=$((NBT * 10))"   # core TB: 命令數 = batches × 10
 else
-  SRC="-Irtl/common -Irtl/fp rtl/common/npu_pkg.sv rtl/common/clock_gate.sv rtl/npu/npu_mma.sv dv/npu/npu_mma_sva.sv
+  SRC="-Irtl/common -Idv/npu -Irtl/fp rtl/common/npu_pkg.sv rtl/common/clock_gate.sv rtl/npu/npu_mma.sv dv/npu/npu_mma_sva.sv
        rtl/fp/fp_add.sv rtl/fp/fp_mul.sv rtl/fp/fp_narrow.sv rtl/fp/fp_widen.sv rtl/fp/sfu.sv rtl/fp/fp_max.sv rtl/fp/fp_small_dec.sv
        rtl/fp/fp_mx_scale.sv rtl/fp/fp_from_int.sv rtl/npu/npu_vec.sv dv/vec/npu_vec_sva.sv rtl/npu/npu_vec_eng.sv dv/vec/npu_vec_eng_sva.sv
-       rtl/npu/npu_l2_arb2.sv dv/npu/npu_l2_arb2_sva.sv $CU rtl/npu/npu_l2_xbar.sv dv/npu/npu_l2_xbar_sva.sv
+       rtl/npu/npu_l2_arb2.sv dv/npu/npu_l2_arb2_sva.sv $CU0 rtl/npu/npu_l2_xbar.sv dv/npu/npu_l2_xbar_sva.sv
        rtl/npu/npu_core.sv dv/npu/npu_core_sva.sv rtl/npu/npu_dma.sv rtl/npu/npu_rr_lock.sv rtl/npu/npu_dma_mc.sv rtl/npu/orca_npu_ss.sv rtl/npu/npu_kv_pager.sv rtl/npu/npu_moe_disp.sv rtl/npu/npu_llm_eng.sv dv/npu/npu_ss_sva.sv
        dv/npu/npu_ss_e2e_sva.sv dv/npu/npu_ss_tb.sv -GOUT=$TILE_OUT"
   TOP=npu_ss_tb; TAG=NPUSS; ARGS="+batches=$NBT +no_big"

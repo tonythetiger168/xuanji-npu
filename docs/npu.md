@@ -83,7 +83,7 @@ npu_core 加上命令前端與 DMA, 成為可以直接下命令的子系統 (由
 
 | 命令 | 動作 |
 |---|---|
-| `GEMM` | C = A × B (INT8 → INT32, 資料已在 L2); ext[0] = 1 (v6.3.14) 時 **C += A × B** (累加, 見下「GEMM 累加」); K = 0 時只回報完成 |
+| `GEMM` | C = A × B (INT8 → INT32, 資料已在 L2); ext[0] = 1 (v6.3.14) 時 **C += A × B** (累加, 見下「GEMM 累加」); ext[1] = 1 (v6.3.15) 時 **MX 區塊比例**: C 為 FP32, 比例 line = ext[27:2] (見下「GEMM MX 區塊比例」); K = 0 時只回報完成 |
 | `DMA_LD` / `DMA_ST` | 外部記憶體 → L2 / L2 → 外部記憶體, k 個 line (k = 0 時立即完成); 位址模數環繞。2D (v6.3.11): b[15:0] = 每列 line 數 (0 = 1D), c = 外部列距 (line) — 第 i 個 line 的外部位址 = ext + (i / cols) × c + i % cols, L2 端連續。載入時解碼 (v6.3.13, 只對 LD): b[17:16] = 0 COPY / 1 INT4 / 2 UINT4 / 3 MXFP4。間接 gather / scatter (v6.3.13): b[18] = 1, c = 位址表的 L2 line, b[15:0] = 每項 line 數; 見下方「DMA 引擎 npu_dma」 |
 | `VEC` (op 4) | 執行 L2 line `a` 起的 `k` 個向量指令 (每 line 4 個; `docs/npu_vec.md`); k = 0 時只回報完成; 遇到非法指令時 `vec_err` 一拍 |
 | `KV` (op 5, v6.3.13) | paged KV cache 頁管理 (ALLOC / FREE / FREE_SEQ / SHARE) 與 MAP (區塊表 → 間接 DMA 的位址表); 欄位與結果見 `docs/npu_llm.md` |
@@ -112,7 +112,8 @@ npu_core 加上命令前端與 DMA, 成為可以直接下命令的子系統 (由
 
 - 打包順序: 第 2i 個元素 = byte i 的低 4 bit (OCP MX)。外部 line j 的元素 0..63 → L2 `a + 2j`, 64..127 → `a + 2j + 1`; k 是外部 line 數。
 - MX 的區塊比例 (E8M0, 每 32 個元素) 與 INT4 的 group scale 不在 DMA 套用: per-channel scale 由向量核在 GEMM 之後反量化;
-  每 32 個 K 一個比例的 MX 區塊比例列為後續工作 (GEMM 端)。MXFP4 解出的值是真值 × 2, 反量化時比例要多除 2。
+  每 32 個 K 一個比例的 MX 區塊比例由 GEMM 的 MX 模式套用 (v6.3.15, 見「GEMM MX 區塊比例」)。MXFP4 解出的值是真值 × 2, 反量化時比例要多除 2
+  (E8M0 比例減 1)。
 - ST 忽略 fmt (原樣搬移)。2D 與解碼可同時使用 (外部端 2D, L2 端連續)。
 - 驗證: 形式證明 (k-induction, DW = 64, 檢查器以 E2M1 的定義另寫參考解碼) + 形式 mutation 25 / 25 (含間接 12 個);
   subsystem CRV 的參考模型以實數計算 E2M1, LD 有 50% 機率隨機選解碼格式 (含 2D、長 DMA 65535 line → L2 131070 line、位址環繞)。
@@ -286,6 +287,29 @@ C += A × B: 寫回器在寫每個 C line 之前先讀出 L2 中舊的 line, 逐
 - 驗證: `npu_gemm_cu_tb` / `npu_core_tb` / `npu_ss_tb` 約 1/3 ~ 1/2 的 GEMM 為累加 (舊 C = 隨機值); SVA: 寫回器讀的
   是正要寫的 line、每個累加寫回之前剛讀過同一個 line、非累加不讀、取線器未完成的請求不被搶走; mutation 7 個
   (不加舊值、旗標取錯命令、搶走請求、不讀舊值、把取線器的 grant 當自己的、A / B 切換錯、讀錯位址)。
+
+### GEMM MX 區塊比例 (v6.3.15, `ext[1]` / `npu_core.cmd_mx`)
+
+OCP MX 格式 (MXINT8 / MXFP4 / W4A8) 每 32 個 K 共用一個 E8M0 比例。GEMM 設 ext[1] = 1 時, 寫回器把 INT32 部分和
+轉成 FP32 並乘上兩個比例:
+
+C[i][j] = float(Σₖ A[i][k] × B[k][j]) × 2^(sa[i] + sb[j] − 254)　(ext[0] = 1 時再加上 L2 中舊的 C, FP32 加法)
+
+- 比例 line (L2, 64 B) 位址 = ext[27:2]: byte i = sa[i] (A 第 i 列), byte 32 + j = sb[j] (B 第 j 行), i, j < N。
+  E8M0: 值 = 2^(e − 127), e = 0xFF 為 NaN。
+- 轉換與縮放: INT32 → FP32 以 RNE 捨入 (`fp_from_int`), 乘 2 的冪只改指數 (精確): 任一比例為 0xFF → qNaN 0x7FC00000;
+  指數溢位 → ±inf; 指數 < 1 → ±0 (FTZ, 與 `fp_add` 相同不產生 subnormal); 部分和為 0 → +0。
+- 累加: `fp_add` (DAZ / FTZ / RNE), 舊 C 的讀取規則同「GEMM 累加」。每個 MX 命令 K 應為 32 (一個比例區塊);
+  K 較長時軟體把 K 切成 32 的塊, 每塊一個 MX 累加命令 (第一塊可用非累加)。
+- 時序: 寫回器在命令的第一個 C line 之前多一次讀取 (狀態 `W_SC`, 走讀取埠 0, 與讀舊 C 相同的保持規則), 比例存進暫存器;
+  每個 C line 的轉換為組合邏輯 (`fp_from_int` + 指數加法 + `fp_add`, 每 lane 一組)。非 MX 命令行為不變。
+- W4A8 流程: INT4 權重以 `DMA_LD` fmt 1 (INT4 → INT8) 或 fmt 3 (MXFP4 → 2 × 值, 比例減 1) 展開,
+  啟動值為 MXINT8 (INT8 + E8M0), 每 32 個 K 一個 MX 累加 GEMM; 比例 line 由軟體 (或向量核) 依 (列, 區塊) 整理好。
+  per-channel / group scale (非 2 的冪) 仍由向量核在 GEMM 之後套用。
+- 驗證: `dv/npu/npu_mx_ref.svh` 參考模型 (與 `dv/fp/fp_ref.py` 比對 200k 組 0 差異); `npu_gemm_cu_tb` / `npu_core_tb` /
+  `npu_ss_tb` 約 1/4 ~ 1/3 的 GEMM 為 MX (比例多數在 100..154, 另含極值與 0xFF, 舊 C 含隨機位元); SVA: 每個 MX 命令
+  在第一個 C 寫回前恰讀一次比例 line、讀的位址正確、take 之後的狀態、讀取埠請求只在 W_RD / W_SC;
+  covergroup: lane 結果類別 (inf / 0 / NaN / 負 / 全正規) × 累加; mutation 見 `run_npu_mutation.sh`。
 
 ### npu_mma 資料流
 

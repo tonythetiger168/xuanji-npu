@@ -19,6 +19,7 @@
 //           +cdv: coverage-driven — 依 dv/npu/npu_ss_e2e_sva.sv 的未命中 bin 調整每個 batch 的激勵, 收斂後停止
 //           +perf_dma=L: DMA 吞吐量量測 (外部埠全速, 讀取延遲固定 L 拍)
 //=============================================================================
+`include "npu_mx_ref.svh"
 module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB = 4, parameter int DEPTH = 1024,
                     parameter int OUT = 32, parameter int NDC = 2);
   import npu_pkg::*;
@@ -279,13 +280,17 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
         nn = N; cl = CL;
         C = new[N * N];
         for (int i = 0; i < nn; i++) for (int j = 0; j < nn; j++) begin
-          longint acc = c.ext[0] ? longint'(rl2[l2i(c.c + 26'((i * N + j) / 16))][((i * N + j) % 16) * 32 +: 32]) : 0;   // ext[0]: C += A × B
+          logic [31:0] old = rl2[l2i(c.c + 26'((i * N + j) / 16))][((i * N + j) % 16) * 32 +: 32];
+          longint acc = 0;
           for (int kk = 0; kk < int'(c.k); kk++) begin
             logic [7:0] av = rl2[l2i(c.a + 26'(kk / SPL))][((kk % SPL) * N + i) * 8 +: 8];
             logic [7:0] bv = rl2[l2i(c.b + 26'(kk / SPL))][((kk % SPL) * N + j) * 8 +: 8];
             acc += (c.sa ? longint'($signed(av)) : longint'(av)) * (c.sb ? longint'($signed(bv)) : longint'(bv));
           end
-          C[i * N + j] = 32'(acc);
+          // ext[1]: MX 區塊比例 (FP32 C; 比例 line = ext[27:2]); ext[0]: C += A × B
+          if (c.ext[1]) C[i * N + j] = mx_elem(32'(acc), rl2[l2i(c.ext[27:2])][8 * i +: 8], rl2[l2i(c.ext[27:2])][256 + 8 * j +: 8],
+                                               c.ext[0], old);
+          else C[i * N + j] = 32'(acc) + (c.ext[0] ? old : 32'd0);
         end
         for (int l = 0; l < cl; l++) for (int e = 0; e < 16; e++) rl2[l2i(c.c + 26'(l))][e * 32 +: 32] = C[l * 16 + e];
       end
@@ -327,6 +332,7 @@ module npu_ss_tb #(parameter int N = 8, parameter int NCU = 4, parameter int NB 
         for (int l = 0; l < (int'(c.k) + SPL - 1) / SPL; l++) begin f.l2r.push_back(l2i(c.a + 26'(l))); f.l2r.push_back(l2i(c.b + 26'(l))); end
         for (int l = 0; l < CL; l++) f.l2w.push_back(l2i(c.c + 26'(l)));
         if (c.ext[0]) for (int l = 0; l < CL; l++) f.l2r.push_back(l2i(c.c + 26'(l)));   // 累加: 讀舊的 C
+        if (c.ext[1]) f.l2r.push_back(l2i(c.ext[27:2]));                                  // MX: 比例 line
       end
       NPU_OP_VEC: for (int i = 0; i < int'(c.k); i++) begin                  // 程式 line + 指令的 LD / ST
         npu_vec_pkg::npu_vec_ins_t x;
