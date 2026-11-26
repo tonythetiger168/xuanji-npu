@@ -82,7 +82,7 @@ if [ "${NOREPORT:-0}" = 1 ]; then [ "$fail" -eq 0 ] && echo "##### $CFG runs PAS
 # 豁免: 共用 (dv/npu/waivers.txt) + 組態專屬 (dv/npu/waivers_<cfg>.txt: 參數造成的結構常數)
 W=$B/waivers.txt; cat dv/npu/waivers.txt dv/npu/waivers_$CFG.txt > "$W" 2>/dev/null || true
 echo "=== RTL structural coverage (module-level; line / branch / expr / toggle / fsm)"
-python3 dv/scripts/cov_report.py "$B"/cov_*.dat --by-module --rtl "^(rtl/(npu/(npu_pe_mac|npu_mma|npu_gemm_cu|npu_l2_xbar|npu_core)|common/clock_gate)|$B/fsm_)" --expect rtl/npu/npu_pe_mac.sv --expect rtl/npu/npu_pe_mac.sv rtl/npu/npu_mma.sv --expect rtl/npu/npu_gemm_cu.sv --expect rtl/npu/npu_l2_xbar.sv --expect rtl/npu/npu_core.sv \
+python3 dv/scripts/cov_report.py "$B"/cov_*.dat --by-module --rtl "^(rtl/(npu/(npu_pe_mac|npu_mma|npu_gemm_cu|npu_l2_xbar|npu_core)|common/clock_gate)|$B/fsm_)" --expect rtl/npu/npu_pe_mac.sv --expect rtl/npu/npu_mma.sv --expect rtl/npu/npu_gemm_cu.sv --expect rtl/npu/npu_l2_xbar.sv --expect rtl/npu/npu_core.sv \
   --waivers "$W" --require 100 --list "${LIST:-40}" || fail=1
 echo "=== functional coverage (covergroup) + SVA cover (user)"
 python3 dv/scripts/cov_report.py "$B"/cov_*.dat --by-module --rtl '^dv/npu/npu_(mma|gemm_cu|l2_xbar|core)_sva' --types covergroup,user \
