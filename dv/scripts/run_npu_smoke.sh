@@ -1,6 +1,6 @@
 #!/bin/bash
 # NPU 大組態 (max) 的 CI smoke: 不帶 coverage 編譯 (帶 --assert), 跑一個短的 CRV seed。
-# max 的 coverage 建置需 ~9 GB (Verilator 前端) 且完整 CRV 遠超 CI 時限; 100% coverage / mutation 由
+# max (smoke 只建 MAX_SMOKE_NCU 個 CU, 見下) 的 coverage 建置需 ~9 GB (Verilator 前端) 且完整 CRV 遠超 CI 時限; 100% coverage / mutation 由
 # nano / x1 / pro 三個組態收斂 (同一份 RTL, 只有參數不同), max 只確認能編譯並正確執行。
 # 需求: Verilator >= 5.052
 # 用法: dv/scripts/run_npu_smoke.sh <core|ss> <cfg> [cmds=4]
@@ -9,6 +9,10 @@ cd "$(dirname "$0")/../.."
 . dv/scripts/npu_cfg.sh
 KIND=${1:?core|ss}; CFG=${2:?cfg}; NC=${3:-4}
 npu_cfg "$CFG"
+# v6.3.16 起每個 PE 有自己的 FP32 加法器 (npu_pe_mac): max 每個 CU (32×32 PE) 的 Verilator 前端約 1.2 GB、
+# C++ 編譯數分鐘, 24 個 CU 超過 15 GB (CI runner 與本機都被 OOM 終止)。CU 都是同一模組 (參數相同), smoke 只建
+# MAX_SMOKE_NCU (預設 2) 個 CU: 仍驗 N=32 的資料路徑與多 CU 分派 / L2 仲裁。
+if [ "$CFG" = max ]; then NCU=${MAX_SMOKE_NCU:-2}; fi
 B=build/npu_smoke_${KIND}_$CFG; rm -rf "$B"; mkdir -p "$B"
 VF="--binary --timing -j ${JOBS:-2} --output-groups 64 --assert -Wno-fatal -Wno-lint -Wno-style --Mdir $B/tb"
 CU0="rtl/npu/npu_gemm_cu.sv dv/npu/npu_gemm_cu_sva.sv"
