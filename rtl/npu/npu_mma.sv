@@ -32,7 +32,7 @@ module npu_mma
   // 控制
   input  logic start,                          // 只在 in_idle=1 時有效
   input  logic a_signed, b_signed,             // 本 tile 的 A / B 是否為有號 INT8 (FP8 時: 1 = E5M2, 0 = E4M3)
-  input  logic fp, bf,                         // v6.3.16: 1 = 浮點 (FP32 累加); bf = 1: BF16 (byte-planar, 每元素兩步), 否則 FP8
+  input  logic fp, bf,                         // v6.3.16: 1 = 浮點 (FP32 累加), bf = 1: BF16 (byte-planar, 每元素兩步), 否則 FP8
   output logic busy,                           // 輸入或輸出端還有 tile
   output logic in_idle,                        // 輸入端閒置: 可以 start 下一個 tile
   // 輸入串流: A 的一欄 + B 的一列
