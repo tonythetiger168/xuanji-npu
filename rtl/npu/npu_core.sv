@@ -42,6 +42,7 @@ module npu_core
   input  logic        cmd_a_signed, cmd_b_signed,
   input  logic        cmd_acc,           // v6.3.14: C += A × B (寫回前讀舊的 C 相加; 見 npu_gemm_cu)
   input  logic        cmd_mx,            // v6.3.15: MX 區塊比例, C 為 FP32 (見 npu_gemm_cu)
+  input  logic        cmd_fp, cmd_bf,    // v6.3.16: 浮點格式 (FP8 / BF16), C 為 FP32 (見 npu_gemm_cu)
   input  logic [25:0] cmd_s_line,        // MX: 比例 line
   // 完成
   output logic        cpl_valid,
@@ -78,6 +79,7 @@ module npu_core
     logic        acc;
     logic        mx;
     logic [25:0] sl;
+    logic        fp, bf;
   } cmd_t;
 
   // ---------------- 命令佇列 ----------------
@@ -110,7 +112,7 @@ module npu_core
       q <= '0; q_rd <= '0; q_wr <= '0; q_cnt <= '0;
     end else begin
       if (q_push) begin
-        q[q_wr] <= '{id: cmd_id, a: cmd_a_line, b: cmd_b_line, c: cmd_c_line, k: cmd_k, sa: cmd_a_signed, sb: cmd_b_signed, acc: cmd_acc, mx: cmd_mx, sl: cmd_s_line};
+        q[q_wr] <= '{id: cmd_id, a: cmd_a_line, b: cmd_b_line, c: cmd_c_line, k: cmd_k, sa: cmd_a_signed, sb: cmd_b_signed, acc: cmd_acc, mx: cmd_mx, sl: cmd_s_line, fp: cmd_fp, bf: cmd_bf};
         q_wr <= q_wr + 1'b1;
       end
       if (q_pop) q_rd <= q_rd + 1'b1;
@@ -144,7 +146,7 @@ module npu_core
       .clk(gclk), .rst_n(rst_n), .test_en(test_en),
       .cmd_valid(cu_v[i]), .cmd_ready(cu_ready[i]),
       .cmd_a_line(head.a), .cmd_b_line(head.b), .cmd_c_line(head.c), .cmd_k(head.k),
-      .cmd_a_signed(head.sa), .cmd_b_signed(head.sb), .cmd_acc(head.acc), .cmd_mx(head.mx), .cmd_s_line(head.sl), .cmd_tag(head.id),
+      .cmd_a_signed(head.sa), .cmd_b_signed(head.sb), .cmd_acc(head.acc), .cmd_mx(head.mx), .cmd_s_line(head.sl), .cmd_fp(head.fp), .cmd_bf(head.bf), .cmd_tag(head.id),
       .done(cu_done[i]), .done_ready(cu_dack[i]), .done_tag(cu_dtag[i]), .busy(cu_busy[i]), .feeding(cu_feed[i]),
       .rd_req(c_rq), .rd_line(c_rl), .rd_gnt(c_rg), .rd_data(c_rd),
       .wr_req(wr_req[i]), .wr_line(wr_line[i]), .wr_data(wr_data[i]), .wr_gnt(wr_gnt[i]));
@@ -188,7 +190,7 @@ module npu_core
   logic [7:0] cpl_tag_sel;
   always_comb begin
     cpl_tag_sel = '0;
-    for (int i = 0; i < NCU; i++) cpl_tag_sel |= cpl_oh[i] ? cpl_tag[i] : 8'h00;
+    for (int ci = 0; ci < NCU; ci++) cpl_tag_sel |= cpl_oh[ci] ? cpl_tag[ci] : 8'h00;
   end
 
   // 待回報槽的 tag: 只在完成握手拍更新 (每個 CU 一個 always_ff; 寫在迴圈裡時 Verilator 的 expression coverage 不計數)

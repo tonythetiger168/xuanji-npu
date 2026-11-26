@@ -8,7 +8,7 @@ cd "$(dirname "$0")/../.."
 CFG=${1:-x1}; NS=${2:-3}
 npu_cfg "$CFG"
 B=build/npu_llm_e2e_$CFG; rm -rf "$B"; mkdir -p "$B"
-SRC="-Irtl/common -Irtl/fp rtl/common/npu_pkg.sv rtl/common/clock_gate.sv rtl/npu/npu_mma.sv
+SRC="-Irtl/common -Irtl/fp rtl/common/npu_pkg.sv rtl/common/clock_gate.sv rtl/npu/npu_pe_mac.sv rtl/npu/npu_mma.sv
   rtl/fp/fp_add.sv rtl/fp/fp_mul.sv rtl/fp/fp_narrow.sv rtl/fp/fp_widen.sv rtl/fp/sfu.sv rtl/fp/fp_max.sv rtl/fp/fp_small_dec.sv
   rtl/fp/fp_mx_scale.sv rtl/fp/fp_from_int.sv rtl/npu/npu_vec.sv rtl/npu/npu_vec_eng.sv rtl/npu/npu_l2_arb2.sv
   rtl/npu/npu_gemm_cu.sv rtl/npu/npu_l2_xbar.sv rtl/npu/npu_core.sv rtl/npu/npu_dma.sv rtl/npu/npu_rr_lock.sv rtl/npu/npu_dma_mc.sv

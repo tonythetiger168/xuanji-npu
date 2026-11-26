@@ -31,6 +31,9 @@
 //   (通常 K = 32), 軟體以累加模式把各區塊的 FP32 結果加總。寫回器取得命令後先讀比例 line (W_SC, 讀取埠 0, 同 W_RD 的
 //   共用規則), 寫回時每個 lane: INT32 → FP32 (RNE) → 乘 2 的冪 (指數相加; 溢位 → ±inf, 小於最小正規數 → ±0;
 //   任一比例 = 0xFF (E8M0 NaN) → qNaN) → 累加時 FP32 加法 (fp_add: DAZ / FTZ / RNE)。
+// v6.3.16: 浮點格式 (cmd_fp = 1: FP8 E4M3 / E5M2 (cmd_a_signed / cmd_b_signed = 1 選 E5M2) 或 cmd_bf = 1: BF16 byte-planar;
+//   語意見 npu_pe_mac): npu_mma 直接產生 FP32 的 C。寫回器: 累加時舊的 C 以 FP32 相加 (fp_add); MX 時不做 INT32 → FP32
+//   轉換, 直接把 FP32 乘上比例 (MXFP8; inf / NaN 保持不變)。
 // 低功耗: 緩衝只在讀取 grant 拍更新; npu_mma 列級 clock gating (test_en 強制開啟)。
 module npu_gemm_cu
   import npu_pkg::*;
@@ -47,6 +50,7 @@ module npu_gemm_cu
   input  logic        cmd_a_signed, cmd_b_signed,
   input  logic        cmd_acc,               // 1: C += A × B (寫回前讀舊的 C)
   input  logic        cmd_mx,                // 1: MX 區塊比例, C 為 FP32 (見上)
+  input  logic        cmd_fp, cmd_bf,        // v6.3.16: 1 = 浮點 (FP8, cmd_bf = 1 時 BF16), C 為 FP32
   input  logic [25:0] cmd_s_line,            // MX: 比例 line
   input  logic [7:0]  cmd_tag,               // 命令標籤, 完成時由 done_tag 帶回
   output logic        done,                  // 一個命令的 C 已全部寫回 (保持到 done_ready)
@@ -84,6 +88,7 @@ module npu_gemm_cu
   logic [25:0] c_cmd, c_pend;                // 輸入端 / 等待輸出的 C line
   logic [7:0]  t_cmd, t_pend, t_w;           // 輸入端 / 等待輸出 / 寫回器的 tag
   logic        x_cmd, x_pend, x_w;           // 輸入端 / 等待輸出 / 寫回器的累加旗標
+  logic        p_cmd, p_pend, p_w;           // 輸入端 / 等待輸出 / 寫回器的浮點旗標 (C 為 FP32)
   logic        m_cmd, m_pend, m_w;           // 輸入端 / 等待輸出 / 寫回器的 MX 旗標
   logic [25:0] s_cmd, s_pend, s_w;           // 輸入端 / 等待輸出 / 寫回器的比例 line
   logic [N-1:0][7:0] sc_a, sc_b;             // MX: 寫回器目前命令的比例 (只在 W_SC 的 grant 拍更新)
@@ -122,7 +127,7 @@ module npu_gemm_cu
 
   npu_mma #(.N(N)) u_mma (
     .clk(clk), .rst_n(rst_n), .test_en(test_en),
-    .start(mma_start), .a_signed(cmd_a_signed), .b_signed(cmd_b_signed), .busy(mma_busy), .in_idle(mma_in_idle),
+    .start(mma_start), .a_signed(cmd_a_signed), .b_signed(cmd_b_signed), .fp(cmd_fp), .bf(cmd_bf), .busy(mma_busy), .in_idle(mma_in_idle),
     .in_valid(mma_in_valid), .in_ready(mma_in_ready), .in_last(mma_in_last),
     .a_vec(a_vec), .b_vec(b_vec),
     .out_valid(mma_out_valid), .out_ready(mma_out_ready), .out_row(mma_out_row), .out_vec(mma_out_vec));
@@ -182,21 +187,23 @@ module npu_gemm_cu
   for (genvar e = 0; e < 16; e++) begin : g_mx
     // 索引不另設 wire (低 4 bit 是每個 lane 的常數, 會成為無法翻轉的 toggle 點)
     wire [7:0]  ea = sc_a[RW'({w_ln, 4'(e)} >> RW)], eb = sc_b[RW'({w_ln, 4'(e)})];
-    logic [31:0] f, g, y;
-    fp_from_int u_cvt (.a(wr_d[32 * e +: 32]), .y(f));
-    // 乘 2^(ea + eb - 254): 指數相加 (f 為 0 或正規數), 範圍外 → ±inf / ±0
+    logic [31:0] fi, f, gs, g, y;
+    fp_from_int u_cvt (.a(wr_d[32 * e +: 32]), .y(fi));
+    assign f = p_w ? wr_d[32 * e +: 32] : fi;                  // 浮點命令: 已是 FP32 (0 / 正規數 / inf / NaN)
+    // 乘 2^(ea + eb - 254): 指數相加, 範圍外 → ±inf / ±0; 0 / inf / NaN 不變
     wire signed [10:0] be = signed'(11'(f[30:23])) + signed'(11'(ea)) + signed'(11'(eb)) - 11'sd254;
     always_comb begin
-      if (ea == 8'hFF || eb == 8'hFF) g = 32'h7FC0_0000;
-      else if (f[30:23] == '0)        g = f;
-      else if (be > 11'sd254)         g = {f[31], 8'hFF, 23'd0};
-      else if (be < 11'sd1)           g = {f[31], 31'd0};
-      else                            g = {f[31], be[7:0], f[22:0]};
+      if (ea == 8'hFF || eb == 8'hFF)            gs = 32'h7FC0_0000;
+      else if (f[30:23] == '0 || f[30:23] == '1) gs = f;
+      else if (be > 11'sd254)                    gs = {f[31], 8'hFF, 23'd0};
+      else if (be < 11'sd1)                      gs = {f[31], 31'd0};
+      else                                       gs = {f[31], be[7:0], f[22:0]};
     end
+    assign g = m_w ? gs : f;
     fp_add #(.E(8), .M(23)) u_add (.a(o_line[32 * e +: 32]), .b(g), .y(y));
     assign wr_mx[e] = x_w ? y : g;
   end
-  assign wr_data   = m_w ? wr_mx : x_w ? wr_sum : wr_d;
+  assign wr_data   = (m_w || p_w) ? wr_mx : x_w ? wr_sum : wr_d;
 
   // npu_mma 在輸入 RUN 時就緒, 除了最後一步要等前一個 tile 輸出完 (a_feed_ready)
   wire feed = mma_in_valid && mma_in_ready;
@@ -247,7 +254,7 @@ module npu_gemm_cu
       fst <= F_IDLE; wst <= W_IDLE; a_ptr <= '0; b_ptr <= '0; c_ptr <= '0; k_left <= '0; fa <= '0; fb <= '0;
       step <= '0; buf_a <= '0; buf_b <= '0; wa <= '0; wb <= '0; rptr <= '0; a_cnt <= '0; b_cnt <= '0;
       c_line <= '0; c_cmd <= '0; c_pend <= '0; t_cmd <= '0; t_pend <= '0; t_w <= '0; pend <= 1'b0; lr <= 1'b0;
-      x_cmd <= 1'b0; x_pend <= 1'b0; x_w <= 1'b0; o_line <= '0;
+      x_cmd <= 1'b0; x_pend <= 1'b0; x_w <= 1'b0; o_line <= '0; p_cmd <= 1'b0; p_pend <= 1'b0; p_w <= 1'b0;
       m_cmd <= 1'b0; m_pend <= 1'b0; m_w <= 1'b0; s_cmd <= '0; s_pend <= '0; s_w <= '0; sc_a <= '0; sc_b <= '0; w_ln <= '0;
     end else begin
       // 取線器 (緩衝只在 grant 拍寫入)
@@ -265,7 +272,7 @@ module npu_gemm_cu
       unique case (fst)
         F_IDLE: if (cmd_valid) begin
           a_ptr <= cmd_a_line; b_ptr <= cmd_b_line; c_cmd <= cmd_c_line; t_cmd <= cmd_tag; x_cmd <= cmd_acc;
-          m_cmd <= cmd_mx; s_cmd <= cmd_s_line;
+          m_cmd <= cmd_mx; s_cmd <= cmd_s_line; p_cmd <= cmd_fp;
           k_left <= cmd_k; fa <= FW'((32'(cmd_k) + SPL - 1) / SPL); fb <= FW'((32'(cmd_k) + SPL - 1) / SPL);
           step <= '0; wa <= '0; wb <= '0; rptr <= '0; a_cnt <= '0; b_cnt <= '0;
           fst <= F_RUN;
@@ -273,11 +280,11 @@ module npu_gemm_cu
         F_RUN: if (feed_last) fst <= F_IDLE;
       endcase
       // 等待輸出: 最後一步餵入時移入 (此時 npu_mma 輸出端閒置 → 前一個 tile 已被寫回器取走, pend = 0)
-      if (feed_last) begin c_pend <= c_cmd; t_pend <= t_cmd; x_pend <= x_cmd; m_pend <= m_cmd; s_pend <= s_cmd; pend <= 1'b1; end
+      if (feed_last) begin c_pend <= c_cmd; t_pend <= t_cmd; x_pend <= x_cmd; m_pend <= m_cmd; p_pend <= p_cmd; s_pend <= s_cmd; pend <= 1'b1; end
       else if (take) pend <= 1'b0;
       // 寫回器
       // 取下一個 tile 只發生在 W_IDLE / W_DONE (wst 轉移寫在各自的 case 項, 狀態機的弧與實際可達的轉移一致)
-      if (take) begin c_ptr <= c_pend; t_w <= t_pend; x_w <= x_pend; m_w <= m_pend; s_w <= s_pend; w_ln <= '0; end
+      if (take) begin c_ptr <= c_pend; t_w <= t_pend; x_w <= x_pend; m_w <= m_pend; p_w <= p_pend; s_w <= s_pend; w_ln <= '0; end
       unique case (wst)
         W_IDLE: if (take) wst <= m_pend ? W_SC : W_OUT;
         W_SC: if (w_gnt) begin

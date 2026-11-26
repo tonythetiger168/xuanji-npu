@@ -20,7 +20,7 @@ fi
 npu_cfg "$CFG"
 B=build/npu_cov_$CFG; [ "${RESUME:-0}${REPORT_ONLY:-0}" = 00 ] && rm -rf "$B"; mkdir -p "$B"
 echo "##### NPU config $CFG: N=$N NCU=$NCU NB=$NB DEPTH=$DEPTH (peak $((N * N * NCU)) MAC/cycle)"
-SRC_FILES="rtl/common/npu_pkg.sv rtl/common/clock_gate.sv rtl/npu/npu_mma.sv dv/npu/npu_mma_sva.sv"
+SRC_FILES="rtl/common/npu_pkg.sv rtl/common/clock_gate.sv rtl/npu/npu_pe_mac.sv rtl/npu/npu_mma.sv dv/npu/npu_mma_sva.sv"
 SRC="-Irtl/common -Idv/npu $SRC_FILES"
 CU="rtl/fp/fp_from_int.sv rtl/fp/fp_add.sv rtl/npu/npu_gemm_cu.sv dv/npu/npu_gemm_cu_sva.sv"
 build() {   # top -G... -- sources...
@@ -39,11 +39,12 @@ build() {   # top -G... -- sources...
 fail=0
 if [ "${REPORT_ONLY:-0}" != 1 ]; then
 # FSM coverage (state / arc): pyslang 依本組態的參數抽出各 DUT 的狀態機, 產生 SVA cover (dv/scripts/gen_fsm_cov.py)
-NPU_RTL="rtl/common/npu_pkg.sv rtl/common/clock_gate.sv rtl/fp/fp_from_int.sv rtl/fp/fp_add.sv rtl/npu/npu_mma.sv rtl/npu/npu_gemm_cu.sv rtl/npu/npu_l2_xbar.sv rtl/npu/npu_core.sv"
+NPU_RTL="rtl/common/npu_pkg.sv rtl/common/clock_gate.sv rtl/fp/fp_from_int.sv rtl/fp/fp_add.sv rtl/npu/npu_pe_mac.sv rtl/npu/npu_mma.sv rtl/npu/npu_gemm_cu.sv rtl/npu/npu_l2_xbar.sv rtl/npu/npu_core.sv"
 python3 dv/scripts/gen_fsm_cov.py -I rtl/common $NPU_RTL --top npu_core -GN=$N -GNCU=$NCU -GNB=$NB -GDEPTH=$DEPTH \
   --split -o "$B" --json "$B/fsm.json" > "$B/fsm.txt"
 F=$B/fsm_npu_mma.sv; FC="$F $B/fsm_npu_gemm_cu.sv"
-build npu_mma_tb -GN=$N dv/npu/npu_mma_tb.sv $F
+build npu_pe_mac_tb rtl/fp/fp_add.sv dv/npu/npu_pe_mac_tb.sv      # v6.3.16 浮點乘加單元測試 (與組態無關)
+build npu_mma_tb -GN=$N rtl/fp/fp_add.sv dv/npu/npu_mma_tb.sv $F
 build npu_gemm_cu_tb -GN=$N $CU dv/npu/npu_gemm_cu_tb.sv $FC
 build npu_core_tb -GN=$N -GNCU=$NCU -GNB=$NB -GDEPTH=$DEPTH $CU rtl/npu/npu_l2_xbar.sv dv/npu/npu_l2_xbar_sva.sv \
   rtl/npu/npu_core.sv dv/npu/npu_core_sva.sv dv/npu/npu_core_tb.sv $FC
@@ -75,12 +76,13 @@ done
 run npu_core_tb perf PERF +seed=1 +perf +min_util=$MIN_UTIL
 for pk in 64 256 1024; do run npu_core_tb perf_k$pk PERF +seed=1 +perf +perf_k=$pk; done   # 較短 K 的利用率 (只報告)
 run npu_core_tb long NPUCORE +seed=1 +long
+run npu_pe_mac_tb pemac PEMAC +seed=1
 fi
 if [ "${NOREPORT:-0}" = 1 ]; then [ "$fail" -eq 0 ] && echo "##### $CFG runs PASS (report skipped)" && exit 0; echo "##### $CFG FAIL"; exit 1; fi
 # 豁免: 共用 (dv/npu/waivers.txt) + 組態專屬 (dv/npu/waivers_<cfg>.txt: 參數造成的結構常數)
 W=$B/waivers.txt; cat dv/npu/waivers.txt dv/npu/waivers_$CFG.txt > "$W" 2>/dev/null || true
 echo "=== RTL structural coverage (module-level; line / branch / expr / toggle / fsm)"
-python3 dv/scripts/cov_report.py "$B"/cov_*.dat --by-module --rtl "^(rtl/(npu/(npu_mma|npu_gemm_cu|npu_l2_xbar|npu_core)|common/clock_gate)|$B/fsm_)" --expect rtl/npu/npu_mma.sv --expect rtl/npu/npu_gemm_cu.sv --expect rtl/npu/npu_l2_xbar.sv --expect rtl/npu/npu_core.sv \
+python3 dv/scripts/cov_report.py "$B"/cov_*.dat --by-module --rtl "^(rtl/(npu/(npu_pe_mac|npu_mma|npu_gemm_cu|npu_l2_xbar|npu_core)|common/clock_gate)|$B/fsm_)" --expect rtl/npu/npu_pe_mac.sv --expect rtl/npu/npu_pe_mac.sv rtl/npu/npu_mma.sv --expect rtl/npu/npu_gemm_cu.sv --expect rtl/npu/npu_l2_xbar.sv --expect rtl/npu/npu_core.sv \
   --waivers "$W" --require 100 --list "${LIST:-40}" || fail=1
 echo "=== functional coverage (covergroup) + SVA cover (user)"
 python3 dv/scripts/cov_report.py "$B"/cov_*.dat --by-module --rtl '^dv/npu/npu_(mma|gemm_cu|l2_xbar|core)_sva' --types covergroup,user \

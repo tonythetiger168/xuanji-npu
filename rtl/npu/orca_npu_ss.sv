@@ -126,6 +126,7 @@ module orca_npu_ss
     .cmd_a_line(head.a), .cmd_b_line(head.b), .cmd_c_line(head.c), .cmd_k(head.k),
     .cmd_a_signed(head.sa), .cmd_b_signed(head.sb), .cmd_acc(head.ext[0]),   // GEMM: ext[0] = 累加 (C += A × B)
     .cmd_mx(head.ext[1]), .cmd_s_line(head.ext[27:2]),                       // GEMM: ext[1] = MX 區塊比例, ext[27:2] = 比例 line
+    .cmd_fp(head.ext[28]), .cmd_bf(head.ext[29]),                            // GEMM: ext[28] = 浮點 (FP8), ext[29] = BF16 (v6.3.16)
     .cpl_valid(c_cpl_valid), .cpl_ready(c_cpl_ready), .cpl_id(c_cpl_id),
     .h_rd_req(h_rd_req), .h_rd_line(h_rd_line), .h_rd_gnt(h_rd_gnt), .h_rd_data(h_rd_data),
     .h_wr_req(h_wr_req), .h_wr_line(h_wr_line), .h_wr_data(h_wr_data), .h_wr_gnt(h_wr_gnt),

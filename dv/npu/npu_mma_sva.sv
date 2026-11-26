@@ -15,8 +15,9 @@ module npu_mma_sva #(parameter int N = 8) (
   input logic go, fire_in, fire_last, sgn_a, sgn_b,
   input logic [N-1:0] a_tok_edge, b_tok_edge, row_act,
   input logic [N-1:0][N-1:0] tok_q,
-  input logic [N-1:0][N-1:0][3:0] fl_q,
-  input logic [N-1:0][3:0] fl_edge,
+  input logic [N-1:0][N-1:0][6:0] fl_q,          // {f, l, sa, sb, fp, bf, h}
+  input logic [N-1:0][6:0] fl_edge,
+  input logic m_fp, m_bf, hb,
   input logic [N-1:0][N-1:0][31:0] res
 );
   localparam int RW = $clog2(N);
@@ -65,7 +66,7 @@ module npu_mma_sva #(parameter int N = 8) (
   // 其他 token 屬於下一個 tile)
   for (genvar r = 0; r < N; r++) begin : g_dr
     for (genvar c = 0; c < N; c++) begin : g_dc
-      a_drained: assert property (ost == O_OUT |-> !(tok_q[r][c] && fl_q[r][c][2]));
+      a_drained: assert property (ost == O_OUT |-> !(tok_q[r][c] && fl_q[r][c][5]));
     end
   end
   // 只有 RUN 會產生 token; 輸出端只因 last 握手離開閒置; last 握手時輸出端必閒置 (res 不被覆蓋)
@@ -104,6 +105,12 @@ module npu_mma_sva #(parameter int N = 8) (
     else if (go) kcnt <= 0;
     else if (fire_in) kcnt <= kcnt + 1;
 
+  // v6.3.16 浮點格式: BF16 的高 / 低位元組步驟交替 (每個 tile 從低位元組開始), 非 BF16 時恆為 0
+  a_hb_only_bf: assert property (disable iff (!rst_n) !m_bf |-> !hb);
+  a_hb_start:   assert property (disable iff (!rst_n || rst_seen) go |=> !hb);
+  a_hb_toggle:  assert property (disable iff (!rst_n || rst_seen) !go && fire_in && m_bf |=> hb != $past(hb));
+  a_bf_fp:      assert property (disable iff (!rst_n) m_bf |-> m_fp);
+
   covergroup cg_tile @(posedge clk iff (rst_n && fire_in && in_last));
     cp_k: coverpoint kcnt + 1 {
       bins one = {1}; bins lt_n = {[2:N-1]}; bins eq_n = {N}; bins le_2n = {[N+1:2*N]};
@@ -112,6 +119,11 @@ module npu_mma_sva #(parameter int N = 8) (
     cp_sgn: coverpoint {sgn_a, sgn_b};
     cp_te:  coverpoint test_en;
     x_k_sgn: cross cp_k, cp_sgn;
+    cp_fmt: coverpoint {m_fp, m_bf} { bins int8 = {2'b00}; bins fp8 = {2'b10}; bins bf16 = {2'b11}; }
+    cp_odd: coverpoint kcnt[0];                    // 步數 = kcnt + 1: kcnt[0] = 0 → 奇數步 (BF16 最後一步是低位元組)
+    x_k_fmt: cross cp_k, cp_fmt;
+    x_odd_fmt: cross cp_odd, cp_fmt;
+    x_fp8: cross cp_fmt, cp_sgn { ignore_bins nfp = binsof(cp_fmt) intersect {2'b00, 2'b11}; }   // E4M3 / E5M2 的四種組合
   endgroup
 
   // 運算元邊界值 (以第 0 / 最後一個 lane 取樣), 與有號 / 無號交叉
