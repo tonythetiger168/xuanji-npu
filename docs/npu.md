@@ -83,7 +83,7 @@ npu_core 加上命令前端與 DMA, 成為可以直接下命令的子系統 (由
 
 | 命令 | 動作 |
 |---|---|
-| `GEMM` | C = A × B (INT8 → INT32, 資料已在 L2); ext[0] = 1 (v6.3.14) 時 **C += A × B** (累加, 見下「GEMM 累加」); ext[1] = 1 (v6.3.15) 時 **MX 區塊比例**: C 為 FP32, 比例 line = ext[27:2] (見下「GEMM MX 區塊比例」); K = 0 時只回報完成 |
+| `GEMM` | C = A × B (INT8 → INT32, 資料已在 L2); ext[0] = 1 (v6.3.14) 時 **C += A × B** (累加, 見下「GEMM 累加」); ext[1] = 1 (v6.3.15) 時 **MX 區塊比例**: C 為 FP32, 比例 line = ext[27:2] (見下「GEMM MX 區塊比例」); ext[28] = 1 (v6.3.16) 時 **浮點** (FP8, sa / sb 選 E4M3 / E5M2; ext[29] = 1 為 BF16), C 為 FP32 (見下「GEMM 浮點格式」); K = 0 時只回報完成 |
 | `DMA_LD` / `DMA_ST` | 外部記憶體 → L2 / L2 → 外部記憶體, k 個 line (k = 0 時立即完成); 位址模數環繞。2D (v6.3.11): b[15:0] = 每列 line 數 (0 = 1D), c = 外部列距 (line) — 第 i 個 line 的外部位址 = ext + (i / cols) × c + i % cols, L2 端連續。載入時解碼 (v6.3.13, 只對 LD): b[17:16] = 0 COPY / 1 INT4 / 2 UINT4 / 3 MXFP4。間接 gather / scatter (v6.3.13): b[18] = 1, c = 位址表的 L2 line, b[15:0] = 每項 line 數; 見下方「DMA 引擎 npu_dma」 |
 | `VEC` (op 4) | 執行 L2 line `a` 起的 `k` 個向量指令 (每 line 4 個; `docs/npu_vec.md`); k = 0 時只回報完成; 遇到非法指令時 `vec_err` 一拍 |
 | `KV` (op 5, v6.3.13) | paged KV cache 頁管理 (ALLOC / FREE / FREE_SEQ / SHARE) 與 MAP (區塊表 → 間接 DMA 的位址表); 欄位與結果見 `docs/npu_llm.md` |
@@ -310,6 +310,31 @@ C[i][j] = float(Σₖ A[i][k] × B[k][j]) × 2^(sa[i] + sb[j] − 254)　(ext[0]
   `npu_ss_tb` 約 1/4 ~ 1/3 的 GEMM 為 MX (比例多數在 100..154, 另含極值與 0xFF, 舊 C 含隨機位元); SVA: 每個 MX 命令
   在第一個 C 寫回前恰讀一次比例 line、讀的位址正確、take 之後的狀態、讀取埠請求只在 W_RD / W_SC;
   covergroup: lane 結果類別 (inf / 0 / NaN / 負 / 全正規) × 累加; mutation 見 `run_npu_mutation.sh`。
+
+### GEMM 浮點格式 (v6.3.16, `ext[28]` / `ext[29]`, `npu_core.cmd_fp` / `cmd_bf`)
+
+LLM 推論與微調常用 FP8 (E4M3 權重 / 啟動值, E5M2 梯度) 與 BF16。GEMM 設 ext[28] = 1 時陣列以浮點運算, C 為 FP32:
+
+C[i][j] = (((p₀ + p₁) + p₂) + …)　p_k = A[i][k] × B[k][j] 的精確乘積 (FP32), 依 k 的順序以 FP32 加法 (RNE) 累加
+
+| ext[29] | 格式 | 運算元 | K 欄位 |
+|---|---|---|---|
+| 0 | FP8 (OCP MX v1.0) | sa / sb 各選 A / B 的子格式: 0 = E4M3 (bias 7, 只有 S.1111.111 為 NaN, 無 inf), 1 = E5M2 (IEEE 式) | 元素數 |
+| 1 | BF16 | byte-planar: 每個 k 先放 N 個低位元組、再放 N 個高位元組 (與 INT8 相同的 line 排列, 只是步數加倍) | 2 × 元素數 |
+
+- 乘積: FP8 次正規數精確 (同向量核的 FP8 解碼); BF16 輸入 DAZ。乘積的有效位數 ≤ 16 bit, 以 FP32 表示時精確;
+  小於最小正規數 → ±0 (FTZ), 溢位 → ±inf; 任一為 NaN 或 inf × 0 → qNaN 0x7FC00000; 0 的符號 = 兩者符號 xor。
+- 累加: `fp_add` (DAZ / FTZ / RNE)。每個 PE 在 INT8 乘法器之外另有 8×8 有效位數乘法器、指數加法、正規化與一個 `fp_add`
+  (`rtl/npu/npu_pe_mac.sv`; 面積 / 時序尚未評估)。
+  與 INT8 不同, 浮點累加的結果與 k 的順序有關; 軟體把長 K 切成多個累加命令時, 順序就是命令順序。
+- BF16 奇數步: 最後一步只有低位元組時以 {0x00, 低位元組} 運算 (= ±0, 不影響結果, 但 -0 + +0 → +0)。
+- 與其他模式並用: ext[0] 累加 (舊 C 為 FP32, FP32 相加); ext[1] MX 比例 (MXFP8: 不做 INT → FP 轉換, 直接把 FP32 乘上
+  2^(sa + sb − 254); inf / NaN 不變)。
+- 吞吐量: FP8 與 INT8 相同 (每拍 N² 個 MAC); BF16 每元素兩步, 為一半 (L2 頻寬相同)。
+- 驗證: `npu_pe_mac_tb` 窮舉 INT8 / FP8 的所有位元組對 (含四種子格式組合) + 隨機 BF16 / 累加 / 乘積指數邊界, 參考
+  `dv/npu/npu_fp_ref.svh` (real 求值 + double 精確乘積, 累加用與 `fp_ref.py` 比對過的 `mx_add`); `npu_mma_tb` /
+  `npu_gemm_cu_tb` / `npu_core_tb` / `npu_ss_tb` 約 1/4 ~ 1/2 的命令為浮點 (含 BF16 奇數步、MX、累加); SVA: BF16 高 / 低位元組
+  步驟交替且每個 tile 從低位元組開始; covergroup: 格式 × K、奇偶步、FP8 子格式組合、FP32 結果類別 (inf / ±0 / NaN / 負)。
 
 ### npu_mma 資料流
 

@@ -29,7 +29,7 @@ endfunction
 function automatic logic [31:0] mx_scale(logic [31:0] x, logic [7:0] ea, logic [7:0] eb);
   int e;
   if (ea == 8'hFF || eb == 8'hFF) return 32'h7FC0_0000;
-  if (x[30:23] == 8'd0) return x;                                         // x = mx_i2f 的結果: 0 只會是 +0
+  if (x[30:23] == 8'd0 || x[30:23] == 8'hFF) return x;                   // 0 / inf / NaN 不變 (整數命令只會有 +0)
   e = int'(x[30:23]) + int'(ea) + int'(eb) - 254;
   if (e > 254) return {x[31], 8'hFF, 23'd0};
   if (e < 1)   return {x[31], 31'd0};
@@ -67,12 +67,15 @@ function automatic logic [31:0] mx_add(logic [31:0] a, logic [31:0] b);
 endfunction
 // 一個元素: INT32 的 A×B 結果 → FP32 × 比例 (+ 舊的 C)
 // 邊界比例: 讓部分和 p 縮放後的指數落在 t (例: 0 / 1 下溢邊界, 254 / 255 溢位邊界); p = 0 或比例超出 0..254 時回傳 0
-function automatic bit mx_edge_sc(logic [31:0] p, int t, output logic [7:0] ea, output logic [7:0] eb);
-  int fe = int'(mx_i2f(p) >> 23) & 255, a;
+function automatic bit mx_edge_sc_f(logic [31:0] f, int t, output logic [7:0] ea, output logic [7:0] eb);   // f: FP32
+  int fe = int'(f >> 23) & 255, a;
   eb = (t < 128) ? 8'd0 : 8'd254;
   a = t + 254 - fe - int'(eb);
   ea = 8'(a);
-  return fe != 0 && a >= 0 && a <= 254;
+  return fe != 0 && fe != 255 && a >= 0 && a <= 254;
+endfunction
+function automatic bit mx_edge_sc(logic [31:0] p, int t, output logic [7:0] ea, output logic [7:0] eb);       // p: INT32
+  return mx_edge_sc_f(mx_i2f(p), t, ea, eb);
 endfunction
 function automatic logic [31:0] mx_elem(logic [31:0] p, logic [7:0] ea, logic [7:0] eb, bit acc, logic [31:0] old);
   logic [31:0] g = mx_scale(mx_i2f(p), ea, eb);

@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-// Xuanji (原 ORCA v6.3) - NPU 矩陣乘法引擎 (v6.3.7; v6.3.12 tile 管線化)
+// Xuanji (原 ORCA v6.3) - NPU 矩陣乘法引擎 (v6.3.7; v6.3.12 tile 管線化; v6.3.16 FP8 / BF16)
 `include "npu_pkg.sv"
 
 // npu_mma: N×N output-stationary systolic INT8 GEMM tile, C[N][N] (INT32) = A[N][K] × B[K][N]
+// v6.3.16: 浮點格式 (start 時 fp / bf): FP8 E4M3 / E5M2 (a_signed / b_signed 選子格式) 與 BF16, 結果為 FP32,
+//   每個 PE 依 k 的順序以 FP32 (fp_add, RNE) 累加精確乘積; 乘加邏輯在 npu_pe_mac。BF16 每元素兩步 (先低位元組、
+//   再高位元組; 位元組流與 INT8 相同, K 計的是步數)。
 //
 // 取代原 npu_pe / npu_systolic 的運算核心 (原設計在 weight-stationary 模式下權重從未載入,
 // 乘積恆為 0; activation / 權重沒有 skew, 部分和輸入被忽略 — 無法算出 GEMM)。
@@ -28,7 +31,8 @@ module npu_mma
   input  logic test_en,                        // DFT: 強制開啟所有 ICG
   // 控制
   input  logic start,                          // 只在 in_idle=1 時有效
-  input  logic a_signed, b_signed,             // 本 tile 的 A / B 是否為有號 INT8
+  input  logic a_signed, b_signed,             // 本 tile 的 A / B 是否為有號 INT8 (FP8 時: 1 = E5M2, 0 = E4M3)
+  input  logic fp, bf,                         // v6.3.16: 1 = 浮點 (FP32 累加), bf = 1: BF16 (byte-planar, 每元素兩步), 否則 FP8
   output logic busy,                           // 輸入或輸出端還有 tile
   output logic in_idle,                        // 輸入端閒置: 可以 start 下一個 tile
   // 輸入串流: A 的一欄 + B 的一列
@@ -54,6 +58,7 @@ module npu_mma
   ist_t ist;
   ost_t ost;
   logic sgn_a, sgn_b, first;
+  logic m_fp, m_bf, hb;                        // 本 tile 的格式; hb: BF16 下一步是高位元組
   logic [DW-1:0] drain_cnt;
 
   assign busy      = (ist != I_IDLE) || (ost != O_IDLE);
@@ -69,10 +74,12 @@ module npu_mma
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
       ist <= I_IDLE; ost <= O_IDLE; sgn_a <= 1'b0; sgn_b <= 1'b0; first <= 1'b0; drain_cnt <= '0; out_row <= '0;
+      m_fp <= 1'b0; m_bf <= 1'b0; hb <= 1'b0;
     end else begin
-      if (go) begin ist <= I_RUN; sgn_a <= a_signed; sgn_b <= b_signed; first <= 1'b1; end
+      if (go) begin ist <= I_RUN; sgn_a <= a_signed; sgn_b <= b_signed; first <= 1'b1; m_fp <= fp; m_bf <= fp && bf; hb <= 1'b0; end
       else if (fire_in) begin
         first <= 1'b0;
+        hb <= m_bf && !hb;
         if (in_last) ist <= I_IDLE;
       end
       unique case (ost)
@@ -90,9 +97,9 @@ module npu_mma
     end
   end
 
-  // token 旗標: {first, last, a 有號, b 有號}; 與 token 一起經過 skew 與 PE 陣列 (沿列向右傳遞)
-  typedef struct packed { logic f, l, sa, sb; } tfl_t;
-  wire tfl_t fl_in = '{f: first, l: in_last, sa: sgn_a, sb: sgn_b};
+  // token 旗標: {first, last, a 有號, b 有號, 浮點, BF16, BF16 高位元組}; 與 token 一起經過 skew 與 PE 陣列 (沿列向右傳遞)
+  typedef struct packed { logic f, l, sa, sb, fp, bf, h; } tfl_t;
+  wire tfl_t fl_in = '{f: first, l: in_last, sa: sgn_a, sb: sgn_b, fp: m_fp, bf: m_bf, h: hb};
 
   // ---------------- 輸入 skew: 第 i 列 / 第 j 欄延遲 i / j 拍 ----------------
   // a_skew[i] / b_skew[j]: 進入陣列邊緣的資料與 token (列端另帶旗標)
@@ -151,18 +158,24 @@ module npu_mma
       else        begin : g_lc assign a_in = a_q[r][c-1];  assign t_in = tok_q[r][c-1]; assign f_in = fl_q[r][c-1]; end
       if (r == 0) begin : g_t  assign b_in = b_edge[c];    end
       else        begin : g_tc assign b_in = b_q[r-1][c];  end
-      wire signed [8:0]  ax = {f_in.sa & a_in[7], a_in};
-      wire signed [8:0]  bx = {f_in.sb & b_in[7], b_in};
-      wire signed [17:0] prod = ax * bx;
-      wire [31:0] sum = (f_in.f ? 32'd0 : acc[r][c]) + 32'(prod);
+      // BF16: 低位元組步驟 (h = 0) 只鎖存 A / B 的低位元組與 first, 下一個 (高位元組) 步驟才乘加 (更新 acc);
+      // 最後一步是低位元組 (奇數步) 時結果仍取自本拍的 sum (運算元 = {0x00, 低位元組} = ±0)
+      logic [7:0] a_lo, b_lo;
+      logic       f_lo;
+      wire        mac = !f_in.bf || f_in.h;
+      logic [31:0] sum;
+      npu_pe_mac u_mac (.a(a_in), .b(b_in), .a_lo(a_lo), .b_lo(b_lo), .sa(f_in.sa), .sb(f_in.sb), .fp(f_in.fp), .bf(f_in.bf),
+                        .h(f_in.h), .first(f_in.h ? f_lo : f_in.f), .acc(acc[r][c]), .sum(sum));
       always_ff @(posedge gclk or negedge rst_n) begin
         if (!rst_n) begin
           a_q[r][c] <= '0; b_q[r][c] <= '0; tok_q[r][c] <= 1'b0; fl_q[r][c] <= '0; acc[r][c] <= '0; res[r][c] <= '0;
+          a_lo <= '0; b_lo <= '0; f_lo <= 1'b0;
         end else begin
           tok_q[r][c] <= t_in;
           if (t_in) begin                        // 資料只在有 token 時更新
             a_q[r][c] <= a_in; b_q[r][c] <= b_in; fl_q[r][c] <= f_in;
-            acc[r][c] <= sum;
+            if (mac) acc[r][c] <= sum;
+            else begin a_lo <= a_in; b_lo <= b_in; f_lo <= f_in.f; end
             if (f_in.l) res[r][c] <= sum;
           end
         end

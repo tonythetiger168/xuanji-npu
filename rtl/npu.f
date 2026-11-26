@@ -15,6 +15,7 @@ rtl/fp/fp_from_int.sv
 rtl/npu/npu_rr_lock.sv
 rtl/npu/npu_l2_arb2.sv
 rtl/npu/npu_l2_xbar.sv
+rtl/npu/npu_pe_mac.sv
 rtl/npu/npu_mma.sv
 rtl/npu/npu_gemm_cu.sv
 rtl/npu/npu_core.sv

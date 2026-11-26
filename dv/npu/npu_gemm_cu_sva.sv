@@ -17,7 +17,7 @@ module npu_gemm_cu_sva #(parameter int N = 8,
   input logic [2:0] wst,
   input logic pend, lr, take, feed_last,
   input logic cmd_acc, x_w, w_rq, w_sel, w_gnt, lk_f, f_rq0,
-  input logic cmd_mx, m_w, m_pend,
+  input logic cmd_mx, m_w, m_pend, p_w,
   input logic [25:0] c_ptr, s_w,
   input logic [15:0] k_left,
   input logic [$clog2((65535 + 64 / N - 1) / (64 / N) + 1)-1:0] fa, fb,
@@ -168,7 +168,8 @@ module npu_gemm_cu_sva #(parameter int N = 8,
     cp_ovl: coverpoint {fst, pend} { bins none = {2'b00}; bins feeding = {2'b10}; bins pending = {2'b01}; bins both = {2'b11}; }
     cp_acc: coverpoint x_w { bins plain = {1'b0}; bins acc = {1'b1}; }
     cp_mx:  coverpoint m_w { bins int32 = {1'b0}; bins mx = {1'b1}; }
-    x_acc_mx: cross cp_acc, cp_mx;
+    cp_fp:  coverpoint p_w { bins int8 = {1'b0}; bins fp = {1'b1}; }
+    x_acc_mx: cross cp_acc, cp_mx, cp_fp;
   endgroup
   // MX 寫回的 FP32 結果類別 (任一 lane): 溢位 → inf、FTZ / 相消 → 0、NaN、負數、正規數
   logic [15:0] l_inf, l_zero, l_nan, l_neg, l_norm;
@@ -188,6 +189,22 @@ module npu_gemm_cu_sva #(parameter int N = 8,
     cp_norm: coverpoint (l_norm == '1) { bins all = {1'b1}; }
     cp_acc:  coverpoint x_w;
   endgroup
+  // v6.3.16 浮點命令的 FP32 結果類別 (含 -0: 例如負乘積與 -0 相加、FTZ 的負數)
+  logic [15:0] l_nz;
+  for (genvar e = 0; e < 16; e++) begin : g_nz
+    assign l_nz[e] = wr_data[32 * e +: 32] == 32'h8000_0000;
+  end
+  covergroup cg_fp @(posedge clk iff (rst_n && wr_req && wr_gnt && p_w));
+    cp_inf:  coverpoint (l_inf != '0)  { bins yes = {1'b1}; }
+    cp_zero: coverpoint (l_zero != '0) { bins yes = {1'b1}; }
+    cp_nz:   coverpoint (l_nz != '0)   { bins yes = {1'b1}; }
+    cp_nan:  coverpoint (l_nan != '0)  { bins yes = {1'b1}; }
+    cp_neg:  coverpoint (l_neg != '0)  { bins yes = {1'b1}; }
+    cp_norm: coverpoint (l_norm == '1) { bins all = {1'b1}; }
+    cp_acc:  coverpoint x_w;
+    cp_mx:   coverpoint m_w;
+  endgroup
+  cg_fp  u_cg_fp  = new;
   cg_cmd u_cg_cmd = new;
   cg_buf u_cg_buf = new;
   cg_wr  u_cg_wr  = new;
